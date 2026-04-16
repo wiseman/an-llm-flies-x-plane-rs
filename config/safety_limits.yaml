@@ -1,0 +1,8 @@
+max_bank_enroute_deg: 25
+max_bank_pattern_deg: 20
+max_bank_final_deg: 20
+max_pitch_up_deg: 12
+max_pitch_down_deg: 10
+min_stall_margin: 1.2
+unstable_sink_rate_fpm: 900
+unstable_centerline_error_ft: 100

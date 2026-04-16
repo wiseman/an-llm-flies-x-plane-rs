@@ -1,0 +1,22 @@
+aircraft: c172
+vr_kt: 55
+vx_kt: 62
+vy_kt: 74
+cruise_altitude_ft: 3000
+cruise_speed_kt: 95
+descent_speed_kt: 85
+downwind_speed_kt: 80
+base_speed_kt: 70
+final_speed_kt: 65
+vapp_kt: 65
+vref_kt: 61
+vso_landing_kt: 48
+pattern:
+  altitude_agl_ft: 1000
+  downwind_offset_ft: 3500
+  abeam_window_ft: 750
+  default_extension_ft: 0
+flare:
+  roundout_height_ft: 20
+  flare_start_ft: 10
+  max_flare_pitch_deg: 9

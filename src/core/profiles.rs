@@ -1,0 +1,933 @@
+//! Guidance profiles composed by `PilotCore`. Mirrors core/profiles.py.
+//!
+//! Each profile owns a set of axes (lateral / vertical / speed) and emits a
+//! `ProfileContribution` per tick. `PilotCore` merges per-axis contributions
+//! from all active profiles into a single `GuidanceTargets`. The LLM engages
+//! profiles; axis-ownership conflicts auto-displace older profiles.
+//!
+//! Unlike the Python version where `PatternFlyProfile.contribute()` can
+//! directly call `pilot.engage_profile(...)` to swap itself for three
+//! single-axis holds mid-tick, Rust profiles return a `hand_off` request and
+//! `PilotCore` applies the swap after all contributions are collected. That
+//! avoids reentrant `&mut` borrows on the pilot from inside one of its
+//! profiles.
+
+use std::collections::BTreeSet;
+
+use crate::config::ConfigBundle;
+use crate::core::mode_manager::ModeManager;
+use crate::core::safety_monitor::SafetyMonitor;
+use crate::guidance::lateral::L1PathFollower;
+use crate::guidance::pattern_manager::{
+    build_pattern_geometry, glidepath_target_altitude_ft_default, PatternGeometry,
+};
+use crate::guidance::route_manager::RouteManager;
+use crate::guidance::runway_geometry::RunwayFrame;
+use crate::types::{
+    clamp, wrap_degrees_180, wrap_degrees_360, AircraftState, FlightPhase, Glidepath,
+    GuidanceTargets, LateralMode, StraightLeg, TrafficSide, VerticalMode, Waypoint,
+};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Axis {
+    Lateral,
+    Vertical,
+    Speed,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ProfileContribution {
+    pub lateral_mode: Option<LateralMode>,
+    pub vertical_mode: Option<VerticalMode>,
+    pub target_bank_deg: Option<f64>,
+    pub target_heading_deg: Option<f64>,
+    pub target_track_deg: Option<f64>,
+    pub target_path: Option<StraightLeg>,
+    pub target_waypoint: Option<Waypoint>,
+    pub target_altitude_ft: Option<f64>,
+    pub target_speed_kt: Option<f64>,
+    pub target_pitch_deg: Option<f64>,
+    pub glidepath: Option<Glidepath>,
+    pub throttle_limit: Option<(f64, f64)>,
+    pub flaps_cmd: Option<i32>,
+    pub gear_down: Option<bool>,
+    pub brakes: Option<f64>,
+    pub tecs_phase_override: Option<FlightPhase>,
+}
+
+/// Returned by each profile's `contribute()`.
+pub struct ProfileTick {
+    pub contribution: ProfileContribution,
+    /// If set, `PilotCore` will engage these profiles after all contributions
+    /// are merged — used by `PatternFlyProfile`'s handoff to the three holds.
+    pub hand_off: Option<Vec<Box<dyn GuidanceProfile>>>,
+}
+
+impl ProfileTick {
+    pub fn contribution_only(c: ProfileContribution) -> Self {
+        Self { contribution: c, hand_off: None }
+    }
+}
+
+pub trait GuidanceProfile: Send {
+    fn name(&self) -> &'static str;
+    fn owns(&self) -> BTreeSet<Axis>;
+    fn contribute(&mut self, state: &AircraftState, dt: f64) -> ProfileTick;
+
+    /// For `PatternFlyProfile` observers that want to expose extra metadata on
+    /// the `StatusSnapshot`. Default: no extras.
+    fn pattern_metadata(&self) -> Option<PatternMetadata> {
+        None
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct PatternMetadata {
+    pub last_go_around_reason: Option<String>,
+    pub airport_ident: Option<String>,
+    pub runway_id: Option<String>,
+    pub field_elevation_ft: Option<f64>,
+    pub phase: FlightPhase,
+}
+
+// ---------- idle profiles ----------
+
+pub struct IdleLateralProfile;
+impl GuidanceProfile for IdleLateralProfile {
+    fn name(&self) -> &'static str { "idle_lateral" }
+    fn owns(&self) -> BTreeSet<Axis> { single(Axis::Lateral) }
+    fn contribute(&mut self, _: &AircraftState, _: f64) -> ProfileTick {
+        ProfileTick::contribution_only(ProfileContribution {
+            lateral_mode: Some(LateralMode::BankHold),
+            target_bank_deg: Some(0.0),
+            ..Default::default()
+        })
+    }
+}
+
+pub struct IdleVerticalProfile;
+impl GuidanceProfile for IdleVerticalProfile {
+    fn name(&self) -> &'static str { "idle_vertical" }
+    fn owns(&self) -> BTreeSet<Axis> { single(Axis::Vertical) }
+    fn contribute(&mut self, _: &AircraftState, _: f64) -> ProfileTick {
+        ProfileTick::contribution_only(ProfileContribution {
+            vertical_mode: Some(VerticalMode::PitchHold),
+            target_pitch_deg: Some(0.0),
+            throttle_limit: Some((0.0, 0.0)),
+            ..Default::default()
+        })
+    }
+}
+
+pub struct IdleSpeedProfile {
+    pub default_speed_kt: f64,
+}
+impl IdleSpeedProfile {
+    pub fn new(default_speed_kt: f64) -> Self { Self { default_speed_kt } }
+}
+impl GuidanceProfile for IdleSpeedProfile {
+    fn name(&self) -> &'static str { "idle_speed" }
+    fn owns(&self) -> BTreeSet<Axis> { single(Axis::Speed) }
+    fn contribute(&mut self, _: &AircraftState, _: f64) -> ProfileTick {
+        ProfileTick::contribution_only(ProfileContribution {
+            target_speed_kt: Some(self.default_speed_kt),
+            ..Default::default()
+        })
+    }
+}
+
+// ---------- single-axis holds ----------
+
+pub struct HeadingHoldProfile {
+    pub heading_deg: f64,
+    pub max_bank_deg: f64,
+    pub direction_lock: Option<String>,
+}
+
+impl HeadingHoldProfile {
+    pub fn new(heading_deg: f64, max_bank_deg: f64, turn_direction: Option<&str>) -> Result<Self, String> {
+        let normalized = turn_direction.and_then(|d| {
+            let lower = d.to_ascii_lowercase();
+            if lower.is_empty() { None } else { Some(lower) }
+        });
+        if let Some(d) = &normalized {
+            if d != "left" && d != "right" {
+                return Err(format!("turn_direction must be None, 'left', or 'right'; got {:?}", d));
+            }
+        }
+        Ok(Self {
+            heading_deg: heading_deg.rem_euclid(360.0),
+            max_bank_deg,
+            direction_lock: normalized,
+        })
+    }
+}
+
+impl GuidanceProfile for HeadingHoldProfile {
+    fn name(&self) -> &'static str { "heading_hold" }
+    fn owns(&self) -> BTreeSet<Axis> { single(Axis::Lateral) }
+    fn contribute(&mut self, state: &AircraftState, _dt: f64) -> ProfileTick {
+        let raw_error = (self.heading_deg - state.track_deg).rem_euclid(360.0);
+        let short_error = if raw_error > 180.0 { raw_error - 360.0 } else { raw_error };
+        if short_error.abs() < 5.0 {
+            self.direction_lock = None;
+        }
+        let effective_error = match self.direction_lock.as_deref() {
+            Some("right") => if raw_error > 0.0 { raw_error } else { 0.0 },
+            Some("left") => if raw_error > 0.0 { raw_error - 360.0 } else { 0.0 },
+            _ => short_error,
+        };
+        let target_bank = clamp(effective_error * 0.35, -self.max_bank_deg, self.max_bank_deg);
+        ProfileTick::contribution_only(ProfileContribution {
+            lateral_mode: Some(LateralMode::TrackHold),
+            target_track_deg: Some(self.heading_deg),
+            target_heading_deg: Some(self.heading_deg),
+            target_bank_deg: Some(target_bank),
+            ..Default::default()
+        })
+    }
+}
+
+const ALT_HOLD_CAPTURE_BAND_FT: f64 = 150.0;
+const PATTERN_CLIMB_CAPTURE_BAND_FT: f64 = 150.0;
+
+pub struct AltitudeHoldProfile {
+    pub altitude_ft: f64,
+}
+
+impl AltitudeHoldProfile {
+    pub fn new(altitude_ft: f64) -> Self { Self { altitude_ft } }
+}
+
+impl GuidanceProfile for AltitudeHoldProfile {
+    fn name(&self) -> &'static str { "altitude_hold" }
+    fn owns(&self) -> BTreeSet<Axis> { single(Axis::Vertical) }
+    fn contribute(&mut self, state: &AircraftState, _dt: f64) -> ProfileTick {
+        let error = self.altitude_ft - state.alt_msl_ft;
+        let c = if error > ALT_HOLD_CAPTURE_BAND_FT {
+            ProfileContribution {
+                vertical_mode: Some(VerticalMode::Tecs),
+                target_altitude_ft: Some(self.altitude_ft),
+                throttle_limit: Some((0.7, 1.0)),
+                tecs_phase_override: Some(FlightPhase::EnrouteClimb),
+                ..Default::default()
+            }
+        } else if error < -ALT_HOLD_CAPTURE_BAND_FT {
+            ProfileContribution {
+                vertical_mode: Some(VerticalMode::Tecs),
+                target_altitude_ft: Some(self.altitude_ft),
+                throttle_limit: Some((0.1, 0.5)),
+                tecs_phase_override: Some(FlightPhase::Descent),
+                ..Default::default()
+            }
+        } else {
+            ProfileContribution {
+                vertical_mode: Some(VerticalMode::Tecs),
+                target_altitude_ft: Some(self.altitude_ft),
+                throttle_limit: Some((0.1, 0.9)),
+                ..Default::default()
+            }
+        };
+        ProfileTick::contribution_only(c)
+    }
+}
+
+pub struct SpeedHoldProfile {
+    pub speed_kt: f64,
+}
+
+impl SpeedHoldProfile {
+    pub fn new(speed_kt: f64) -> Self { Self { speed_kt } }
+}
+
+impl GuidanceProfile for SpeedHoldProfile {
+    fn name(&self) -> &'static str { "speed_hold" }
+    fn owns(&self) -> BTreeSet<Axis> { single(Axis::Speed) }
+    fn contribute(&mut self, _: &AircraftState, _: f64) -> ProfileTick {
+        ProfileTick::contribution_only(ProfileContribution {
+            target_speed_kt: Some(self.speed_kt),
+            ..Default::default()
+        })
+    }
+}
+
+// ---------- guidance builders shared by takeoff/pattern profiles ----------
+
+pub fn build_takeoff_roll_guidance(config: &ConfigBundle, runway_frame: &RunwayFrame) -> GuidanceTargets {
+    GuidanceTargets {
+        lateral_mode: LateralMode::RolloutCenterline,
+        vertical_mode: VerticalMode::PitchHold,
+        target_bank_deg: Some(0.0),
+        target_heading_deg: Some(runway_frame.runway.course_deg),
+        target_pitch_deg: Some(0.0),
+        target_speed_kt: Some(config.performance.vr_kt),
+        throttle_limit: Some((1.0, 1.0)),
+        flaps_cmd: Some(10),
+        ..Default::default()
+    }
+}
+
+pub fn build_rotate_guidance(
+    config: &ConfigBundle,
+    runway_frame: &RunwayFrame,
+    state: &AircraftState,
+    bank_limit_deg: f64,
+) -> GuidanceTargets {
+    let target_course = runway_frame.runway.course_deg;
+    if state.on_ground {
+        return GuidanceTargets {
+            lateral_mode: LateralMode::RolloutCenterline,
+            vertical_mode: VerticalMode::PitchHold,
+            target_bank_deg: Some(0.0),
+            target_heading_deg: Some(target_course),
+            target_track_deg: Some(target_course),
+            target_pitch_deg: Some(8.0),
+            target_speed_kt: Some(config.performance.vy_kt),
+            throttle_limit: Some((1.0, 1.0)),
+            ..Default::default()
+        };
+    }
+    let track_error = wrap_degrees_180(target_course - state.track_deg);
+    let target_bank = clamp(track_error * 0.35, -bank_limit_deg, bank_limit_deg);
+    GuidanceTargets {
+        lateral_mode: LateralMode::TrackHold,
+        vertical_mode: VerticalMode::PitchHold,
+        target_bank_deg: Some(target_bank),
+        target_heading_deg: Some(target_course),
+        target_track_deg: Some(target_course),
+        target_pitch_deg: Some(8.0),
+        target_speed_kt: Some(config.performance.vy_kt),
+        throttle_limit: Some((1.0, 1.0)),
+        ..Default::default()
+    }
+}
+
+fn guidance_to_contribution(g: GuidanceTargets) -> ProfileContribution {
+    ProfileContribution {
+        lateral_mode: Some(g.lateral_mode),
+        vertical_mode: Some(g.vertical_mode),
+        target_bank_deg: g.target_bank_deg,
+        target_heading_deg: g.target_heading_deg,
+        target_track_deg: g.target_track_deg,
+        target_path: g.target_path,
+        target_waypoint: g.target_waypoint,
+        target_altitude_ft: g.target_altitude_ft,
+        target_speed_kt: g.target_speed_kt,
+        target_pitch_deg: g.target_pitch_deg,
+        glidepath: g.glidepath,
+        throttle_limit: g.throttle_limit,
+        flaps_cmd: g.flaps_cmd,
+        gear_down: g.gear_down,
+        brakes: Some(g.brakes),
+        tecs_phase_override: g.tecs_phase_override,
+    }
+}
+
+// ---------- takeoff profile ----------
+
+pub struct TakeoffProfile {
+    pub config: ConfigBundle,
+    pub runway_frame: RunwayFrame,
+    pub phase: FlightPhase,
+    mode_manager: ModeManager,
+    safety_monitor: SafetyMonitor,
+    pattern_stub: PatternGeometry,
+    route_stub: RouteManager,
+}
+
+impl TakeoffProfile {
+    pub fn new(config: ConfigBundle, runway_frame: RunwayFrame) -> Self {
+        let pattern_stub = build_pattern_geometry(
+            &runway_frame,
+            config.pattern.downwind_offset_ft,
+            config.pattern.default_extension_ft,
+        );
+        Self {
+            mode_manager: ModeManager::new(config.clone()),
+            safety_monitor: SafetyMonitor::new(config.clone()),
+            pattern_stub,
+            route_stub: RouteManager::new(vec![]),
+            phase: FlightPhase::Preflight,
+            config,
+            runway_frame,
+        }
+    }
+}
+
+impl GuidanceProfile for TakeoffProfile {
+    fn name(&self) -> &'static str { "takeoff" }
+    fn owns(&self) -> BTreeSet<Axis> {
+        let mut s = BTreeSet::new();
+        s.insert(Axis::Lateral);
+        s.insert(Axis::Vertical);
+        s.insert(Axis::Speed);
+        s
+    }
+    fn pattern_metadata(&self) -> Option<PatternMetadata> {
+        Some(PatternMetadata {
+            last_go_around_reason: None,
+            airport_ident: None,
+            runway_id: self.runway_frame.runway.id.clone(),
+            field_elevation_ft: Some(self.config.airport.field_elevation_ft),
+            phase: self.phase,
+        })
+    }
+    fn contribute(&mut self, state: &AircraftState, _dt: f64) -> ProfileTick {
+        let safety = self.safety_monitor.evaluate(state, self.phase);
+        self.phase = self.mode_manager.update(
+            self.phase,
+            state,
+            &self.route_stub,
+            &self.pattern_stub,
+            &safety,
+            false,
+            false,
+            false,
+            false,
+        );
+        let bank_limit = self.safety_monitor.bank_limit_deg(self.phase);
+        let guidance = match self.phase {
+            FlightPhase::TakeoffRoll => build_takeoff_roll_guidance(&self.config, &self.runway_frame),
+            FlightPhase::Rotate => build_rotate_guidance(&self.config, &self.runway_frame, state, bank_limit),
+            FlightPhase::InitialClimb | FlightPhase::EnrouteClimb | FlightPhase::Cruise => {
+                let target_course = self.runway_frame.runway.course_deg;
+                let track_error = wrap_degrees_180(target_course - state.track_deg);
+                let target_bank = clamp(track_error * 0.35, -bank_limit, bank_limit);
+                GuidanceTargets {
+                    lateral_mode: LateralMode::TrackHold,
+                    vertical_mode: VerticalMode::Tecs,
+                    target_bank_deg: Some(target_bank),
+                    target_track_deg: Some(target_course),
+                    target_heading_deg: Some(target_course),
+                    target_altitude_ft: Some(self.config.cruise_altitude_ft()),
+                    target_speed_kt: Some(self.config.performance.vy_kt),
+                    throttle_limit: Some((0.9, 1.0)),
+                    ..Default::default()
+                }
+            }
+            _ => GuidanceTargets {
+                lateral_mode: LateralMode::BankHold,
+                vertical_mode: VerticalMode::PitchHold,
+                target_bank_deg: Some(0.0),
+                target_pitch_deg: Some(0.0),
+                throttle_limit: Some((0.0, 0.0)),
+                ..Default::default()
+            },
+        };
+        let guidance = self.safety_monitor.apply_limits(guidance, self.phase);
+        ProfileTick::contribution_only(guidance_to_contribution(guidance))
+    }
+}
+
+// ---------- pattern fly profile ----------
+
+pub struct PatternFlyProfile {
+    pub config: ConfigBundle,
+    pub runway_frame: RunwayFrame,
+    pub pattern_extension_ft: f64,
+    pub turn_base_trigger: bool,
+    pub force_go_around_trigger: bool,
+    pub touch_and_go_trigger: bool,
+    pub cleared_to_land_runway: Option<String>,
+    pub phase: FlightPhase,
+    pub last_go_around_reason: Option<String>,
+    pub mode_manager: ModeManager,
+    pub safety_monitor: SafetyMonitor,
+    pub lateral_guidance: L1PathFollower,
+    pub pattern: PatternGeometry,
+    pub route_manager: RouteManager,
+    /// When set on a tick, PilotCore should swap pattern_fly out for these
+    /// three single-axis holds.
+    handoff_request: Option<Vec<Box<dyn GuidanceProfile>>>,
+}
+
+impl PatternFlyProfile {
+    pub fn new(config: ConfigBundle, runway_frame: RunwayFrame) -> Self {
+        let pattern = build_pattern_geometry(
+            &runway_frame,
+            config.pattern.downwind_offset_ft,
+            config.pattern.default_extension_ft,
+        );
+        let route = RouteManager::new(vec![Waypoint {
+            name: "pattern_entry_start".to_string(),
+            position_ft: runway_frame.to_world_frame(config.airport.mission.entry_start_runway_ft),
+            altitude_ft: Some(config.pattern_altitude_msl_ft()),
+        }]);
+        Self {
+            mode_manager: ModeManager::new(config.clone()),
+            safety_monitor: SafetyMonitor::new(config.clone()),
+            lateral_guidance: L1PathFollower::new(),
+            pattern,
+            route_manager: route,
+            pattern_extension_ft: 0.0,
+            turn_base_trigger: false,
+            force_go_around_trigger: false,
+            touch_and_go_trigger: false,
+            cleared_to_land_runway: None,
+            phase: FlightPhase::Preflight,
+            last_go_around_reason: None,
+            config,
+            runway_frame,
+            handoff_request: None,
+        }
+    }
+
+    pub fn turn_base_now(&mut self) { self.turn_base_trigger = true; }
+    pub fn go_around(&mut self) { self.force_go_around_trigger = true; }
+    pub fn execute_touch_and_go(&mut self) { self.touch_and_go_trigger = true; }
+
+    pub fn extend_downwind(&mut self, extension_ft: f64) {
+        self.pattern_extension_ft += extension_ft.max(0.0);
+        self.pattern = build_pattern_geometry(
+            &self.runway_frame,
+            self.config.pattern.downwind_offset_ft,
+            self.config.pattern.default_extension_ft + self.pattern_extension_ft,
+        );
+    }
+
+    pub fn cleared_to_land(&mut self, runway_id: Option<&str>) {
+        self.cleared_to_land_runway = runway_id
+            .map(|s| s.to_string())
+            .or_else(|| self.runway_frame.runway.id.clone());
+    }
+
+    fn rebuild_pattern(&mut self) {
+        self.pattern = build_pattern_geometry(
+            &self.runway_frame,
+            self.config.pattern.downwind_offset_ft,
+            self.config.pattern.default_extension_ft + self.pattern_extension_ft,
+        );
+    }
+
+    fn go_around_climb_settled(&self, state: &AircraftState) -> bool {
+        let alt_err = (self.config.pattern_altitude_msl_ft() - state.alt_msl_ft).abs();
+        alt_err < 100.0 && state.vs_fpm.abs() < 200.0
+    }
+
+    /// Build guidance for the current phase.
+    pub fn guidance_for_phase(&mut self, state: &AircraftState, phase: FlightPhase) -> GuidanceTargets {
+        let bank_limit = self.safety_monitor.bank_limit_deg(phase);
+        match phase {
+            FlightPhase::TakeoffRoll => build_takeoff_roll_guidance(&self.config, &self.runway_frame),
+            FlightPhase::Rotate => build_rotate_guidance(&self.config, &self.runway_frame, state, bank_limit),
+            FlightPhase::GoAround => self.go_around_guidance(state, bank_limit),
+            FlightPhase::InitialClimb => self.initial_climb_guidance(state, bank_limit),
+            FlightPhase::Crosswind => self.crosswind_guidance(state, bank_limit),
+            FlightPhase::EnrouteClimb | FlightPhase::Cruise | FlightPhase::Descent => {
+                self.enroute_guidance(state, bank_limit, phase)
+            }
+            FlightPhase::PatternEntry
+            | FlightPhase::Downwind
+            | FlightPhase::Base
+            | FlightPhase::Final => self.pattern_phase_guidance(state, bank_limit, phase),
+            FlightPhase::Roundout => self.roundout_guidance(state, bank_limit),
+            FlightPhase::Flare => self.flare_guidance(state, bank_limit),
+            FlightPhase::Rollout | FlightPhase::TaxiClear => GuidanceTargets {
+                lateral_mode: LateralMode::RolloutCenterline,
+                vertical_mode: VerticalMode::PitchHold,
+                target_bank_deg: Some(0.0),
+                target_heading_deg: Some(self.runway_frame.runway.course_deg),
+                target_pitch_deg: Some(0.0),
+                throttle_limit: Some((0.0, 0.0)),
+                brakes: 1.0,
+                ..Default::default()
+            },
+            _ => GuidanceTargets {
+                lateral_mode: LateralMode::BankHold,
+                vertical_mode: VerticalMode::PitchHold,
+                target_bank_deg: Some(0.0),
+                target_pitch_deg: Some(0.0),
+                throttle_limit: Some((0.0, 0.0)),
+                ..Default::default()
+            },
+        }
+    }
+
+    fn go_around_guidance(&self, state: &AircraftState, bank_limit: f64) -> GuidanceTargets {
+        let course = self.runway_frame.runway.course_deg;
+        let track_error = wrap_degrees_180(course - state.track_deg);
+        let bank_cmd = clamp(track_error * 0.35, -bank_limit, bank_limit);
+        let pattern_alt = self.config.pattern_altitude_msl_ft();
+        let alt_error = pattern_alt - state.alt_msl_ft;
+        let (throttle_limit, tecs_override) = if alt_error > 100.0 {
+            ((0.9, 1.0), None)
+        } else {
+            ((0.2, 0.55), Some(FlightPhase::PatternEntry))
+        };
+        GuidanceTargets {
+            lateral_mode: LateralMode::TrackHold,
+            vertical_mode: VerticalMode::Tecs,
+            target_bank_deg: Some(bank_cmd),
+            target_track_deg: Some(course),
+            target_heading_deg: Some(course),
+            target_altitude_ft: Some(pattern_alt),
+            target_speed_kt: Some(self.config.performance.vy_kt),
+            throttle_limit: Some(throttle_limit),
+            tecs_phase_override: tecs_override,
+            flaps_cmd: Some(10),
+            gear_down: Some(true),
+            ..Default::default()
+        }
+    }
+
+    fn initial_climb_guidance(&self, state: &AircraftState, bank_limit: f64) -> GuidanceTargets {
+        let course = self.runway_frame.runway.course_deg;
+        let track_error = wrap_degrees_180(course - state.track_deg);
+        let bank_cmd = clamp(track_error * 0.35, -bank_limit, bank_limit);
+        GuidanceTargets {
+            lateral_mode: LateralMode::TrackHold,
+            vertical_mode: VerticalMode::Tecs,
+            target_bank_deg: Some(bank_cmd),
+            target_track_deg: Some(course),
+            target_heading_deg: Some(course),
+            target_altitude_ft: Some(self.config.pattern_altitude_msl_ft()),
+            target_speed_kt: Some(self.config.performance.vy_kt),
+            throttle_limit: Some((0.75, 1.0)),
+            tecs_phase_override: Some(FlightPhase::EnrouteClimb),
+            ..Default::default()
+        }
+    }
+
+    fn crosswind_guidance(&self, state: &AircraftState, bank_limit: f64) -> GuidanceTargets {
+        let side_sign = match self.runway_frame.runway.traffic_side {
+            TrafficSide::Left => -1.0,
+            TrafficSide::Right => 1.0,
+        };
+        let course = self.runway_frame.runway.course_deg;
+        let crosswind_course = wrap_degrees_360(course + side_sign * 90.0);
+        let track_error = wrap_degrees_180(crosswind_course - state.track_deg);
+        let bank_cmd = clamp(track_error * 0.35, -bank_limit, bank_limit);
+        GuidanceTargets {
+            lateral_mode: LateralMode::TrackHold,
+            vertical_mode: VerticalMode::Tecs,
+            target_bank_deg: Some(bank_cmd),
+            target_track_deg: Some(crosswind_course),
+            target_heading_deg: Some(crosswind_course),
+            target_altitude_ft: Some(self.config.pattern_altitude_msl_ft()),
+            target_speed_kt: Some(self.config.performance.vy_kt),
+            throttle_limit: Some((0.7, 1.0)),
+            tecs_phase_override: Some(FlightPhase::EnrouteClimb),
+            ..Default::default()
+        }
+    }
+
+    fn enroute_guidance(
+        &self,
+        state: &AircraftState,
+        bank_limit: f64,
+        phase: FlightPhase,
+    ) -> GuidanceTargets {
+        let waypoint = self.route_manager.active_waypoint().cloned();
+        let (desired_track, bank_cmd) = match &waypoint {
+            Some(wp) => self.lateral_guidance.direct_to(state, wp, bank_limit),
+            None => (state.track_deg, 0.0),
+        };
+        let (target_alt, target_spd, throttle_limit) = match phase {
+            FlightPhase::EnrouteClimb => (
+                self.config.cruise_altitude_ft(),
+                self.config.performance.vy_kt,
+                (0.75, 1.0),
+            ),
+            FlightPhase::Cruise => (
+                self.config.cruise_altitude_ft(),
+                self.config.performance.cruise_speed_kt,
+                (0.4, 0.8),
+            ),
+            _ => (
+                self.config.pattern_altitude_msl_ft(),
+                self.config.performance.descent_speed_kt,
+                (0.15, 0.6),
+            ),
+        };
+        GuidanceTargets {
+            lateral_mode: LateralMode::TrackHold,
+            vertical_mode: VerticalMode::Tecs,
+            target_bank_deg: Some(bank_cmd),
+            target_track_deg: Some(desired_track),
+            target_waypoint: waypoint,
+            target_altitude_ft: Some(target_alt),
+            target_speed_kt: Some(target_spd),
+            throttle_limit: Some(throttle_limit),
+            ..Default::default()
+        }
+    }
+
+    fn pattern_phase_guidance(
+        &mut self,
+        state: &AircraftState,
+        bank_limit: f64,
+        phase: FlightPhase,
+    ) -> GuidanceTargets {
+        let leg = self.pattern.leg_for_phase(phase).expect("pattern leg");
+        let (desired_track, bank_cmd) = if phase == FlightPhase::PatternEntry {
+            let join_world = self
+                .runway_frame
+                .to_world_frame(self.pattern.join_point_runway_ft);
+            let join_waypoint = Waypoint {
+                name: "pattern_join".to_string(),
+                position_ft: join_world,
+                altitude_ft: Some(self.config.pattern_altitude_msl_ft()),
+            };
+            self.lateral_guidance.direct_to(state, &join_waypoint, bank_limit)
+        } else {
+            self.lateral_guidance.follow_leg(state, leg, bank_limit)
+        };
+
+        let mut tecs_phase_override: Option<FlightPhase> = None;
+        let (target_altitude_ft, target_speed_kt, vertical_mode, glidepath, mut throttle_limit, flaps_cmd) = match phase {
+            FlightPhase::PatternEntry => (
+                self.config.pattern_altitude_msl_ft(),
+                self.config.performance.downwind_speed_kt,
+                VerticalMode::Tecs,
+                None,
+                (0.2, 0.6),
+                Some(0),
+            ),
+            FlightPhase::Downwind => (
+                self.config.pattern_altitude_msl_ft(),
+                self.config.performance.downwind_speed_kt,
+                VerticalMode::Tecs,
+                None,
+                (0.2, 0.55),
+                Some(10),
+            ),
+            FlightPhase::Base => (
+                self.config.airport.field_elevation_ft + 400.0,
+                self.config.performance.base_speed_kt,
+                VerticalMode::Tecs,
+                None,
+                (0.05, 0.5),
+                Some(20),
+            ),
+            FlightPhase::Final => {
+                let final_slope = 4.0;
+                let target_altitude = glidepath_target_altitude_ft_default(
+                    &self.runway_frame,
+                    state.runway_x_ft.unwrap_or(-3000.0),
+                    self.config.airport.field_elevation_ft,
+                );
+                (
+                    target_altitude,
+                    self.config.performance.final_speed_kt,
+                    VerticalMode::GlidepathTrack,
+                    Some(Glidepath {
+                        slope_deg: final_slope,
+                        threshold_crossing_height_ft: 0.0,
+                        aimpoint_ft_from_threshold: self.runway_frame.touchdown_runway_x_ft(),
+                    }),
+                    (0.05, 0.65),
+                    Some(30),
+                )
+            }
+            _ => unreachable!(),
+        };
+        if matches!(phase, FlightPhase::PatternEntry | FlightPhase::Downwind) {
+            let alt_error = target_altitude_ft - state.alt_msl_ft;
+            if alt_error > PATTERN_CLIMB_CAPTURE_BAND_FT {
+                throttle_limit = (0.7, 1.0);
+                tecs_phase_override = Some(FlightPhase::EnrouteClimb);
+            }
+        }
+        // Stable display heading (non-L1) so the TUI doesn't flicker while L1
+        // chatters intercept angles.
+        let course = self.runway_frame.runway.course_deg;
+        let side_sign = match self.runway_frame.runway.traffic_side {
+            TrafficSide::Left => -1.0,
+            TrafficSide::Right => 1.0,
+        };
+        let display_heading = match phase {
+            FlightPhase::PatternEntry | FlightPhase::Downwind => wrap_degrees_360(course + 180.0),
+            FlightPhase::Base => wrap_degrees_360(course - side_sign * 90.0),
+            _ => course,
+        };
+        GuidanceTargets {
+            lateral_mode: LateralMode::PathFollow,
+            vertical_mode,
+            target_bank_deg: Some(bank_cmd),
+            target_track_deg: Some(desired_track),
+            target_heading_deg: Some(display_heading),
+            target_path: Some(leg),
+            target_altitude_ft: Some(target_altitude_ft),
+            target_speed_kt: Some(target_speed_kt),
+            glidepath,
+            throttle_limit: Some(throttle_limit),
+            flaps_cmd,
+            tecs_phase_override,
+            ..Default::default()
+        }
+    }
+
+    fn roundout_guidance(&self, state: &AircraftState, bank_limit: f64) -> GuidanceTargets {
+        let (desired_track, bank_cmd) = self.lateral_guidance.follow_leg(
+            state,
+            self.pattern.final_leg,
+            bank_limit.min(8.0),
+        );
+        let pitch_cmd = 2.5 + ((self.config.flare.roundout_height_ft - state.alt_agl_ft).max(0.0)) * 0.12;
+        GuidanceTargets {
+            lateral_mode: LateralMode::PathFollow,
+            vertical_mode: VerticalMode::PitchHold,
+            target_path: Some(self.pattern.final_leg),
+            target_bank_deg: Some(bank_cmd),
+            target_track_deg: Some(desired_track),
+            target_pitch_deg: Some(pitch_cmd),
+            target_speed_kt: Some(self.config.performance.vref_kt),
+            throttle_limit: Some((0.0, 0.2)),
+            ..Default::default()
+        }
+    }
+
+    fn flare_guidance(&self, state: &AircraftState, bank_limit: f64) -> GuidanceTargets {
+        let (desired_track, bank_cmd) = self.lateral_guidance.follow_leg(
+            state,
+            self.pattern.final_leg,
+            bank_limit.min(6.0),
+        );
+        GuidanceTargets {
+            lateral_mode: LateralMode::PathFollow,
+            vertical_mode: VerticalMode::FlareTrack,
+            target_path: Some(self.pattern.final_leg),
+            target_bank_deg: Some(bank_cmd),
+            target_track_deg: Some(desired_track),
+            target_speed_kt: Some(self.config.performance.vref_kt - 2.0),
+            throttle_limit: Some((0.0, 0.0)),
+            brakes: 0.0,
+            ..Default::default()
+        }
+    }
+}
+
+impl GuidanceProfile for PatternFlyProfile {
+    fn name(&self) -> &'static str { "pattern_fly" }
+    fn owns(&self) -> BTreeSet<Axis> {
+        let mut s = BTreeSet::new();
+        s.insert(Axis::Lateral);
+        s.insert(Axis::Vertical);
+        s.insert(Axis::Speed);
+        s
+    }
+
+    fn contribute(&mut self, state: &AircraftState, _dt: f64) -> ProfileTick {
+        if self.turn_base_trigger && self.phase == FlightPhase::Downwind {
+            if let Some(rx) = state.runway_x_ft {
+                let downwind_offset = self.config.pattern.downwind_offset_ft;
+                self.pattern_extension_ft = (-rx - downwind_offset).max(0.0);
+                self.rebuild_pattern();
+            }
+        }
+
+        self.route_manager.advance_if_needed(state.position_ft);
+        let safety = self.safety_monitor.evaluate(state, self.phase);
+        let previous_phase = self.phase;
+        let manual_go_around = self.force_go_around_trigger;
+        self.phase = self.mode_manager.update(
+            self.phase,
+            state,
+            &self.route_manager,
+            &self.pattern,
+            &safety,
+            self.turn_base_trigger,
+            self.force_go_around_trigger,
+            true,
+            self.touch_and_go_trigger,
+        );
+        if previous_phase == FlightPhase::Downwind && self.phase != FlightPhase::Downwind {
+            self.turn_base_trigger = false;
+        }
+        if previous_phase == FlightPhase::TakeoffRoll && self.phase == FlightPhase::Rotate {
+            self.touch_and_go_trigger = false;
+        }
+        if self.phase == FlightPhase::GoAround {
+            self.force_go_around_trigger = false;
+            if previous_phase != FlightPhase::GoAround {
+                self.last_go_around_reason = Some(if manual_go_around {
+                    "manual_trigger".to_string()
+                } else if let Some(r) = safety.reason.as_ref() {
+                    r.clone()
+                } else {
+                    "unknown".to_string()
+                });
+            }
+        }
+        let guidance = self.guidance_for_phase(state, self.phase);
+        let guidance = self.safety_monitor.apply_limits(guidance, self.phase);
+
+        let mut hand_off: Option<Vec<Box<dyn GuidanceProfile>>> = None;
+        if self.phase == FlightPhase::GoAround && self.go_around_climb_settled(state) {
+            hand_off = Some(vec![
+                Box::new(HeadingHoldProfile::new(
+                    self.runway_frame.runway.course_deg,
+                    self.config.limits.max_bank_enroute_deg,
+                    None,
+                ).unwrap()),
+                Box::new(AltitudeHoldProfile::new(self.config.pattern_altitude_msl_ft())),
+                Box::new(SpeedHoldProfile::new(self.config.performance.vy_kt)),
+            ]);
+        }
+        if let Some(queued) = self.handoff_request.take() {
+            hand_off = Some(queued);
+        }
+
+        ProfileTick {
+            contribution: guidance_to_contribution(guidance),
+            hand_off,
+        }
+    }
+
+    fn pattern_metadata(&self) -> Option<PatternMetadata> {
+        Some(PatternMetadata {
+            last_go_around_reason: self.last_go_around_reason.clone(),
+            airport_ident: self.config.airport.airport.clone(),
+            runway_id: self.runway_frame.runway.id.clone(),
+            field_elevation_ft: Some(self.config.airport.field_elevation_ft),
+            phase: self.phase,
+        })
+    }
+}
+
+pub struct ApproachRunwayProfile {
+    pub runway_id: String,
+}
+
+impl GuidanceProfile for ApproachRunwayProfile {
+    fn name(&self) -> &'static str { "approach_runway" }
+    fn owns(&self) -> BTreeSet<Axis> {
+        let mut s = BTreeSet::new();
+        s.insert(Axis::Lateral);
+        s.insert(Axis::Vertical);
+        s.insert(Axis::Speed);
+        s
+    }
+    fn contribute(&mut self, _state: &AircraftState, _dt: f64) -> ProfileTick {
+        // Stub: the Python version raises NotImplementedError. Here we yield
+        // zeros so the control loop keeps running if somebody accidentally
+        // engages us.
+        ProfileTick::contribution_only(ProfileContribution::default())
+    }
+}
+
+pub struct RouteFollowProfile {
+    pub waypoints: Vec<Waypoint>,
+}
+
+impl GuidanceProfile for RouteFollowProfile {
+    fn name(&self) -> &'static str { "route_follow" }
+    fn owns(&self) -> BTreeSet<Axis> {
+        let mut s = BTreeSet::new();
+        s.insert(Axis::Lateral);
+        s.insert(Axis::Vertical);
+        s.insert(Axis::Speed);
+        s
+    }
+    fn contribute(&mut self, _state: &AircraftState, _dt: f64) -> ProfileTick {
+        ProfileTick::contribution_only(ProfileContribution::default())
+    }
+}
+
+// ---------- helpers ----------
+
+fn single(axis: Axis) -> BTreeSet<Axis> {
+    let mut s = BTreeSet::new();
+    s.insert(axis);
+    s
+}

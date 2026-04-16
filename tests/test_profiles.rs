@@ -1,0 +1,367 @@
+//! Port of tests/test_profiles.py — profile composition and PatternFlyProfile behavior.
+
+use std::collections::BTreeSet;
+
+use approx::assert_abs_diff_eq;
+use xplane_pilot::config::load_default_config_bundle;
+use xplane_pilot::core::mission_manager::PilotCore;
+use xplane_pilot::core::profiles::{
+    build_rotate_guidance, build_takeoff_roll_guidance, AltitudeHoldProfile, HeadingHoldProfile,
+    PatternFlyProfile, SpeedHoldProfile, TakeoffProfile,
+};
+use xplane_pilot::sim::simple_dynamics::SimpleAircraftModel;
+use xplane_pilot::types::{
+    heading_to_vector, AircraftState, FlightPhase, LateralMode, Vec2, VerticalMode, KT_TO_FPS,
+};
+
+fn make_pilot() -> (xplane_pilot::config::ConfigBundle, PilotCore) {
+    let cfg = load_default_config_bundle();
+    let pilot = PilotCore::new(cfg.clone());
+    (cfg, pilot)
+}
+
+#[test]
+fn new_pilot_starts_with_three_idle_profiles() {
+    let (_, pilot) = make_pilot();
+    let names: BTreeSet<String> = pilot.list_profile_names().into_iter().collect();
+    let expected: BTreeSet<String> =
+        ["idle_lateral", "idle_vertical", "idle_speed"].iter().map(|s| s.to_string()).collect();
+    assert_eq!(names, expected);
+}
+
+#[test]
+fn engaging_heading_hold_displaces_idle_lateral_only() {
+    let (_, mut pilot) = make_pilot();
+    let displaced = pilot.engage_profile(Box::new(
+        HeadingHoldProfile::new(270.0, 25.0, None).unwrap(),
+    ));
+    assert_eq!(displaced, vec!["idle_lateral"]);
+    let names: BTreeSet<String> = pilot.list_profile_names().into_iter().collect();
+    let expected: BTreeSet<String> =
+        ["idle_vertical", "idle_speed", "heading_hold"].iter().map(|s| s.to_string()).collect();
+    assert_eq!(names, expected);
+}
+
+#[test]
+fn engaging_pattern_fly_displaces_all_three_idle_profiles() {
+    let (cfg, mut pilot) = make_pilot();
+    let rf = pilot.runway_frame.clone();
+    let displaced = pilot.engage_profile(Box::new(PatternFlyProfile::new(cfg, rf)));
+    let displaced_set: BTreeSet<String> = displaced.into_iter().collect();
+    let expected: BTreeSet<String> =
+        ["idle_lateral", "idle_vertical", "idle_speed"].iter().map(|s| s.to_string()).collect();
+    assert_eq!(displaced_set, expected);
+    assert_eq!(pilot.list_profile_names(), vec!["pattern_fly"]);
+}
+
+#[test]
+fn disengage_pattern_fly_readds_three_idle_profiles() {
+    let (cfg, mut pilot) = make_pilot();
+    let rf = pilot.runway_frame.clone();
+    pilot.engage_profile(Box::new(PatternFlyProfile::new(cfg, rf)));
+    let added: BTreeSet<String> = pilot.disengage_profile("pattern_fly").into_iter().collect();
+    let expected: BTreeSet<String> =
+        ["idle_lateral", "idle_vertical", "idle_speed"].iter().map(|s| s.to_string()).collect();
+    assert_eq!(added, expected);
+}
+
+#[test]
+fn disengage_unknown_profile_is_noop() {
+    let (_, mut pilot) = make_pilot();
+    assert_eq!(pilot.disengage_profile("no_such"), Vec::<String>::new());
+}
+
+#[test]
+fn alt_and_speed_hold_compose_without_conflict() {
+    let (_, mut pilot) = make_pilot();
+    pilot.engage_profile(Box::new(AltitudeHoldProfile::new(3000.0)));
+    pilot.engage_profile(Box::new(SpeedHoldProfile::new(95.0)));
+    let names: BTreeSet<String> = pilot.list_profile_names().into_iter().collect();
+    let expected: BTreeSet<String> =
+        ["idle_lateral", "altitude_hold", "speed_hold"].iter().map(|s| s.to_string()).collect();
+    assert_eq!(names, expected);
+}
+
+#[test]
+fn engage_profiles_atomically_replaces_pattern_fly() {
+    let (cfg, mut pilot) = make_pilot();
+    let rf = pilot.runway_frame.clone();
+    pilot.engage_profile(Box::new(PatternFlyProfile::new(cfg.clone(), rf)));
+    let displaced = pilot.engage_profiles(vec![
+        Box::new(HeadingHoldProfile::new(90.0, 25.0, None).unwrap()),
+        Box::new(AltitudeHoldProfile::new(3000.0)),
+        Box::new(SpeedHoldProfile::new(95.0)),
+    ]);
+    assert!(displaced.contains(&"pattern_fly".to_string()));
+    let names: BTreeSet<String> = pilot.list_profile_names().into_iter().collect();
+    let expected: BTreeSet<String> =
+        ["heading_hold", "altitude_hold", "speed_hold"].iter().map(|s| s.to_string()).collect();
+    assert_eq!(names, expected);
+}
+
+#[test]
+fn takeoff_roll_guidance_goes_full_power() {
+    let (cfg, pilot) = make_pilot();
+    let g = build_takeoff_roll_guidance(&cfg, &pilot.runway_frame);
+    assert_eq!(g.throttle_limit, Some((1.0, 1.0)));
+    assert_eq!(g.lateral_mode, LateralMode::RolloutCenterline);
+    assert_eq!(g.target_pitch_deg, Some(0.0));
+    assert_eq!(g.target_speed_kt, Some(cfg.performance.vr_kt));
+}
+
+#[test]
+fn takeoff_roll_guidance_commands_takeoff_flaps() {
+    let (cfg, pilot) = make_pilot();
+    let g = build_takeoff_roll_guidance(&cfg, &pilot.runway_frame);
+    assert_eq!(g.flaps_cmd, Some(10));
+}
+
+fn rotate_state(config: &xplane_pilot::config::ConfigBundle, on_ground: bool, track_override: Option<f64>) -> AircraftState {
+    let course = config.airport.runway.course_deg;
+    let track = track_override.unwrap_or(course);
+    AircraftState {
+        t_sim: 0.0,
+        dt: 0.2,
+        position_ft: Vec2::ZERO,
+        alt_msl_ft: config.airport.field_elevation_ft + if on_ground { 0.0 } else { 20.0 },
+        alt_agl_ft: if on_ground { 0.0 } else { 20.0 },
+        pitch_deg: if on_ground { 3.0 } else { 8.0 },
+        roll_deg: 0.0,
+        heading_deg: track,
+        track_deg: track,
+        p_rad_s: 0.0,
+        q_rad_s: 0.0,
+        r_rad_s: 0.0,
+        ias_kt: config.performance.vr_kt + 2.0,
+        tas_kt: config.performance.vr_kt + 2.0,
+        gs_kt: config.performance.vr_kt + 2.0,
+        vs_fpm: if on_ground { 0.0 } else { 200.0 },
+        ground_velocity_ft_s: Vec2::ZERO,
+        flap_index: 0,
+        gear_down: true,
+        on_ground,
+        throttle_pos: 1.0,
+        runway_id: config.airport.runway.id.clone(),
+        runway_dist_remaining_ft: None,
+        runway_x_ft: Some(1800.0),
+        runway_y_ft: Some(10.0),
+        centerline_error_ft: Some(10.0),
+        threshold_abeam: false,
+        distance_to_touchdown_ft: None,
+        stall_margin: 1.5,
+    }
+}
+
+#[test]
+fn rotate_guidance_on_ground_uses_rollout_centerline() {
+    let (cfg, pilot) = make_pilot();
+    let state = rotate_state(&cfg, true, None);
+    let g = build_rotate_guidance(
+        &cfg,
+        &pilot.runway_frame,
+        &state,
+        cfg.limits.max_bank_enroute_deg,
+    );
+    assert_eq!(g.throttle_limit, Some((1.0, 1.0)));
+    assert_eq!(g.target_pitch_deg, Some(8.0));
+    assert_eq!(g.target_speed_kt, Some(cfg.performance.vy_kt));
+    assert_eq!(g.lateral_mode, LateralMode::RolloutCenterline);
+    assert_eq!(g.target_track_deg, Some(cfg.airport.runway.course_deg));
+}
+
+#[test]
+fn rotate_guidance_airborne_banks_toward_runway_course() {
+    let (cfg, pilot) = make_pilot();
+    let state = rotate_state(&cfg, false, Some(30.0));
+    let g = build_rotate_guidance(
+        &cfg,
+        &pilot.runway_frame,
+        &state,
+        cfg.limits.max_bank_enroute_deg,
+    );
+    assert_eq!(g.lateral_mode, LateralMode::TrackHold);
+    assert_eq!(g.target_track_deg, Some(cfg.airport.runway.course_deg));
+    assert!(g.target_bank_deg.unwrap() < 0.0);
+}
+
+#[test]
+fn takeoff_profile_owns_all_three_axes() {
+    let (cfg, pilot) = make_pilot();
+    let profile = TakeoffProfile::new(cfg, pilot.runway_frame.clone());
+    let owns: BTreeSet<_> = xplane_pilot::core::profiles::GuidanceProfile::owns(&profile).into_iter().collect();
+    use xplane_pilot::core::profiles::Axis;
+    let expected: BTreeSet<_> = [Axis::Lateral, Axis::Vertical, Axis::Speed].into_iter().collect();
+    assert_eq!(owns, expected);
+}
+
+#[test]
+fn takeoff_starts_in_preflight_and_advances_on_acceleration() {
+    let (cfg, mut pilot) = make_pilot();
+    let rf = pilot.runway_frame.clone();
+    pilot.engage_profile(Box::new(TakeoffProfile::new(cfg.clone(), rf)));
+    let model = SimpleAircraftModel::new(cfg, Vec2::ZERO);
+    let mut raw_state = model.initial_state();
+
+    let mut phases_seen: BTreeSet<FlightPhase> = BTreeSet::new();
+    for _ in 0..200 {
+        let (_, commands) = pilot.update(&raw_state, 0.2);
+        phases_seen.insert(pilot.phase());
+        let mut stepped = raw_state.clone();
+        model.step(&mut stepped, &commands, 0.2);
+        raw_state = stepped;
+        if pilot.phase() == FlightPhase::InitialClimb {
+            break;
+        }
+    }
+    assert!(phases_seen.contains(&FlightPhase::TakeoffRoll));
+    assert!(phases_seen.contains(&FlightPhase::Rotate));
+    assert!(phases_seen.contains(&FlightPhase::InitialClimb));
+}
+
+#[test]
+fn shortest_path_default_goes_left_from_060_to_290() {
+    let mut profile = HeadingHoldProfile::new(290.0, 25.0, None).unwrap();
+    let state = AircraftState {
+        track_deg: 60.0,
+        heading_deg: 60.0,
+        ground_velocity_ft_s: heading_to_vector(60.0, 90.0 * KT_TO_FPS),
+        ..AircraftState::synthetic_default()
+    };
+    use xplane_pilot::core::profiles::GuidanceProfile;
+    let tick = profile.contribute(&state, 0.2);
+    assert!(tick.contribution.target_bank_deg.unwrap() < 0.0);
+}
+
+#[test]
+fn forced_right_direction_banks_right_even_when_left_is_shorter() {
+    let mut profile = HeadingHoldProfile::new(290.0, 25.0, Some("right")).unwrap();
+    let state = AircraftState {
+        track_deg: 60.0,
+        heading_deg: 60.0,
+        ground_velocity_ft_s: heading_to_vector(60.0, 90.0 * KT_TO_FPS),
+        ..AircraftState::synthetic_default()
+    };
+    use xplane_pilot::core::profiles::GuidanceProfile;
+    let tick = profile.contribute(&state, 0.2);
+    assert!(tick.contribution.target_bank_deg.unwrap() > 0.0);
+}
+
+#[test]
+fn invalid_direction_raises() {
+    assert!(HeadingHoldProfile::new(270.0, 25.0, Some("backwards")).is_err());
+}
+
+#[test]
+fn altitude_hold_climb_capture_picks_enroute_climb() {
+    use xplane_pilot::core::profiles::GuidanceProfile;
+    let mut profile = AltitudeHoldProfile::new(2000.0);
+    let state = AircraftState {
+        alt_msl_ft: 1387.0,
+        alt_agl_ft: 0.0,
+        ..AircraftState::synthetic_default()
+    };
+    let tick = profile.contribute(&state, 0.2);
+    assert_eq!(tick.contribution.tecs_phase_override, Some(FlightPhase::EnrouteClimb));
+    assert_eq!(tick.contribution.throttle_limit, Some((0.7, 1.0)));
+}
+
+#[test]
+fn altitude_hold_descent_capture_picks_descent() {
+    use xplane_pilot::core::profiles::GuidanceProfile;
+    let mut profile = AltitudeHoldProfile::new(2000.0);
+    let state = AircraftState {
+        alt_msl_ft: 3000.0,
+        alt_agl_ft: 0.0,
+        ..AircraftState::synthetic_default()
+    };
+    let tick = profile.contribute(&state, 0.2);
+    assert_eq!(tick.contribution.tecs_phase_override, Some(FlightPhase::Descent));
+    assert_eq!(tick.contribution.throttle_limit, Some((0.1, 0.5)));
+}
+
+#[test]
+fn altitude_hold_small_error_uses_default_tuning() {
+    use xplane_pilot::core::profiles::GuidanceProfile;
+    let mut profile = AltitudeHoldProfile::new(2000.0);
+    let state = AircraftState {
+        alt_msl_ft: 1950.0,
+        ..AircraftState::synthetic_default()
+    };
+    let tick = profile.contribute(&state, 0.2);
+    assert_eq!(tick.contribution.tecs_phase_override, None);
+    assert_eq!(tick.contribution.throttle_limit, Some((0.1, 0.9)));
+}
+
+#[test]
+fn pattern_fly_route_has_only_pattern_entry_waypoint() {
+    let (cfg, pilot) = make_pilot();
+    let profile = PatternFlyProfile::new(cfg, pilot.runway_frame.clone());
+    let names: Vec<String> = profile.route_manager.waypoints.iter().map(|w| w.name.clone()).collect();
+    assert_eq!(names, vec!["pattern_entry_start"]);
+}
+
+#[test]
+fn pattern_fly_go_around_targets_runway_course() {
+    let (cfg, mut pilot) = make_pilot();
+    let mut profile = PatternFlyProfile::new(cfg.clone(), pilot.runway_frame.clone());
+    let state = AircraftState {
+        track_deg: 200.0,
+        heading_deg: 200.0,
+        ..AircraftState::synthetic_default()
+    };
+    let g = profile.guidance_for_phase(&state, FlightPhase::GoAround);
+    assert_eq!(g.lateral_mode, LateralMode::TrackHold);
+    assert_abs_diff_eq!(g.target_track_deg.unwrap(), cfg.airport.runway.course_deg, epsilon = 1e-3);
+    let _ = pilot.list_profile_names();
+}
+
+#[test]
+fn flap_schedule_per_phase_follows_c172_sop() {
+    let (cfg, pilot) = make_pilot();
+    let mut profile = PatternFlyProfile::new(cfg, pilot.runway_frame.clone());
+    let state = AircraftState {
+        runway_x_ft: Some(-3000.0),
+        runway_y_ft: Some(0.0),
+        ..AircraftState::synthetic_default()
+    };
+    let cases = [
+        (FlightPhase::PatternEntry, 0),
+        (FlightPhase::Downwind, 10),
+        (FlightPhase::Base, 20),
+        (FlightPhase::Final, 30),
+    ];
+    for (phase, expected) in cases {
+        let g = profile.guidance_for_phase(&state, phase);
+        assert_eq!(g.flaps_cmd, Some(expected), "phase {:?}", phase);
+    }
+}
+
+#[test]
+fn altitude_hold_end_to_end_climb_through_pilot() {
+    let (_, mut pilot) = make_pilot();
+    pilot.engage_profile(Box::new(AltitudeHoldProfile::new(2000.0)));
+    pilot.engage_profile(Box::new(SpeedHoldProfile::new(80.0)));
+    let raw = xplane_pilot::sim::simple_dynamics::DynamicsState {
+        position_ft: Vec2::ZERO,
+        altitude_ft: 1387.0,
+        heading_deg: 0.0,
+        roll_deg: 0.0,
+        pitch_deg: 0.0,
+        ias_kt: 80.0,
+        throttle_pos: 0.5,
+        on_ground: false,
+        time_s: 10.0,
+        p_rad_s: 0.0,
+        q_rad_s: 0.0,
+        r_rad_s: 0.0,
+        ground_velocity_ft_s: Vec2::ZERO,
+        vertical_speed_ft_s: 0.0,
+        flap_index: 0,
+        gear_down: true,
+    };
+    let (_, cmds) = pilot.update(&raw, 0.2);
+    assert!(cmds.throttle >= 0.7, "throttle was {}", cmds.throttle);
+    // VerticalMode::Tecs is used in capture — elevator pushes pitch up.
+    assert!(cmds.elevator > 0.0, "elevator was {}", cmds.elevator);
+    let _ = VerticalMode::Tecs;
+}

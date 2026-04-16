@@ -1,0 +1,13 @@
+airport: KTEST
+field_elevation_ft: 500
+runway:
+  id: 36
+  course_deg: 0
+  threshold_x_ft: 0
+  threshold_y_ft: 0
+  length_ft: 21000
+  touchdown_zone_ft: 2000
+  traffic_side: left
+mission:
+  entry_start_runway_x_ft: 7200
+  entry_start_runway_y_ft: -7000

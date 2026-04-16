@@ -1,0 +1,509 @@
+//! Live X-Plane runner: bootstrap probe, bridge, pilot core, LLM worker
+//! thread, heartbeat pump, control loop, and (optionally) interactive TUI.
+//! Mirrors sim_pilot/live_runner.py.
+
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc, Mutex,
+};
+
+use crossbeam_channel::Sender;
+
+use crate::bus::SimBus;
+use crate::config::{AirportConfig, ConfigBundle};
+use crate::core::mission_manager::PilotCore;
+use crate::llm::conversation::IncomingMessage;
+use crate::sim::xplane_bridge::{BootstrapSample, M_TO_FT};
+use crate::types::{FlightPhase, Runway};
+
+/// A trivial monotonic clock abstraction so tests can advance virtual time.
+pub trait Clock: Send + Sync {
+    fn now_secs_f64(&self) -> f64;
+}
+
+pub struct RealClock;
+impl Clock for RealClock {
+    fn now_secs_f64(&self) -> f64 {
+        static START: once_cell::sync::Lazy<std::time::Instant> =
+            once_cell::sync::Lazy::new(std::time::Instant::now);
+        START.elapsed().as_secs_f64()
+    }
+}
+
+/// Test clock: a mutable counter in fractional seconds.
+pub struct FakeClock {
+    pub now_ms: AtomicU64,
+}
+impl FakeClock {
+    pub fn new() -> Self { Self { now_ms: AtomicU64::new(0) } }
+    pub fn advance_secs(&self, dt: f64) {
+        let ms = (dt * 1000.0) as u64;
+        self.now_ms.fetch_add(ms, Ordering::Relaxed);
+    }
+}
+impl Clock for FakeClock {
+    fn now_secs_f64(&self) -> f64 {
+        self.now_ms.load(Ordering::Relaxed) as f64 / 1000.0
+    }
+}
+
+#[derive(Default)]
+struct HeartbeatState {
+    last_user_input_s: f64,
+    last_heartbeat_s: f64,
+    last_seen_phase: Option<FlightPhase>,
+    last_seen_profiles: Option<Vec<String>>,
+}
+
+pub struct HeartbeatPump {
+    pub pilot: Arc<parking_lot::Mutex<PilotCore>>,
+    pub bus: Option<SimBus>,
+    pub input_queue: Sender<IncomingMessage>,
+    pub heartbeat_interval_s: f64,
+    pub poll_interval_s: f64,
+    pub min_interval_s: f64,
+    pub clock: Arc<dyn Clock>,
+    state: Mutex<HeartbeatState>,
+}
+
+impl HeartbeatPump {
+    pub fn new(
+        pilot: Arc<parking_lot::Mutex<PilotCore>>,
+        bus: Option<SimBus>,
+        input_queue: Sender<IncomingMessage>,
+        heartbeat_interval_s: f64,
+        clock: Arc<dyn Clock>,
+    ) -> Self {
+        let now = clock.now_secs_f64();
+        Self {
+            pilot,
+            bus,
+            input_queue,
+            heartbeat_interval_s,
+            poll_interval_s: 0.5,
+            min_interval_s: 2.0,
+            clock,
+            state: Mutex::new(HeartbeatState {
+                last_user_input_s: now,
+                last_heartbeat_s: now,
+                last_seen_phase: None,
+                last_seen_profiles: None,
+            }),
+        }
+    }
+
+    pub fn record_user_input(&self) {
+        let now = self.clock.now_secs_f64();
+        self.state.lock().unwrap().last_user_input_s = now;
+    }
+
+    pub fn check_and_emit(&self) {
+        let now = self.clock.now_secs_f64();
+        let snapshot_opt = self.pilot.lock().latest_snapshot.clone();
+        let Some(snapshot) = snapshot_opt else { return };
+        let current_phase = snapshot.phase;
+        let current_profiles: Vec<String> = snapshot.active_profiles.clone();
+
+        let mut st = self.state.lock().unwrap();
+        if st.last_seen_profiles.is_none() {
+            st.last_seen_phase = current_phase;
+            st.last_seen_profiles = Some(current_profiles);
+            return;
+        }
+        let phase_changed = st.last_seen_phase != current_phase;
+        let profiles_changed = st.last_seen_profiles.as_deref() != Some(current_profiles.as_slice());
+
+        if phase_changed || profiles_changed {
+            if phase_changed
+                && current_phase == Some(FlightPhase::GoAround)
+                && st.last_seen_phase != Some(FlightPhase::GoAround)
+            {
+                if let Some(bus) = &self.bus {
+                    let reason = snapshot.go_around_reason.clone().unwrap_or_else(|| "unknown".to_string());
+                    bus.push_log(format!("[safety] go_around triggered: {}", reason));
+                }
+            }
+            if now - st.last_heartbeat_s >= self.min_interval_s {
+                let reason = describe_change(
+                    st.last_seen_phase,
+                    current_phase,
+                    st.last_seen_profiles.as_deref().unwrap_or(&[]),
+                    &current_profiles,
+                    snapshot.go_around_reason.as_deref(),
+                );
+                st.last_heartbeat_s = now;
+                let status = crate::llm::tools::build_status_payload(Some(&snapshot), None);
+                let text = format!("{} | status={}", reason, serde_json::to_string(&status).unwrap());
+                let _ = self.input_queue.send(IncomingMessage::heartbeat(text));
+            }
+            st.last_seen_phase = current_phase;
+            st.last_seen_profiles = Some(current_profiles);
+            return;
+        }
+
+        let last_input = st.last_user_input_s.max(st.last_heartbeat_s);
+        if now - last_input >= self.heartbeat_interval_s {
+            st.last_heartbeat_s = now;
+            let status = crate::llm::tools::build_status_payload(Some(&snapshot), None);
+            let text = format!(
+                "periodic check-in | status={}",
+                serde_json::to_string(&status).unwrap()
+            );
+            let _ = self.input_queue.send(IncomingMessage::heartbeat(text));
+        }
+    }
+}
+
+fn describe_change(
+    old_phase: Option<FlightPhase>,
+    new_phase: Option<FlightPhase>,
+    old_profiles: &[String],
+    new_profiles: &[String],
+    go_around_reason: Option<&str>,
+) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if old_phase != new_phase {
+        let old = old_phase.map(|p| p.value().to_string()).unwrap_or_else(|| "none".to_string());
+        let new = new_phase.map(|p| p.value().to_string()).unwrap_or_else(|| "none".to_string());
+        if new_phase == Some(FlightPhase::GoAround) && go_around_reason.is_some() {
+            parts.push(format!("phase changed: {} -> {} ({})", old, new, go_around_reason.unwrap()));
+        } else {
+            parts.push(format!("phase changed: {} -> {}", old, new));
+        }
+    }
+    if old_profiles != new_profiles {
+        use std::collections::BTreeSet;
+        let olds: BTreeSet<&String> = old_profiles.iter().collect();
+        let news: BTreeSet<&String> = new_profiles.iter().collect();
+        let added: Vec<String> = news.difference(&olds).map(|s| s.to_string()).collect();
+        let removed: Vec<String> = olds.difference(&news).map(|s| s.to_string()).collect();
+        let mut profile_parts: Vec<String> = Vec::new();
+        if !added.is_empty() {
+            profile_parts.push(format!("engaged: {}", added.join(", ")));
+        }
+        if !removed.is_empty() {
+            profile_parts.push(format!("disengaged: {}", removed.join(", ")));
+        }
+        if !profile_parts.is_empty() {
+            parts.push(format!("profiles {}", profile_parts.join("; ")));
+        }
+    }
+    if parts.is_empty() {
+        "state changed".to_string()
+    } else {
+        parts.join("; ")
+    }
+}
+
+/// Derive a live `ConfigBundle` from a one-shot probe of the running sim.
+///
+/// The runway frame anchors at the current aircraft heading / position; the
+/// airport/runway IDs are cleared (the agent looks them up via sql_query);
+/// field elevation falls out as `MSL - AGL` at the probe moment.
+pub fn bootstrap_config_from_sample(
+    base: ConfigBundle,
+    sample: BootstrapSample,
+) -> ConfigBundle {
+    let course_deg = sample.posi.heading_deg;
+    let field_elevation_ft = sample.posi.altitude_msl_m * M_TO_FT - sample.alt_agl_ft;
+    let new_runway = Runway {
+        id: None,
+        course_deg,
+        ..base.airport.runway.clone()
+    };
+    let airport = AirportConfig {
+        airport: None,
+        field_elevation_ft,
+        runway: new_runway,
+        mission: base.airport.mission.clone(),
+    };
+    ConfigBundle { airport, ..base }
+}
+
+// ---------------------------------------------------------------------------
+// Full live X-Plane runtime glue
+// ---------------------------------------------------------------------------
+
+use std::path::PathBuf;
+use std::sync::atomic::AtomicBool;
+use std::thread;
+use std::time::{Duration, Instant};
+
+use anyhow::{Context, Result};
+use crossbeam_channel::unbounded;
+use parking_lot::Mutex as PLMutex;
+
+use crate::bus::FileLog;
+use crate::core::profiles::PatternFlyProfile;
+use crate::llm::conversation::run_conversation_loop;
+use crate::llm::responses_client::ResponsesClient;
+use crate::llm::tools::{ToolBridge, ToolContext};
+use crate::sim::xplane_bridge::{probe_bootstrap_sample, GeoReference, XPlaneWebBridge};
+use crate::tui::{format_snapshot_display, run_tui};
+use crate::types::clamp;
+
+#[derive(Debug, Clone)]
+pub struct LiveRunConfig {
+    pub xplane_host: String,
+    pub xplane_port: u16,
+    pub llm_model: String,
+    pub atc_messages: Vec<String>,
+    pub interactive: bool,
+    pub control_hz: f64,
+    pub status_interval_s: f64,
+    pub engage_profile: String,
+    pub runway_csv_path: Option<PathBuf>,
+    pub log_file_path: Option<PathBuf>,
+    pub heartbeat_interval_s: f64,
+    pub heartbeat_enabled: bool,
+}
+
+pub fn run_live_xplane(base_config: ConfigBundle, runtime: LiveRunConfig) -> Result<()> {
+    let sample = probe_bootstrap_sample(
+        &runtime.xplane_host,
+        runtime.xplane_port,
+        5,
+    )
+    .context("probing X-Plane bootstrap sample")?;
+    let live_config = bootstrap_config_from_sample(base_config, sample);
+
+    let bridge = Arc::new(
+        XPlaneWebBridge::new(
+            GeoReference {
+                threshold_lat_deg: sample.posi.lat_deg,
+                threshold_lon_deg: sample.posi.lon_deg,
+            },
+            &runtime.xplane_host,
+            runtime.xplane_port,
+            5,
+        )
+        .context("opening X-Plane web bridge")?,
+    );
+    let tool_bridge: Arc<dyn ToolBridge> = bridge.clone();
+
+    let pilot_arc = Arc::new(PLMutex::new(PilotCore::new(live_config.clone())));
+    engage_startup_profile(&pilot_arc, &live_config, &runtime.engage_profile)?;
+
+    let file_log = runtime
+        .log_file_path
+        .as_ref()
+        .map(|p| FileLog::new(p).map(Arc::new))
+        .transpose()
+        .context("opening file log")?;
+    let bus = match file_log {
+        Some(f) => SimBus::with_file_log(!runtime.interactive, f),
+        None => SimBus::new(!runtime.interactive),
+    };
+    if let Some(p) = &runtime.log_file_path {
+        bus.push_log(format!("log_file={}", p.display()));
+    }
+    bus.push_log(format!(
+        "bridge connected host={} port={}",
+        runtime.xplane_host, runtime.xplane_port
+    ));
+    let airport_label = live_config
+        .airport
+        .airport
+        .clone()
+        .unwrap_or_else(|| "(unset)".to_string());
+    let runway_label = live_config
+        .airport
+        .runway
+        .id
+        .clone()
+        .unwrap_or_else(|| "(unset)".to_string());
+    bus.push_log(format!(
+        "pilot_reference airport={} runway={} course={:.0} field_elev={:.0}ft",
+        airport_label,
+        runway_label,
+        live_config.airport.runway.course_deg,
+        live_config.airport.field_elevation_ft,
+    ));
+    if runtime.engage_profile != "idle" {
+        bus.push_log(format!("startup profile engaged: {}", runtime.engage_profile));
+    }
+
+    let (input_tx, input_rx) = unbounded::<IncomingMessage>();
+    for msg in &runtime.atc_messages {
+        let _ = input_tx.send(IncomingMessage::atc(msg.clone()));
+    }
+
+    let llm_client = Arc::new(ResponsesClient::new(runtime.llm_model.clone()));
+    let cache_stats = llm_client.cache_stats.clone();
+    let tool_ctx = Arc::new(ToolContext {
+        pilot: pilot_arc.clone(),
+        bridge: Some(tool_bridge),
+        config: Arc::new(PLMutex::new(live_config.clone())),
+        recent_broadcasts: Arc::new(PLMutex::new(Vec::new())),
+        runway_csv_path: runtime.runway_csv_path.clone(),
+        bus: Some(bus.clone()),
+        runway_conn: Arc::new(Mutex::new(None)),
+    });
+
+    let llm_stop = Arc::new(AtomicBool::new(false));
+    let llm_thread = {
+        let client = llm_client.clone();
+        let ctx = tool_ctx.clone();
+        let rx = input_rx.clone();
+        let stop = llm_stop.clone();
+        let bus_clone = bus.clone();
+        thread::Builder::new()
+            .name("llm-worker".into())
+            .spawn(move || {
+                run_conversation_loop(
+                    &*client,
+                    &ctx,
+                    &rx,
+                    stop,
+                    60,
+                    120,
+                    Some(&bus_clone),
+                );
+            })?
+    };
+
+    let heartbeat_pump = if runtime.heartbeat_enabled {
+        let clock: Arc<dyn Clock> = Arc::new(RealClock);
+        let pump = Arc::new(HeartbeatPump::new(
+            pilot_arc.clone(),
+            Some(bus.clone()),
+            input_tx.clone(),
+            runtime.heartbeat_interval_s,
+            clock,
+        ));
+        bus.push_log(format!(
+            "heartbeat pump started interval={:.0}s",
+            runtime.heartbeat_interval_s
+        ));
+        Some(pump)
+    } else {
+        None
+    };
+
+    let control_stop = Arc::new(AtomicBool::new(false));
+
+    if runtime.interactive {
+        let pilot_for_loop = pilot_arc.clone();
+        let bridge_for_loop = bridge.clone();
+        let bus_for_loop = bus.clone();
+        let runtime_for_loop = runtime.clone();
+        let stop_for_loop = control_stop.clone();
+        let pump_for_loop = heartbeat_pump.clone();
+        let control_thread = thread::Builder::new().name("control-loop".into()).spawn(move || {
+            run_control_loop(
+                bridge_for_loop,
+                pilot_for_loop,
+                bus_for_loop,
+                runtime_for_loop,
+                stop_for_loop,
+                pump_for_loop,
+            );
+        })?;
+        let tui_result = run_tui(
+            bus.clone(),
+            input_tx.clone(),
+            control_stop.clone(),
+            pilot_arc.clone(),
+            heartbeat_pump.clone(),
+            Some(cache_stats),
+        );
+        control_stop.store(true, Ordering::Release);
+        llm_stop.store(true, Ordering::Release);
+        let _ = control_thread.join();
+        let _ = llm_thread.join();
+        bridge.close();
+        bus.close();
+        tui_result?;
+    } else {
+        run_control_loop(
+            bridge.clone(),
+            pilot_arc.clone(),
+            bus.clone(),
+            runtime.clone(),
+            control_stop.clone(),
+            heartbeat_pump.clone(),
+        );
+        llm_stop.store(true, Ordering::Release);
+        let _ = llm_thread.join();
+        bridge.close();
+        bus.close();
+    }
+    Ok(())
+}
+
+fn run_control_loop(
+    bridge: Arc<XPlaneWebBridge>,
+    pilot: Arc<PLMutex<PilotCore>>,
+    bus: SimBus,
+    runtime: LiveRunConfig,
+    stop: Arc<AtomicBool>,
+    heartbeat_pump: Option<Arc<HeartbeatPump>>,
+) {
+    let mut last_state_time_s: Option<f64> = None;
+    let target_period = Duration::from_secs_f64(1.0 / runtime.control_hz.max(1.0));
+    let mut next_status_s = Instant::now() + Duration::from_secs_f64(runtime.status_interval_s);
+    while !stop.load(Ordering::Acquire) {
+        let loop_start = Instant::now();
+        let raw_state = match bridge.read_state() {
+            Ok(s) => s,
+            Err(e) => {
+                bus.push_log(format!("[bridge] read error: {}", e));
+                thread::sleep(target_period);
+                continue;
+            }
+        };
+        let dt = resolve_dt(raw_state.time_s, last_state_time_s, target_period.as_secs_f64());
+        last_state_time_s = Some(raw_state.time_s);
+        let commands = {
+            let mut p = pilot.lock();
+            let result = std::panic::AssertUnwindSafe(|| p.update(&raw_state, dt));
+            let (_, commands) = result();
+            commands
+        };
+        if let Err(e) = bridge.write_commands(&commands) {
+            bus.push_log(format!("[bridge] write error: {}", e));
+        }
+        if let Some(pump) = heartbeat_pump.as_ref() {
+            pump.check_and_emit();
+        }
+        if Instant::now() >= next_status_s {
+            let snap = pilot.lock().latest_snapshot.clone();
+            bus.push_status(format_snapshot_display(snap.as_ref()));
+            next_status_s = Instant::now() + Duration::from_secs_f64(runtime.status_interval_s);
+        }
+        let elapsed = loop_start.elapsed();
+        if elapsed < target_period {
+            thread::sleep(target_period - elapsed);
+        }
+    }
+}
+
+fn engage_startup_profile(
+    pilot: &Arc<PLMutex<PilotCore>>,
+    config: &ConfigBundle,
+    name: &str,
+) -> Result<()> {
+    match name.to_ascii_lowercase().as_str() {
+        "idle" => Ok(()),
+        "pattern_fly" => {
+            let rf = pilot.lock().runway_frame.clone();
+            pilot
+                .lock()
+                .engage_profile(Box::new(PatternFlyProfile::new(config.clone(), rf)));
+            Ok(())
+        }
+        other => Err(anyhow::anyhow!(
+            "Unknown --engage-profile value {:?}; expected one of: idle, pattern_fly",
+            other
+        )),
+    }
+}
+
+fn resolve_dt(current: f64, last: Option<f64>, fallback: f64) -> f64 {
+    let Some(last) = last else { return fallback };
+    let dt = current - last;
+    if dt <= 1e-6 {
+        return fallback;
+    }
+    clamp(dt, 0.02, 0.5)
+}
