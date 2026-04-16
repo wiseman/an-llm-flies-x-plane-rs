@@ -34,8 +34,6 @@ pub enum RealtimeEvent {
     Completed(String),
     /// Server-reported error.
     Error(String),
-    /// Diagnostic / lifecycle event (session.created, speech_started, etc).
-    Info(String),
 }
 
 pub struct RealtimeClient {
@@ -194,16 +192,7 @@ impl RealtimeClient {
                     .to_string();
                 Some(RealtimeEvent::Error(detail))
             }
-            "transcription_session.created"
-            | "transcription_session.updated"
-            | "session.created"
-            | "session.updated"
-            | "input_audio_buffer.speech_started"
-            | "input_audio_buffer.speech_stopped"
-            | "input_audio_buffer.committed"
-            | "conversation.item.created"
-            | "rate_limits.updated" => Some(RealtimeEvent::Info(ty.to_string())),
-            other => Some(RealtimeEvent::Info(format!("unknown:{other}"))),
+            _ => None,
         }
     }
 

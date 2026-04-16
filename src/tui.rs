@@ -306,23 +306,8 @@ pub fn run_tui(
                     }
                 }
 
-                // Diagnostic: surface any Release event we see so we can
-                // tell if Tab release is reaching us at all.
-                if k.kind == KeyEventKind::Release {
-                    bus.push_log(format!(
-                        "voice: release code={:?} mods={:?}",
-                        k.code, k.modifiers
-                    ));
-                }
-
                 // PTT key handling — space or tab held with no modifiers.
                 if is_ptt_key {
-                    if std::env::var("XPLANE_PILOT_DEBUG_KEYS").is_ok() {
-                        bus.push_log(format!(
-                            "voice: evt kind={:?} code={:?} mods={:?}",
-                            k.kind, k.code, k.modifiers
-                        ));
-                    }
                     let was_recording = ptt_tracker
                         .pending
                         .as_ref()
@@ -526,7 +511,7 @@ pub fn run_tui(
                         Style::default().add_modifier(Modifier::DIM),
                     ));
                 }
-                if snap.mode != PttMode::Idle {
+                if snap.mode == PttMode::Recording {
                     spans.push(Span::raw(" "));
                     spans.push(Span::styled(
                         amp_glyph(snap.amp).to_string(),
@@ -549,11 +534,12 @@ pub fn run_tui(
     outcome
 }
 
-/// Vertical bar glyph for the mic amplitude (0..=8).
+/// Vertical bar glyph for the mic amplitude (0..=8). The lowest level
+/// is still a thin bar (not a space or dot) so the indicator is always
+/// visible as a bar even when silent.
 fn amp_glyph(level: u8) -> char {
     match level.min(8) {
-        0 => ' ',
-        1 => '▁',
+        0 | 1 => '▁',
         2 => '▂',
         3 => '▃',
         4 => '▄',

@@ -150,8 +150,14 @@ fn on_samples<T>(
     } else {
         (sum_sq / mono.len() as f32).sqrt()
     };
-    // Scale so typical speech hits ~4-6, quiet room ~0, shouting ~8.
-    let level = ((rms * 12.0).clamp(0.0, 8.0)) as u8;
+    // Log/dB scale so quiet-room RMS ~0.001 → 0, normal speech ~0.05
+    // → ~5, shouting → 8. Linear * 12 left normal speech stuck at 0-1.
+    let level = if rms <= 1e-5 {
+        0
+    } else {
+        let db = 20.0 * rms.log10(); // -100 .. 0
+        (((db + 60.0) / 7.5).clamp(0.0, 8.0)) as u8
+    };
     amp.store(level, Ordering::Release);
 
     resampler.process(&mono, accum);

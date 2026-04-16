@@ -234,16 +234,22 @@ fn worker_loop(
                     state.lock().partial = partial;
                 }
                 Ok(Some(RealtimeEvent::Completed(text))) => {
+                    // The server's VAD auto-commits on every speech-end
+                    // pause, so multiple `completed` events can fire in a
+                    // single PTT hold. Only transition to Idle when the
+                    // user has actually released (audio.recording is off).
+                    // Otherwise stay in Recording — the partial gets
+                    // flushed to the input buffer and we keep listening.
+                    let still_holding = audio.recording.load(Ordering::Acquire);
                     {
                         let mut s = state.lock();
-                        s.mode = PttMode::Idle;
                         s.partial.clear();
+                        if !still_holding {
+                            s.mode = PttMode::Idle;
+                        }
                     }
                     let _ = finalized_tx.send(text);
                     let _ = c.clear_buffer();
-                }
-                Ok(Some(RealtimeEvent::Info(tag))) => {
-                    log(format!("voice: {tag}"));
                 }
                 Ok(Some(RealtimeEvent::Error(msg))) => {
                     log(format!("voice: error: {msg}"));
