@@ -256,6 +256,7 @@ pub struct LiveRunConfig {
     pub log_file_path: Option<PathBuf>,
     pub heartbeat_interval_s: f64,
     pub heartbeat_enabled: bool,
+    pub voice_enabled: bool,
 }
 
 pub fn run_live_xplane(base_config: ConfigBundle, runtime: LiveRunConfig) -> Result<()> {
@@ -399,6 +400,28 @@ pub fn run_live_xplane(base_config: ConfigBundle, runtime: LiveRunConfig) -> Res
                 pump_for_loop,
             );
         })?;
+        let ptt = if runtime.voice_enabled {
+            match std::env::var("OPENAI_API_KEY").ok() {
+                Some(key) if !key.is_empty() => {
+                    match crate::transcribe::PttController::spawn(key, Some(bus.clone())) {
+                        Ok(c) => {
+                            bus.push_log("voice: ptt ready (hold space / tab)".to_string());
+                            Some(Arc::new(c))
+                        }
+                        Err(e) => {
+                            bus.push_log(format!("voice: disabled ({e})"));
+                            None
+                        }
+                    }
+                }
+                _ => {
+                    bus.push_log("voice: disabled (no OPENAI_API_KEY)".to_string());
+                    None
+                }
+            }
+        } else {
+            None
+        };
         let tui_result = run_tui(
             bus.clone(),
             input_tx.clone(),
@@ -406,6 +429,7 @@ pub fn run_live_xplane(base_config: ConfigBundle, runtime: LiveRunConfig) -> Res
             pilot_arc.clone(),
             heartbeat_pump.clone(),
             Some(cache_stats),
+            ptt,
         );
         control_stop.store(true, Ordering::Release);
         llm_stop.store(true, Ordering::Release);

@@ -84,6 +84,10 @@ struct Cli {
     /// Disable the heartbeat pump entirely.
     #[arg(long)]
     no_heartbeat: bool,
+
+    /// Disable the push-to-talk voice transcription feature.
+    #[arg(long)]
+    no_voice: bool,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -177,6 +181,7 @@ fn main() -> Result<()> {
                     log_file_path: log_file,
                     heartbeat_interval_s: args.heartbeat_interval,
                     heartbeat_enabled: !args.no_heartbeat,
+                    voice_enabled: !args.no_voice,
                 },
             )?;
         }

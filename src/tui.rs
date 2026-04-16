@@ -197,7 +197,10 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use crossbeam_channel::Sender;
-use crossterm::event::{self, Event, KeyCode, KeyModifiers};
+use crossterm::event::{
+    self, Event, KeyCode, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags,
+    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+};
 use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -215,6 +218,7 @@ use crate::core::mission_manager::PilotCore;
 use crate::live_runner::HeartbeatPump;
 use crate::llm::conversation::IncomingMessage;
 use crate::llm::responses_client::CacheStats;
+use crate::transcribe::{PttController, PttMode, PttSnapshot};
 
 /// Run the interactive TUI on the calling thread. Blocks until the user exits
 /// (Ctrl-C / Ctrl-D / Esc); on return, `stop_event` is set so background
@@ -226,20 +230,41 @@ pub fn run_tui(
     pilot: Arc<PLMutex<PilotCore>>,
     heartbeat_pump: Option<Arc<HeartbeatPump>>,
     cache_stats: Option<Arc<CacheStats>>,
+    ptt: Option<Arc<PttController>>,
 ) -> Result<()> {
     // Set up terminal.
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
+    // Request press/repeat/release events on terminals that implement the
+    // Kitty keyboard protocol (Ghostty, WezTerm, kitty, iTerm2 w/ CSI u).
+    // `execute!` writes the CSI and returns Ok; we detect actual support by
+    // observing a non-`Press` `KeyEventKind` on the first key event.
+    let kitty_push_ok = execute!(
+        stdout,
+        PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::REPORT_EVENT_TYPES)
+    )
+    .is_ok();
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
     let mut input_buffer = String::new();
     let mut log_detail = true;
     let frame_interval = Duration::from_millis(100);
+    let mut ptt_tracker = PttKeyTracker::default();
 
     let outcome = loop {
         let next_tick = Instant::now() + frame_interval;
+
+        // Drain any final transcripts into the input buffer.
+        if let Some(p) = &ptt {
+            while let Some(final_text) = p.try_recv_final() {
+                if !input_buffer.is_empty() && !input_buffer.ends_with(' ') {
+                    input_buffer.push(' ');
+                }
+                input_buffer.push_str(final_text.trim());
+            }
+        }
 
         // Drain key events until the next render tick.
         loop {
@@ -251,7 +276,23 @@ pub fn run_tui(
                 break;
             }
             if let Event::Key(k) = event::read()? {
-                if k.modifiers.contains(KeyModifiers::CONTROL) {
+                // Any non-Press event implies the Kitty enhancement flags
+                // took effect, so we can trust true release events.
+                if matches!(k.kind, KeyEventKind::Repeat | KeyEventKind::Release) {
+                    ptt_tracker.kitty_observed = true;
+                }
+                // Ignore Release events on keys we don't track for PTT —
+                // they'd otherwise fall through to the Char(c) arm below.
+                let is_ptt_key = matches!(k.code, KeyCode::Char(' ') | KeyCode::Tab)
+                    && k.modifiers.is_empty();
+
+                if k.kind == KeyEventKind::Release && !is_ptt_key {
+                    continue;
+                }
+
+                if k.modifiers.contains(KeyModifiers::CONTROL)
+                    && k.kind != KeyEventKind::Release
+                {
                     match k.code {
                         KeyCode::Char('c') | KeyCode::Char('d') => {
                             break_outer(&stop_event);
@@ -264,8 +305,88 @@ pub fn run_tui(
                         _ => {}
                     }
                 }
+
+                // Diagnostic: surface any Release event we see so we can
+                // tell if Tab release is reaching us at all.
+                if k.kind == KeyEventKind::Release {
+                    bus.push_log(format!(
+                        "voice: release code={:?} mods={:?}",
+                        k.code, k.modifiers
+                    ));
+                }
+
+                // PTT key handling — space or tab held with no modifiers.
+                if is_ptt_key {
+                    if std::env::var("XPLANE_PILOT_DEBUG_KEYS").is_ok() {
+                        bus.push_log(format!(
+                            "voice: evt kind={:?} code={:?} mods={:?}",
+                            k.kind, k.code, k.modifiers
+                        ));
+                    }
+                    let was_recording = ptt_tracker
+                        .pending
+                        .as_ref()
+                        .map(|p| p.recording)
+                        .unwrap_or(false);
+                    handle_ptt_key(
+                        &k.kind,
+                        &k.code,
+                        &mut ptt_tracker,
+                        &mut input_buffer,
+                        ptt.as_deref(),
+                    );
+                    let now_recording = ptt_tracker
+                        .pending
+                        .as_ref()
+                        .map(|p| p.recording)
+                        .unwrap_or(false);
+                    if now_recording && !was_recording {
+                        bus.push_log(format!(
+                            "voice: listening ({})",
+                            if ptt_tracker.kitty_observed {
+                                "kitty"
+                            } else {
+                                "fallback"
+                            }
+                        ));
+                    } else if !now_recording && was_recording {
+                        bus.push_log("voice: finalizing".to_string());
+                    }
+                    continue;
+                }
+
+                // Any non-PTT key dismisses a pending tap so we don't
+                // retroactively treat it as a PTT hold.
+                ptt_tracker.pending = None;
+
+                if k.kind == KeyEventKind::Release {
+                    continue;
+                }
                 match k.code {
                     KeyCode::Enter => {
+                        // If PTT is mid-session, stop it so the final
+                        // transcript lands before we submit.
+                        if let Some(p) = &ptt {
+                            if p.snapshot().mode != PttMode::Idle {
+                                p.stop();
+                                // Give the worker up to 300 ms to deliver
+                                // the final.
+                                let deadline = Instant::now()
+                                    + Duration::from_millis(300);
+                                while Instant::now() < deadline {
+                                    if let Some(t) = p.try_recv_final() {
+                                        if !input_buffer.is_empty()
+                                            && !input_buffer.ends_with(' ')
+                                        {
+                                            input_buffer.push(' ');
+                                        }
+                                        input_buffer.push_str(t.trim());
+                                        break;
+                                    }
+                                    std::thread::sleep(Duration::from_millis(15));
+                                }
+                            }
+                        }
                         let raw = input_buffer.trim().to_string();
                         if !raw.is_empty() {
                             let (source, payload) = parse_input_source(&raw);
@@ -295,6 +416,21 @@ pub fn run_tui(
                     }
                     _ => {}
                 }
+            }
+        }
+        // Repeat-gap release detection. Runs regardless of Kitty support —
+        // some terminals (Ghostty observed) emit Press/Repeat but not
+        // Release, so the explicit Release handler alone is not enough.
+        // When a real Release does arrive, it fires first and clears the
+        // pending state before this timeout trips.
+        if let Some(pending) = &ptt_tracker.pending {
+            if pending.recording
+                && pending.last_seen.elapsed() > Duration::from_millis(250)
+            {
+                if let Some(p) = &ptt {
+                    p.stop();
+                }
+                ptt_tracker.pending = None;
             }
         }
         if stop_event.load(Ordering::Acquire) {
@@ -370,20 +506,203 @@ pub fn run_tui(
                 chunks[2],
             );
 
-            let input_title = " INPUT — enter to send · ctrl-t log detail · ctrl-c to exit ";
-            let input_paragraph = Paragraph::new(Line::from(vec![
+            let input_title =
+                " INPUT — space/tab hold to talk · enter to send · ctrl-t log detail · ctrl-c to exit ";
+            let ptt_snap: Option<PttSnapshot> = ptt.as_ref().map(|p| p.snapshot());
+            let mut spans: Vec<Span> = vec![
                 Span::styled("> ", Style::default().fg(Color::Cyan)),
                 Span::raw(input_buffer.clone()),
-            ]))
-            .block(Block::default().borders(Borders::ALL).title(input_title));
+            ];
+            if let Some(snap) = &ptt_snap {
+                if snap.mode != PttMode::Idle && !snap.partial.is_empty() {
+                    // Show prefix + partial dimmed while streaming.
+                    let mut partial = String::new();
+                    if !snap.prefix.is_empty() && input_buffer.is_empty() {
+                        partial.push_str(&snap.prefix);
+                    }
+                    partial.push_str(&snap.partial);
+                    spans.push(Span::styled(
+                        partial,
+                        Style::default().add_modifier(Modifier::DIM),
+                    ));
+                }
+                if snap.mode != PttMode::Idle {
+                    spans.push(Span::raw(" "));
+                    spans.push(Span::styled(
+                        amp_glyph(snap.amp).to_string(),
+                        Style::default().fg(Color::LightGreen),
+                    ));
+                }
+            }
+            let input_paragraph = Paragraph::new(Line::from(spans))
+                .block(Block::default().borders(Borders::ALL).title(input_title));
             f.render_widget(input_paragraph, chunks[3]);
         })?;
     };
 
+    if kitty_push_ok {
+        let _ = execute!(terminal.backend_mut(), PopKeyboardEnhancementFlags);
+    }
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     terminal.show_cursor()?;
     outcome
+}
+
+/// Vertical bar glyph for the mic amplitude (0..=8).
+fn amp_glyph(level: u8) -> char {
+    match level.min(8) {
+        0 => ' ',
+        1 => '▁',
+        2 => '▂',
+        3 => '▃',
+        4 => '▄',
+        5 => '▅',
+        6 => '▆',
+        7 => '▇',
+        _ => '█',
+    }
+}
+
+/// PTT key tracker. Lives on the TUI thread and translates raw key events
+/// into calls to the `PttController`. Handles both the Kitty-protocol path
+/// (real Press/Repeat/Release events) and the repeat-gap fallback.
+#[derive(Default)]
+struct PttKeyTracker {
+    pending: Option<PendingPtt>,
+    /// Set once we observe any non-Press KeyEventKind, which means the
+    /// Kitty keyboard flags took effect. Until then we fall back to a
+    /// repeat-gap timeout in the main loop.
+    kitty_observed: bool,
+}
+
+struct PendingPtt {
+    key: PttKey,
+    /// True once we've confirmed this is a hold (not a single tap) and
+    /// asked the `PttController` to start recording.
+    recording: bool,
+    last_seen: Instant,
+}
+
+#[derive(Copy, Clone, PartialEq, Eq)]
+enum PttKey {
+    Space,
+    Tab,
+}
+
+impl PttKey {
+    fn prefix(self) -> &'static str {
+        match self {
+            PttKey::Space => "",
+            PttKey::Tab => "[atc] ",
+        }
+    }
+
+    fn from_code(code: &KeyCode) -> Option<Self> {
+        match code {
+            KeyCode::Char(' ') => Some(PttKey::Space),
+            KeyCode::Tab => Some(PttKey::Tab),
+            _ => None,
+        }
+    }
+}
+
+/// Minimal interface the TUI needs from a PTT engine — keeping
+/// `handle_ptt_key` decoupled from `PttController` makes it trivially
+/// unit-testable with a stub.
+trait PttControl {
+    fn start(&self, prefix: String);
+    fn stop(&self);
+}
+
+impl PttControl for PttController {
+    fn start(&self, prefix: String) {
+        PttController::start(self, prefix);
+    }
+    fn stop(&self) {
+        PttController::stop(self);
+    }
+}
+
+fn handle_ptt_key<P: PttControl + ?Sized>(
+    kind: &KeyEventKind,
+    code: &KeyCode,
+    tracker: &mut PttKeyTracker,
+    input_buffer: &mut String,
+    ptt: Option<&P>,
+) {
+    let key = match PttKey::from_code(code) {
+        Some(k) => k,
+        None => return,
+    };
+    // Terminals without Kitty keyboard enhancement send auto-repeat as a
+    // stream of `Press` events, not `Repeat`. Treat a `Press` of the same
+    // key we're already tracking as a synthetic Repeat so the fallback
+    // path fires without waiting for a real Repeat event.
+    let effective = match kind {
+        KeyEventKind::Press
+            if matches!(&tracker.pending, Some(p) if p.key == key) =>
+        {
+            KeyEventKind::Repeat
+        }
+        other => *other,
+    };
+    match effective {
+        KeyEventKind::Press => {
+            // Insert the char immediately; we'll strip it on first Repeat
+            // if it turns out this was a PTT hold.
+            match key {
+                PttKey::Space => input_buffer.push(' '),
+                PttKey::Tab => input_buffer.push('\t'),
+            }
+            tracker.pending = Some(PendingPtt {
+                key,
+                recording: false,
+                last_seen: Instant::now(),
+            });
+        }
+        KeyEventKind::Repeat => {
+            let should_start = matches!(
+                &tracker.pending,
+                Some(p) if p.key == key && !p.recording
+            );
+            if should_start {
+                // Strip the stray character that was inserted on Press.
+                if matches!(input_buffer.chars().last(), Some(' ') | Some('\t')) {
+                    input_buffer.pop();
+                }
+                if !key.prefix().is_empty() {
+                    // Surface the [atc] prefix in the visible buffer so
+                    // the user can see what source the final will use.
+                    input_buffer.push_str(key.prefix());
+                }
+                if let Some(p) = ptt {
+                    p.start(key.prefix().to_string());
+                }
+                tracker.pending = Some(PendingPtt {
+                    key,
+                    recording: true,
+                    last_seen: Instant::now(),
+                });
+            } else if let Some(p) = tracker.pending.as_mut() {
+                if p.key == key {
+                    p.last_seen = Instant::now();
+                }
+            }
+        }
+        KeyEventKind::Release => {
+            let matches_pending = matches!(
+                &tracker.pending,
+                Some(p) if p.key == key && p.recording
+            );
+            if matches_pending {
+                if let Some(p) = ptt {
+                    p.stop();
+                }
+            }
+            tracker.pending = None;
+        }
+    }
 }
 
 fn break_outer(stop: &AtomicBool) {
@@ -765,5 +1084,213 @@ mod tests {
     #[test]
     fn wrap_helper_available() {
         assert_eq!(wrap_degrees_180(190.0), -170.0);
+    }
+
+    // ---- PTT key tracker tests ---------------------------------------
+
+    use std::cell::RefCell;
+
+    #[derive(Default)]
+    struct FakePtt {
+        calls: RefCell<Vec<String>>,
+    }
+
+    impl PttControl for FakePtt {
+        fn start(&self, prefix: String) {
+            self.calls.borrow_mut().push(format!("start:{prefix}"));
+        }
+        fn stop(&self) {
+            self.calls.borrow_mut().push("stop".to_string());
+        }
+    }
+
+    fn dispatch(
+        kind: KeyEventKind,
+        code: KeyCode,
+        tracker: &mut PttKeyTracker,
+        buffer: &mut String,
+        ptt: &FakePtt,
+    ) {
+        handle_ptt_key(&kind, &code, tracker, buffer, Some(ptt));
+    }
+
+    #[test]
+    fn single_space_press_inserts_char_no_ptt_start() {
+        let mut tracker = PttKeyTracker::default();
+        let mut buf = String::new();
+        let ptt = FakePtt::default();
+        dispatch(
+            KeyEventKind::Press,
+            KeyCode::Char(' '),
+            &mut tracker,
+            &mut buf,
+            &ptt,
+        );
+        assert_eq!(buf, " ");
+        assert!(ptt.calls.borrow().is_empty());
+        assert!(tracker.pending.is_some());
+    }
+
+    #[test]
+    fn space_press_plus_repeat_starts_ptt_and_strips_stray_char() {
+        let mut tracker = PttKeyTracker::default();
+        let mut buf = String::from("hello ");
+        let ptt = FakePtt::default();
+        dispatch(
+            KeyEventKind::Press,
+            KeyCode::Char(' '),
+            &mut tracker,
+            &mut buf,
+            &ptt,
+        );
+        // After Press: "hello  " (the just-typed space).
+        assert_eq!(buf, "hello  ");
+        dispatch(
+            KeyEventKind::Repeat,
+            KeyCode::Char(' '),
+            &mut tracker,
+            &mut buf,
+            &ptt,
+        );
+        // Stray trailing space stripped; no prefix for operator mode.
+        assert_eq!(buf, "hello ");
+        assert_eq!(*ptt.calls.borrow(), vec!["start:".to_string()]);
+        assert!(tracker.pending.as_ref().unwrap().recording);
+    }
+
+    #[test]
+    fn tab_press_plus_repeat_starts_ptt_with_atc_prefix() {
+        let mut tracker = PttKeyTracker::default();
+        let mut buf = String::new();
+        let ptt = FakePtt::default();
+        dispatch(
+            KeyEventKind::Press,
+            KeyCode::Tab,
+            &mut tracker,
+            &mut buf,
+            &ptt,
+        );
+        assert_eq!(buf, "\t");
+        dispatch(
+            KeyEventKind::Repeat,
+            KeyCode::Tab,
+            &mut tracker,
+            &mut buf,
+            &ptt,
+        );
+        // Stray tab stripped, [atc] prefix inserted.
+        assert_eq!(buf, "[atc] ");
+        assert_eq!(*ptt.calls.borrow(), vec!["start:[atc] ".to_string()]);
+    }
+
+    #[test]
+    fn release_event_stops_ptt_only_when_recording() {
+        let mut tracker = PttKeyTracker::default();
+        let mut buf = String::new();
+        let ptt = FakePtt::default();
+        // Press only (no repeat) → tap state, not recording.
+        dispatch(
+            KeyEventKind::Press,
+            KeyCode::Char(' '),
+            &mut tracker,
+            &mut buf,
+            &ptt,
+        );
+        dispatch(
+            KeyEventKind::Release,
+            KeyCode::Char(' '),
+            &mut tracker,
+            &mut buf,
+            &ptt,
+        );
+        // Release after a tap should NOT fire stop (would be a no-op PTT).
+        assert!(ptt.calls.borrow().is_empty());
+        assert!(tracker.pending.is_none());
+
+        // Now simulate press + repeat (recording) + release.
+        let mut buf2 = String::new();
+        let mut tracker2 = PttKeyTracker::default();
+        let ptt2 = FakePtt::default();
+        dispatch(
+            KeyEventKind::Press,
+            KeyCode::Char(' '),
+            &mut tracker2,
+            &mut buf2,
+            &ptt2,
+        );
+        dispatch(
+            KeyEventKind::Repeat,
+            KeyCode::Char(' '),
+            &mut tracker2,
+            &mut buf2,
+            &ptt2,
+        );
+        dispatch(
+            KeyEventKind::Release,
+            KeyCode::Char(' '),
+            &mut tracker2,
+            &mut buf2,
+            &ptt2,
+        );
+        assert_eq!(
+            *ptt2.calls.borrow(),
+            vec!["start:".to_string(), "stop".to_string()]
+        );
+        assert!(tracker2.pending.is_none());
+    }
+
+    #[test]
+    fn second_press_acts_as_synthetic_repeat_for_non_kitty_terminals() {
+        // Simulates a terminal without Kitty keyboard enhancement —
+        // auto-repeat arrives as more `Press` events, not `Repeat`.
+        let mut tracker = PttKeyTracker::default();
+        let mut buf = String::new();
+        let ptt = FakePtt::default();
+        dispatch(
+            KeyEventKind::Press,
+            KeyCode::Char(' '),
+            &mut tracker,
+            &mut buf,
+            &ptt,
+        );
+        // First press inserts the space and marks pending.
+        assert_eq!(buf, " ");
+        dispatch(
+            KeyEventKind::Press, // not Repeat!
+            KeyCode::Char(' '),
+            &mut tracker,
+            &mut buf,
+            &ptt,
+        );
+        // The second Press is treated as a synthetic Repeat, stripping
+        // the stray space and starting PTT.
+        assert_eq!(buf, "");
+        assert_eq!(*ptt.calls.borrow(), vec!["start:".to_string()]);
+        assert!(tracker.pending.as_ref().unwrap().recording);
+    }
+
+    #[test]
+    fn non_ptt_key_between_repeats_clears_pending() {
+        // Simulates the run_tui behavior where any non-PTT key dismisses
+        // a pending tap. We test classification only — the dismiss happens
+        // in the event loop, so here we just check that a Release without
+        // prior recording is a no-op as expected.
+        let mut tracker = PttKeyTracker::default();
+        tracker.pending = Some(PendingPtt {
+            key: PttKey::Space,
+            recording: false,
+            last_seen: Instant::now(),
+        });
+        let mut buf = String::new();
+        let ptt = FakePtt::default();
+        dispatch(
+            KeyEventKind::Release,
+            KeyCode::Char(' '),
+            &mut tracker,
+            &mut buf,
+            &ptt,
+        );
+        assert!(ptt.calls.borrow().is_empty());
+        assert!(tracker.pending.is_none());
     }
 }

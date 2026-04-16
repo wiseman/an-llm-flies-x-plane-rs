@@ -105,11 +105,19 @@ require an API key or X-Plane.
 ## Differences from the Python project
 
 This port keeps feature parity with the Python version for the flight control
-loop, LLM tool surface, and deterministic scenario runner. One intentional
-omission and one addition:
+loop, LLM tool surface, and deterministic scenario runner. A couple of
+differences worth calling out:
 
-- **No audio / Whisper transcription.** The Python `sim_pilot/speech.py`
-  push-to-talk path is not ported. Operator and ATC input is typed only.
+- **Streaming push-to-talk instead of batch Whisper.** Hold **space** in the
+  interactive TUI to dictate operator input; hold **tab** to dictate ATC
+  input (the result is prefixed with `[atc] ` before submission). Partial
+  transcripts stream into the input line via the OpenAI Realtime API
+  (`gpt-4o-mini-transcribe`); release the key to finalize, then press Enter
+  to send. Requires a working microphone and `OPENAI_API_KEY`. Release feel
+  is best on Kitty-keyboard-capable terminals (Ghostty, WezTerm, kitty,
+  iTerm2 with CSI u enabled); elsewhere there is a ~180 ms release tail.
+  Disable with `--no-voice`. The Python version did batch Whisper via
+  `sim_pilot/speech.py`.
 - **One extra sentence in the `sql_query` tool description** — "ALWAYS prefix
   spatial functions with ST_ (e.g. `ST_Point`, not `POINT`)" — added after
   observing the LLM write bare `POINT(...)` against DuckDB and fail. Flagged

@@ -82,7 +82,7 @@ When porting behavior changes, check the Python source first: paths are of the f
 
 One intentional, documented divergence: `SQL_QUERY_DESCRIPTION` in `src/llm/tools.rs` adds the sentence "ALWAYS prefix spatial functions with ST_" to the otherwise-verbatim Python description — the LLM was observed calling `POINT(...)` against DuckDB and failing. The comment above the constant flags this.
 
-The audio/push-to-talk + Whisper transcription path in `sim_pilot/speech.py` is **not ported**. All other behavior is in scope.
+The Python `sim_pilot/speech.py` used batch Whisper. The Rust port instead streams audio to the OpenAI Realtime API (`gpt-4o-mini-transcribe`) while holding space (operator) or tab (ATC, auto-prefixed `[atc] `). Mic capture is `cpal` + a linear resampler to 24 kHz PCM16; the WebSocket client lives in `src/transcribe/realtime_ws.rs`; the state machine in `src/transcribe/ptt.rs`. Press/Repeat/Release is detected via Kitty keyboard enhancement flags when the terminal supports them, with a ~180 ms repeat-gap fallback elsewhere. Disable with `--no-voice` or run with no `OPENAI_API_KEY`.
 
 ## Testing notes
 
