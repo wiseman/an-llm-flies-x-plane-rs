@@ -1098,9 +1098,15 @@ pub fn tool_engage_taxi(ctx: &ToolContext, args: &Map<String, Value>) -> String 
     // parallel to the runway along taxiway A). Append a short segment
     // that starts at the hold-short and points at the runway pavement
     // just beyond, so the final stop-ramp pivots the nose 60–90° to
-    // face the runway. 40 ft is short enough that the aircraft doesn't
-    // roll materially past the painted hold-short line, but long enough
-    // for the stop-ramp to bleed speed cleanly through the pivot.
+    // face the runway.
+    //
+    // 25 ft is the working tuning: most of the pivot completes in the
+    // first ~20 ft of the leg while the alignment-limit creep speed
+    // (4 kt) + full nose-wheel + pivot brake carve the aircraft around.
+    // Once advance_if_reached fires at 30 ft from the leg end, the
+    // stop-ramp brings the aircraft to rest within a few more feet.
+    // Shorter than this the pivot doesn't complete; longer, the
+    // aircraft rolls materially past the painted hold-short line.
     let mut face_leg_appended = false;
     if let (Some((flat, flon)), Some(last)) = (face_toward_latlon, legs_ft.last().copied()) {
         let runway_point_ft = geodetic_offset_ft(flat, flon, georef);
@@ -1108,7 +1114,7 @@ pub fn tool_engage_taxi(ctx: &ToolContext, args: &Map<String, Value>) -> String 
         let d = to_runway.length();
         if d > 1.0 {
             let unit = to_runway * (1.0 / d);
-            let face_end = last.end_ft + unit * 40.0;
+            let face_end = last.end_ft + unit * 25.0;
             legs_ft.push(StraightLeg { start_ft: last.end_ft, end_ft: face_end });
             names.push("(face runway)".to_string());
             face_leg_appended = true;
