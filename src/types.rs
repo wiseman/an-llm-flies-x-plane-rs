@@ -370,9 +370,12 @@ pub struct ActuatorCommands {
     pub brakes: f64,
     /// Asymmetric component layered on top of `brakes` for tight-turn
     /// differential braking: positive = extra right-main, negative = extra
-    /// left-main. The bridge writes
-    ///   left_wheel  = brakes + max(0, -pivot_brake)
-    ///   right_wheel = brakes + max(0,  pivot_brake)
+    /// left-main. Wheels resolve as
+    ///   left_wheel  = clamp(brakes - pivot_brake, 0, 1)
+    ///   right_wheel = clamp(brakes + pivot_brake, 0, 1)
+    /// so differential authority survives a full symmetric hold brake
+    /// (without this, hold_brake = 1.0 saturates both wheels at 1.0 and
+    /// pivot disappears, which breaks pivot-in-place at pose targets).
     /// Coupled to the nose-wheel controller — kicks in when the rudder is
     /// saturated and the aircraft is below ~5 kt, where nose-wheel alone
     /// can't produce a tight-enough pivot on a C172.

@@ -171,10 +171,10 @@ pub fn format_snapshot_display(snapshot: Option<&StatusSnapshot>) -> String {
         _ => "rwy —".to_string(),
     };
 
-    // Break `brakes + pivot_brake` out into left/right so the debug log
+    // Break `brakes ± pivot_brake` out into left/right so the debug log
     // tells us exactly which wheel the bridge is about to write.
-    let brake_left = (commands.brakes + (-commands.pivot_brake).max(0.0)).clamp(0.0, 1.0);
-    let brake_right = (commands.brakes + commands.pivot_brake.max(0.0)).clamp(0.0, 1.0);
+    let brake_left = (commands.brakes - commands.pivot_brake).clamp(0.0, 1.0);
+    let brake_right = (commands.brakes + commands.pivot_brake).clamp(0.0, 1.0);
     out.push_str(&format!(
         "  throttle {} {:4.2}   rudder {:+.2}   brake L {:.2} R {:.2}   flaps {:<5}   gear {}   {}   {}",
         throttle_bar,

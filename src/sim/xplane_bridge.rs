@@ -465,14 +465,16 @@ impl XPlaneWebBridge {
         let last_gear = *self.last_gear_down.lock().unwrap();
         let gear_down = commands.gear_down.unwrap_or(last_gear);
         let brake = clamp(commands.brakes, 0.0, 1.0);
-        // Differential braking: layer `pivot_brake` onto the symmetric
-        // `brakes` baseline. Positive pivot = right wheel takes the
-        // extra; negative = left wheel. The ± pairing lets the nose
-        // wheel coupled logic pivot the aircraft without needing its
-        // own dataref split.
+        // Differential braking: left = brakes − pivot, right = brakes +
+        // pivot (each clamped to [0,1]). This keeps an asymmetry visible
+        // even at full symmetric brake — at brakes=1.0 with pivot=+0.4
+        // the right wheel saturates at 1.0 but the left drops to 0.6,
+        // giving the differential torque needed to pivot-in-place at a
+        // pose target. The older max-max formula saturated both wheels
+        // and erased the pivot.
         let pivot = clamp(commands.pivot_brake, -1.0, 1.0);
-        let left_brake = clamp(brake + (-pivot).max(0.0), 0.0, 1.0);
-        let right_brake = clamp(brake + pivot.max(0.0), 0.0, 1.0);
+        let left_brake = clamp(brake - pivot, 0.0, 1.0);
+        let right_brake = clamp(brake + pivot, 0.0, 1.0);
         let cmd_ids = self.command_ids.lock().unwrap();
         let writes = vec![
             json!({ "id": cmd_ids[YOKE_PITCH_RATIO.name], "value": clamp(commands.elevator, -1.0, 1.0) }),

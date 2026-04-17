@@ -502,10 +502,12 @@ fn taxi_profile_enters_pose_phase_after_last_leg_when_pose_is_set() {
     let spd = tick.contribution.target_speed_kt.unwrap();
     assert!(spd > p.pose_creep_speed_kt, "approach should command > creep: {}", spd);
 
-    // Near target, heading still off → align phase (creep speed).
+    // Near target, heading still off → align phase: target speed = 0
+    // (differential braking pivots the aircraft in place; forward
+    // motion would drag it off the target pose).
     let align_state = taxi_state(Vec2::new(1000.0, 1995.0), 0.0, 2.0);
     let tick = p.contribute(&align_state, 0.2);
-    assert_eq!(tick.contribution.target_speed_kt, Some(p.pose_creep_speed_kt));
+    assert_eq!(tick.contribution.target_speed_kt, Some(0.0));
     assert!(!p.finished);
 
     // Within both position and heading tolerance → done.

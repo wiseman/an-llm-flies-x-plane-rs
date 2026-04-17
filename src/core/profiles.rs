@@ -1086,23 +1086,41 @@ impl TaxiProfile {
             .map(String::as_str)
     }
 
-    /// Pose-phase target speed: cruise while far, ramp down with distance,
-    /// `pose_creep_speed_kt` while pivoting (heading not yet matched),
-    /// 0 once both tolerances are met.
+    /// Pose-phase target speed. Three regimes:
+    ///
+    /// - **Parked** (both tolerances met): 0.
+    /// - **Align** (inside `pose_pivot_radius_ft`): 0. The differential
+    ///   brake + nose-wheel pair pivots the aircraft in place; forward
+    ///   motion would just drag it off the target.
+    /// - **Approach** (farther): ramps with distance up to cruise, BUT
+    ///   throttled by how badly the aircraft is off the bearing to the
+    ///   target. At ≥ 45° off we creep; at ≥ 20° we use turn speed.
+    ///   Without this, a fast-moving aircraft whose heading is way off
+    ///   the target bearing will orbit the pose instead of converging —
+    ///   exactly the failure mode the scenario test caught.
     fn pose_target_speed(&self, state: &AircraftState, pose: crate::types::TaxiPose) -> f64 {
-        let d = (pose.position_ft - state.position_ft).length();
-        let hdg_err = wrap_degrees_180(pose.heading_deg - state.heading_deg).abs();
-        if d < self.pose_position_tol_ft && hdg_err < self.pose_heading_tol_deg {
+        let to_target = pose.position_ft - state.position_ft;
+        let d = to_target.length();
+        let target_hdg_err = wrap_degrees_180(pose.heading_deg - state.heading_deg).abs();
+        if d < self.pose_position_tol_ft && target_hdg_err < self.pose_heading_tol_deg {
             return 0.0;
         }
         if d < self.pose_pivot_radius_ft {
-            // Close enough to stop caring about position — we're pivoting.
-            // Need some forward motion for the nose wheel to bite.
+            return 0.0;
+        }
+        let bearing_to_target = crate::types::vector_to_heading(to_target);
+        let approach_hdg_err =
+            wrap_degrees_180(bearing_to_target - state.heading_deg).abs();
+        if approach_hdg_err > 45.0 {
             return self.pose_creep_speed_kt;
         }
-        // Approach: ramp from creep speed (at pivot radius) up to cruise.
-        let ramp_slope = 0.25; // kt per ft past the pivot radius
-        (self.pose_creep_speed_kt + (d - self.pose_pivot_radius_ft) * ramp_slope)
+        if approach_hdg_err > 20.0 {
+            return self.turn_speed_kt;
+        }
+        // Well-aligned with the approach direction — ramp with distance
+        // from turn_speed at the pivot radius up to cruise.
+        let ramp_slope = 0.25;
+        (self.turn_speed_kt + (d - self.pose_pivot_radius_ft) * ramp_slope)
             .min(self.cruise_speed_kt)
     }
 
