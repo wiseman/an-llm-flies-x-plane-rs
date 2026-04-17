@@ -181,6 +181,11 @@ pub enum LateralMode {
     /// runway-frame feet) via `NoseWheelController` on rudder; aileron is
     /// locked to zero.
     TaxiFollow,
+    /// Ground taxi pose target: steer toward `target_waypoint.position_ft`
+    /// until close, then pivot to match `target_heading_deg`. Used for
+    /// precise stop-and-face-direction endings (hold-short, parking
+    /// spot). No crosstrack — this isn't tracking a line.
+    TaxiPose,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -284,6 +289,16 @@ pub struct Runway {
 pub struct StraightLeg {
     pub start_ft: Vec2,
     pub end_ft: Vec2,
+}
+
+/// Explicit position + heading target for the terminal phase of a taxi
+/// (e.g. the hold-short line — stop at P, nose pointed at the runway).
+/// Different object from `StraightLeg`: a leg is a path to follow, a
+/// pose is a state to reach.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TaxiPose {
+    pub position_ft: Vec2,
+    pub heading_deg: f64,
 }
 
 impl StraightLeg {

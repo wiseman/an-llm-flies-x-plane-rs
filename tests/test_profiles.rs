@@ -479,6 +479,43 @@ fn taxi_profile_creeps_when_heading_far_off_leg() {
 }
 
 #[test]
+fn taxi_profile_enters_pose_phase_after_last_leg_when_pose_is_set() {
+    use xplane_pilot::types::TaxiPose;
+    let (legs, names) = three_leg_ninety_deg();
+    let pose = TaxiPose {
+        position_ft: legs.last().unwrap().end_ft,
+        heading_deg: 90.0, // face east; aircraft will pivot to match
+    };
+    let mut p = TaxiProfile::new(legs, names).with_final_pose(pose);
+    p.current_idx = 3; // jump past all legs to exercise pose phase
+
+    // Far from target, heading mismatched → approach phase.
+    let approach_state = taxi_state(Vec2::new(1000.0, 1970.0), 0.0, 3.0);
+    let tick = p.contribute(&approach_state, 0.2);
+    assert_eq!(
+        tick.contribution.lateral_mode,
+        Some(LateralMode::TaxiPose),
+        "expected TaxiPose mode"
+    );
+    assert!(tick.contribution.target_waypoint.is_some());
+    assert_eq!(tick.contribution.target_heading_deg, Some(90.0));
+    let spd = tick.contribution.target_speed_kt.unwrap();
+    assert!(spd > p.pose_creep_speed_kt, "approach should command > creep: {}", spd);
+
+    // Near target, heading still off → align phase (creep speed).
+    let align_state = taxi_state(Vec2::new(1000.0, 1995.0), 0.0, 2.0);
+    let tick = p.contribute(&align_state, 0.2);
+    assert_eq!(tick.contribution.target_speed_kt, Some(p.pose_creep_speed_kt));
+    assert!(!p.finished);
+
+    // Within both position and heading tolerance → done.
+    let done_state = taxi_state(Vec2::new(1002.0, 1998.0), 90.0, 0.5);
+    let tick = p.contribute(&done_state, 0.2);
+    assert!(p.finished);
+    assert_eq!(tick.contribution.target_speed_kt, Some(0.0));
+}
+
+#[test]
 fn taxi_profile_ramps_speed_to_zero_on_final_leg_and_finishes() {
     let (legs, names) = three_leg_ninety_deg();
     let mut p = TaxiProfile::new(legs, names);

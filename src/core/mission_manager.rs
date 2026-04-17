@@ -297,6 +297,26 @@ impl PilotCore {
             taxi_pivot_brake = nw.pivot_brake;
             self.bank_controller.reset();
             (0.0, nw.rudder)
+        } else if guidance.lateral_mode == LateralMode::TaxiPose {
+            // Pose-tracking terminal phase. Two-phase heading feedback:
+            // when we're far from the target position, steer toward it
+            // (bearing_to_target); when we're close, pivot to match the
+            // target heading. No crosstrack — there's no line here.
+            let (heading_err_deg, taxi_pivot) = taxi_pose_errors(guidance, state);
+            let nw = self.nose_wheel_controller.update(
+                0.0,
+                heading_err_deg,
+                state.r_rad_s.to_degrees(),
+                state.gs_kt,
+            );
+            taxi_pivot_brake = nw.pivot_brake;
+            self.bank_controller.reset();
+            // If the profile reported it's done aligning, actively hold
+            // position via the ground-speed controller's `target = 0`
+            // hold-brake. `_taxi_pivot` is `true` while we're still
+            // pivoting — kept for logging parity in the future.
+            let _ = taxi_pivot;
+            (0.0, nw.rudder)
         } else if guidance.lateral_mode == LateralMode::RolloutCenterline {
             let track_ref = if state.on_ground { state.heading_deg } else { state.track_deg };
             let track_error = wrap_degrees_180(self.runway_frame.runway.course_deg - track_ref);
@@ -402,4 +422,31 @@ fn taxi_leg_errors(
     let leg_bearing = crate::types::vector_to_heading(leg_vec);
     let heading_err = wrap_degrees_180(leg_bearing - state.heading_deg);
     (crosstrack_ft, heading_err)
+}
+
+/// Pose-target heading feedback for `LateralMode::TaxiPose`. Returns
+/// `(heading_err_deg, pivoting)`. When the aircraft is outside
+/// `POSE_PIVOT_SWITCH_FT` of the target position, we feed the
+/// aircraft-to-target bearing as the desired heading (steer toward the
+/// point). Inside that radius we switch to the target heading itself
+/// (pivot in place to face the commanded direction); `pivoting` flips
+/// true so the caller can expose it in debug if desired.
+const POSE_PIVOT_SWITCH_FT: f64 = 15.0;
+fn taxi_pose_errors(guidance: &GuidanceTargets, state: &AircraftState) -> (f64, bool) {
+    let target_pos = guidance
+        .target_waypoint
+        .as_ref()
+        .map(|w| w.position_ft)
+        .unwrap_or(state.position_ft);
+    let target_heading = guidance.target_heading_deg.unwrap_or(state.heading_deg);
+    let to_target = target_pos - state.position_ft;
+    let d = to_target.length();
+    if d > POSE_PIVOT_SWITCH_FT {
+        let bearing_to_target = crate::types::vector_to_heading(to_target);
+        let err = wrap_degrees_180(bearing_to_target - state.heading_deg);
+        (err, false)
+    } else {
+        let err = wrap_degrees_180(target_heading - state.heading_deg);
+        (err, true)
+    }
 }

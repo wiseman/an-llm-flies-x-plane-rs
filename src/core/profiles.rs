@@ -946,6 +946,25 @@ pub struct TaxiProfile {
     pub cruise_speed_kt: f64,
     pub turn_lookahead_ft: f64,
     pub final_stop_distance_ft: f64,
+    /// Optional terminal pose target. After the leg sequencer advances
+    /// past the last `StraightLeg`, the profile switches to pose-tracking
+    /// mode: steer toward `position_ft` until close, then pivot to match
+    /// `heading_deg`, then stop. This is the right abstraction for
+    /// hold-short ("stop here, facing this way") where line-following is
+    /// fundamentally the wrong objective. `None` = old behaviour (set
+    /// `finished = true` when past the last leg, aircraft coasts to stop).
+    pub final_pose: Option<crate::types::TaxiPose>,
+    /// Pose-target entry radius. Inside this distance we stop chasing
+    /// position and start pivoting to heading.
+    pub pose_pivot_radius_ft: f64,
+    /// Position tolerance for declaring the pose reached.
+    pub pose_position_tol_ft: f64,
+    /// Heading tolerance (degrees) for declaring the pose reached.
+    pub pose_heading_tol_deg: f64,
+    /// Creep speed used while pivoting to target heading — the nose wheel
+    /// needs some forward motion to bite, so we can't sit at 0 kt while
+    /// the heading still needs to rotate.
+    pub pose_creep_speed_kt: f64,
 }
 
 impl TaxiProfile {
@@ -965,7 +984,17 @@ impl TaxiProfile {
             cruise_speed_kt: 10.0,
             turn_lookahead_ft: 180.0,
             final_stop_distance_ft: 60.0,
+            final_pose: None,
+            pose_pivot_radius_ft: 15.0,
+            pose_position_tol_ft: 10.0,
+            pose_heading_tol_deg: 5.0,
+            pose_creep_speed_kt: 2.0,
         }
+    }
+
+    pub fn with_final_pose(mut self, pose: crate::types::TaxiPose) -> Self {
+        self.final_pose = Some(pose);
+        self
     }
 
     fn current_leg(&self) -> Option<StraightLeg> {
@@ -978,12 +1007,16 @@ impl TaxiProfile {
         };
         let dist_to_end = (state.position_ft - current.end_ft).length();
         if dist_to_end < self.leg_advance_distance_ft {
-            if self.current_idx + 1 < self.legs_ft.len() {
-                self.current_idx += 1;
-            } else {
-                self.finished = true;
-            }
+            // Always increment. If that pushes us past the last leg, the
+            // contribute path checks for a pose target; absent one, it
+            // sets `finished`. This split lets the pose phase take over
+            // without the line-following stop-ramp fighting it.
+            self.current_idx += 1;
         }
+    }
+
+    fn in_pose_phase(&self) -> bool {
+        self.current_idx >= self.legs_ft.len() && self.final_pose.is_some()
     }
 
     /// Target ground speed given the upcoming geometry and the aircraft's
@@ -1052,6 +1085,53 @@ impl TaxiProfile {
             .get(self.current_idx)
             .map(String::as_str)
     }
+
+    /// Pose-phase target speed: cruise while far, ramp down with distance,
+    /// `pose_creep_speed_kt` while pivoting (heading not yet matched),
+    /// 0 once both tolerances are met.
+    fn pose_target_speed(&self, state: &AircraftState, pose: crate::types::TaxiPose) -> f64 {
+        let d = (pose.position_ft - state.position_ft).length();
+        let hdg_err = wrap_degrees_180(pose.heading_deg - state.heading_deg).abs();
+        if d < self.pose_position_tol_ft && hdg_err < self.pose_heading_tol_deg {
+            return 0.0;
+        }
+        if d < self.pose_pivot_radius_ft {
+            // Close enough to stop caring about position — we're pivoting.
+            // Need some forward motion for the nose wheel to bite.
+            return self.pose_creep_speed_kt;
+        }
+        // Approach: ramp from creep speed (at pivot radius) up to cruise.
+        let ramp_slope = 0.25; // kt per ft past the pivot radius
+        (self.pose_creep_speed_kt + (d - self.pose_pivot_radius_ft) * ramp_slope)
+            .min(self.cruise_speed_kt)
+    }
+
+    fn contribute_pose(
+        &mut self,
+        state: &AircraftState,
+        pose: crate::types::TaxiPose,
+    ) -> ProfileTick {
+        let d = (pose.position_ft - state.position_ft).length();
+        let hdg_err = wrap_degrees_180(pose.heading_deg - state.heading_deg).abs();
+        if d < self.pose_position_tol_ft && hdg_err < self.pose_heading_tol_deg {
+            self.finished = true;
+        }
+        let target_speed = self.pose_target_speed(state, pose);
+        ProfileTick::contribution_only(ProfileContribution {
+            lateral_mode: Some(LateralMode::TaxiPose),
+            vertical_mode: Some(VerticalMode::Taxi),
+            target_waypoint: Some(crate::types::Waypoint {
+                name: "hold_short".to_string(),
+                position_ft: pose.position_ft,
+                altitude_ft: None,
+            }),
+            target_heading_deg: Some(pose.heading_deg),
+            target_speed_kt: Some(target_speed),
+            target_pitch_deg: Some(0.0),
+            throttle_limit: Some((0.0, 1.0)),
+            ..Default::default()
+        })
+    }
 }
 
 impl GuidanceProfile for TaxiProfile {
@@ -1064,7 +1144,18 @@ impl GuidanceProfile for TaxiProfile {
         s
     }
     fn contribute(&mut self, state: &AircraftState, _dt: f64) -> ProfileTick {
-        self.advance_if_reached(state);
+        if !self.finished {
+            self.advance_if_reached(state);
+            // Past the last leg? Decide what to do next.
+            if self.current_idx >= self.legs_ft.len() && self.final_pose.is_none() {
+                self.finished = true;
+            }
+        }
+        if self.in_pose_phase() && !self.finished {
+            let pose = self.final_pose.unwrap();
+            return self.contribute_pose(state, pose);
+        }
+        // Normal line-following path.
         let leg = self.current_leg();
         let target_speed = self.target_speed_kt(state);
         ProfileTick::contribution_only(ProfileContribution {
@@ -1079,6 +1170,25 @@ impl GuidanceProfile for TaxiProfile {
     }
 
     fn debug_line(&self, state: &AircraftState) -> Option<String> {
+        if self.in_pose_phase() {
+            let pose = self.final_pose.unwrap();
+            let d = (pose.position_ft - state.position_ft).length();
+            let hdg_err = wrap_degrees_180(pose.heading_deg - state.heading_deg);
+            let phase = if self.finished {
+                "parked"
+            } else if d < self.pose_pivot_radius_ft {
+                "align"
+            } else {
+                "approach"
+            };
+            return Some(format!(
+                "taxi pose [{}] d {:.0}ft hdg-err {:+.0}° target {:.0}kt",
+                phase,
+                d,
+                hdg_err,
+                self.pose_target_speed(state, pose),
+            ));
+        }
         let Some(leg) = self.current_leg() else {
             return Some(format!("taxi finished={} legs={}", self.finished, self.legs_ft.len()));
         };
