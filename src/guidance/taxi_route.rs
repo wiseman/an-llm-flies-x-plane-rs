@@ -507,7 +507,7 @@ pub fn plan(
 /// Two candidate forms for a runway ident, with and without a leading
 /// zero on the numeric prefix. "01L" → ["01L", "1L"]; "1L" → ["1L", "01L"];
 /// "31" → ["31", "31"] (no zero-pad change possible).
-fn runway_query_forms(ident: &str) -> [String; 2] {
+pub fn runway_query_forms(ident: &str) -> [String; 2] {
     let digits: String = ident.chars().take_while(|c| c.is_ascii_digit()).collect();
     let suffix: &str = &ident[digits.len()..];
     let alt = if let Some(stripped) = digits.strip_prefix('0') {

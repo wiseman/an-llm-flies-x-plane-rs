@@ -858,6 +858,101 @@ pub fn build_taxi_legs_with_pullout(
     (legs_ft, names, Some(d_ft))
 }
 
+pub fn tool_engage_line_up(ctx: &ToolContext, args: &Map<String, Value>) -> String {
+    let bridge = match ctx.bridge.as_ref() {
+        Some(b) => b.clone(),
+        None => return "error: no X-Plane bridge available; engage_line_up needs the georef".to_string(),
+    };
+    let airport = match arg_str(args, "airport_ident") {
+        Ok(s) => s.to_string(),
+        Err(e) => return format!("error: {}", e),
+    };
+    let runway = match arg_str(args, "runway_ident") {
+        Ok(s) => s.to_string(),
+        Err(e) => return format!("error: {}", e),
+    };
+    let (start_lat, start_lon) = match (
+        args.get("start_lat").and_then(|v| v.as_f64()),
+        args.get("start_lon").and_then(|v| v.as_f64()),
+    ) {
+        (Some(lat), Some(lon)) => (lat, lon),
+        _ => {
+            let lat = bridge.get_dataref_value(LATITUDE_DEG.name);
+            let lon = bridge.get_dataref_value(LONGITUDE_DEG.name);
+            match (lat, lon) {
+                (Some(lat), Some(lon)) => (lat, lon),
+                _ => return "error: aircraft position unavailable; pass start_lat and start_lon or wait for a dataref update".to_string(),
+            }
+        }
+    };
+
+    if let Err(e) = ensure_runway_conn(ctx) {
+        return format!("error: {}", e);
+    }
+    let (thr_lat, thr_lon, heading_deg) = {
+        let guard = ctx.runway_conn.lock().unwrap();
+        let conn = guard.as_ref().unwrap();
+        let forms = taxi_route::runway_query_forms(&runway);
+        let row: Result<(f64, f64, f64), _> = conn.query_row(
+            "SELECT \
+                 CASE WHEN le_ident = ? OR le_ident = ? \
+                      THEN le_latitude_deg  ELSE he_latitude_deg  END, \
+                 CASE WHEN le_ident = ? OR le_ident = ? \
+                      THEN le_longitude_deg ELSE he_longitude_deg END, \
+                 CASE WHEN le_ident = ? OR le_ident = ? \
+                      THEN le_heading_degT  ELSE he_heading_degT  END \
+             FROM runways \
+             WHERE airport_ident = ? \
+               AND (le_ident = ? OR le_ident = ? OR he_ident = ? OR he_ident = ?) \
+               AND closed = 0 \
+             LIMIT 1",
+            [
+                forms[0].as_str(), forms[1].as_str(),
+                forms[0].as_str(), forms[1].as_str(),
+                forms[0].as_str(), forms[1].as_str(),
+                airport.as_str(),
+                forms[0].as_str(), forms[1].as_str(),
+                forms[0].as_str(), forms[1].as_str(),
+            ],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        );
+        match row {
+            Ok(v) => v,
+            Err(e) => return format!("error: runway {:?} not found at {}: {}", runway, airport, e),
+        }
+    };
+
+    let georef = bridge.georef();
+    let aircraft_pos_ft = geodetic_offset_ft(start_lat, start_lon, georef);
+    let threshold_ft = geodetic_offset_ft(thr_lat, thr_lon, georef);
+    // Final line-up pose: 100 ft past the pavement end along the runway
+    // course. Enough for the aircraft to stop with nose aligned and wheels
+    // clear of the hold-short line; leaves a full runway ahead for the
+    // takeoff roll. The aircraft ends stopped via TaxiProfile's final-leg
+    // ramp + hold brake latch.
+    let along_course = heading_to_vector(heading_deg, 100.0);
+    let aligned_ft = threshold_ft + along_course;
+
+    let legs_ft = vec![
+        StraightLeg { start_ft: aircraft_pos_ft, end_ft: threshold_ft },
+        StraightLeg { start_ft: threshold_ft,     end_ft: aligned_ft },
+    ];
+    let names = vec!["(entering runway)".to_string(), format!("rwy {}", runway)];
+
+    let profile = Box::new(TaxiProfile::new(legs_ft, names));
+    let displaced = ctx.pilot.lock().engage_profile(profile);
+
+    let approach_dist = (threshold_ft - aircraft_pos_ft).length();
+    format!(
+        "engaged line_up {} runway {} — crossing {:.0} ft, final heading {:.0}°{}",
+        airport,
+        runway,
+        approach_dist,
+        heading_deg,
+        format_displaced(&displaced)
+    )
+}
+
 pub fn tool_engage_taxi(ctx: &ToolContext, args: &Map<String, Value>) -> String {
     let bridge = match ctx.bridge.as_ref() {
         Some(b) => b.clone(),
@@ -1225,6 +1320,7 @@ pub fn dispatch_tool(call: &Value, ctx: &ToolContext) -> String {
         "sql_query" => tool_sql_query(ctx, &map),
         "plan_taxi_route" => tool_plan_taxi_route(ctx, &map),
         "engage_taxi" => tool_engage_taxi(ctx, &map),
+        "engage_line_up" => tool_engage_line_up(ctx, &map),
         other => format!("error: unknown tool {:?}", other),
     }
 }
@@ -1414,6 +1510,29 @@ pub fn tool_schemas() -> Vec<Value> {
             &["query"],
         ),
         schema(
+            "engage_line_up",
+            ENGAGE_LINE_UP_DESCRIPTION,
+            json!({
+                "airport_ident": {
+                    "type": "string",
+                    "description": "Airport identifier as stored in apt.dat (e.g. 'KSFO')."
+                },
+                "runway_ident": {
+                    "type": "string",
+                    "description": "Runway to line up on. Either end ident works (e.g. '12' or '30')."
+                },
+                "start_lat": {
+                    "type": ["number", "null"],
+                    "description": "Starting latitude. If null, the current aircraft position from X-Plane is used."
+                },
+                "start_lon": {
+                    "type": ["number", "null"],
+                    "description": "Starting longitude. If null, the current aircraft position from X-Plane is used."
+                }
+            }),
+            &["airport_ident", "runway_ident", "start_lat", "start_lon"],
+        ),
+        schema(
             "engage_taxi",
             ENGAGE_TAXI_DESCRIPTION,
             json!({
@@ -1471,6 +1590,22 @@ pub fn tool_schemas() -> Vec<Value> {
         ),
     ]
 }
+
+const ENGAGE_LINE_UP_DESCRIPTION: &str = "Cross the hold-short onto the \
+runway, turn to runway heading, and stop with the nose aligned for takeoff. \
+This is the 'line up and wait' clearance in ATC phraseology. Mirrors \
+engage_taxi internally — same nose-wheel and ground-speed controllers, \
+same sharp-turn slowdown — but the goal is a pose on the runway rather \
+than a hold-short.
+
+Use when ATC says 'line up runway X and wait' or 'cleared for takeoff \
+runway X' and the aircraft is currently stopped at the hold-short. After \
+this completes and the aircraft is aligned, call engage_takeoff to begin \
+the takeoff roll.
+
+Requires a live X-Plane bridge (needs the georef to convert the runway \
+threshold lat/lon into runway-frame feet). Displaces any active \
+three-axis profile.";
 
 const ENGAGE_TAXI_DESCRIPTION: &str = "Engage the ground-taxi autopilot. \
 Plans the route via the same logic as plan_taxi_route, then takes control \

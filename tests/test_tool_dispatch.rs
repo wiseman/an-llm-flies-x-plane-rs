@@ -927,6 +927,68 @@ fn engage_taxi_prepends_pullout_leg_when_far_from_nearest_node() {
 }
 
 #[test]
+fn engage_line_up_builds_two_leg_route_to_runway_threshold() {
+    let dir = TempDir::new().unwrap();
+    build_taxi_fixture_parquet(dir.path());
+    // Georef anchors at runway 09 threshold so the expected end-pose
+    // offsets are easy to reason about.
+    let bridge = FakeBridge::new(
+        &[
+            ("sim/flightmodel/position/latitude", 37.000800),
+            ("sim/flightmodel/position/longitude", -121.998500),
+        ],
+        37.000100,
+        -121.997500,
+    );
+    let ctx = make_ctx(
+        Some(bridge.clone() as Arc<dyn ToolBridge>),
+        Some(dir.path().to_path_buf()),
+    );
+    let r = dispatch_tool(
+        &call(
+            "engage_line_up",
+            json!({
+                "airport_ident": "KTEST",
+                "runway_ident": "09",
+                "start_lat": 37.000800,
+                "start_lon": -121.998500,
+            }),
+        ),
+        &ctx,
+    );
+    assert!(!r.starts_with("error"), "got: {}", r);
+    assert!(r.contains("engaged line_up KTEST"), "got: {}", r);
+    assert!(r.contains("runway 09"), "got: {}", r);
+    // Verify the taxi profile is engaged (replaces the idle trio).
+    assert_eq!(ctx.pilot.lock().list_profile_names(), vec!["taxi"]);
+}
+
+#[test]
+fn engage_line_up_unknown_runway_errors() {
+    let dir = TempDir::new().unwrap();
+    build_taxi_fixture_parquet(dir.path());
+    let bridge = FakeBridge::new(&[], 37.000100, -121.997500);
+    let ctx = make_ctx(
+        Some(bridge.clone() as Arc<dyn ToolBridge>),
+        Some(dir.path().to_path_buf()),
+    );
+    let r = dispatch_tool(
+        &call(
+            "engage_line_up",
+            json!({
+                "airport_ident": "KTEST",
+                "runway_ident": "99",
+                "start_lat": 37.000800,
+                "start_lon": -121.998500,
+            }),
+        ),
+        &ctx,
+    );
+    assert!(r.starts_with("error"));
+    assert!(r.contains("runway"));
+}
+
+#[test]
 fn engage_taxi_without_bridge_errors() {
     let dir = TempDir::new().unwrap();
     build_taxi_fixture_parquet(dir.path());
