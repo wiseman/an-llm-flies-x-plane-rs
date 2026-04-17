@@ -834,6 +834,68 @@ fn plan_taxi_route_airport_without_network_errors() {
     assert!(r.contains("no taxi network"));
 }
 
+// ---------- engage_taxi ----------
+
+#[test]
+fn engage_taxi_swaps_in_taxi_profile_and_reports_summary() {
+    let dir = TempDir::new().unwrap();
+    build_taxi_fixture_parquet(dir.path());
+    // Georef anchor = runway 09 threshold (well inside KTEST) so the
+    // geodetic → local-feet conversion lands reasonable values.
+    let bridge = FakeBridge::new(
+        &[
+            ("sim/flightmodel/position/latitude", 37.000500),
+            ("sim/flightmodel/position/longitude", -122.002000),
+        ],
+        37.000100,
+        -121.997500,
+    );
+    let ctx = make_ctx(
+        Some(bridge.clone() as Arc<dyn ToolBridge>),
+        Some(dir.path().to_path_buf()),
+    );
+    let r = dispatch_tool(
+        &call(
+            "engage_taxi",
+            json!({
+                "airport_ident": "KTEST",
+                "destination_runway": "09",
+                "via_taxiways": ["A", "D"],
+                "start_lat": 37.000500,
+                "start_lon": -122.002000,
+            }),
+        ),
+        &ctx,
+    );
+    assert!(!r.starts_with("error"), "got: {}", r);
+    assert!(r.contains("engaged taxi KTEST"), "got: {}", r);
+    assert!(r.contains("A -> D"), "got: {}", r);
+    let names = ctx.pilot.lock().list_profile_names();
+    assert_eq!(names, vec!["taxi"]);
+}
+
+#[test]
+fn engage_taxi_without_bridge_errors() {
+    let dir = TempDir::new().unwrap();
+    build_taxi_fixture_parquet(dir.path());
+    let ctx = make_ctx(None, Some(dir.path().to_path_buf()));
+    let r = dispatch_tool(
+        &call(
+            "engage_taxi",
+            json!({
+                "airport_ident": "KTEST",
+                "destination_runway": "09",
+                "via_taxiways": [],
+                "start_lat": 37.000500,
+                "start_lon": -122.002000,
+            }),
+        ),
+        &ctx,
+    );
+    assert!(r.starts_with("error"));
+    assert!(r.contains("bridge"));
+}
+
 // ---------- spatial extension ----------
 
 #[test]

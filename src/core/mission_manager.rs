@@ -11,6 +11,8 @@ use std::collections::BTreeSet;
 use crate::config::ConfigBundle;
 use crate::control::bank_hold::{BankController, CoordinationController};
 use crate::control::centerline_rollout::CenterlineRolloutController;
+use crate::control::ground_speed::GroundSpeedController;
+use crate::control::nose_wheel::NoseWheelController;
 use crate::control::pitch_hold::PitchController;
 use crate::control::tecs_lite::TECSLite;
 use crate::core::profiles::{
@@ -49,6 +51,8 @@ pub struct PilotCore {
     pub rollout_controller: CenterlineRolloutController,
     pub tecs: TECSLite,
     pub flare_controller: FlareController,
+    pub nose_wheel_controller: NoseWheelController,
+    pub ground_speed_controller: GroundSpeedController,
     pub active_profiles: Vec<Box<dyn GuidanceProfile>>,
     pub latest_snapshot: Option<StatusSnapshot>,
 }
@@ -73,6 +77,8 @@ impl PilotCore {
             rollout_controller: CenterlineRolloutController::new(),
             tecs,
             flare_controller: flare,
+            nose_wheel_controller: NoseWheelController::new(),
+            ground_speed_controller: GroundSpeedController::new(),
             active_profiles: idle,
             latest_snapshot: None,
             config,
@@ -261,7 +267,20 @@ impl PilotCore {
     }
 
     fn commands_from_guidance(&mut self, state: &AircraftState, guidance: &GuidanceTargets) -> ActuatorCommands {
-        let (aileron, rudder) = if guidance.lateral_mode == LateralMode::RolloutCenterline {
+        let (aileron, rudder) = if guidance.lateral_mode == LateralMode::TaxiFollow {
+            // Ground taxi: follow target_path on the nose wheel. Aileron is
+            // irrelevant on the ground, so lock it to zero and reset the
+            // bank controller integrator so it doesn't wind up.
+            let (crosstrack_ft, heading_err_deg) =
+                taxi_leg_errors(guidance.target_path, state);
+            let rudder = self.nose_wheel_controller.update(
+                crosstrack_ft,
+                heading_err_deg,
+                state.r_rad_s.to_degrees(),
+            );
+            self.bank_controller.reset();
+            (0.0, rudder)
+        } else if guidance.lateral_mode == LateralMode::RolloutCenterline {
             let track_ref = if state.on_ground { state.heading_deg } else { state.track_deg };
             let track_error = wrap_degrees_180(self.runway_frame.runway.course_deg - track_ref);
             let rudder = self.rollout_controller.update(
@@ -286,7 +305,18 @@ impl PilotCore {
         };
 
         let throttle_limit = guidance.throttle_limit.unwrap_or((0.0, 1.0));
-        let (pitch_cmd_deg, throttle_cmd) = if matches!(
+        // `taxi_brake_override` is set when we're in taxi mode so the
+        // final ActuatorCommands picks up the ground-speed controller's
+        // brake instead of the profile-provided `guidance.brakes`.
+        let mut taxi_brake_override: Option<f64> = None;
+        let (pitch_cmd_deg, throttle_cmd) = if guidance.vertical_mode == VerticalMode::Taxi {
+            let cmd = self.ground_speed_controller.update(
+                guidance.target_speed_kt.unwrap_or(0.0),
+                state.gs_kt,
+            );
+            taxi_brake_override = Some(cmd.brake);
+            (0.0, cmd.throttle)
+        } else if matches!(
             guidance.vertical_mode,
             VerticalMode::Tecs | VerticalMode::GlidepathTrack
         ) {
@@ -324,7 +354,34 @@ impl PilotCore {
             throttle: clamp(throttle_cmd, 0.0, 1.0),
             flaps: guidance.flaps_cmd,
             gear_down: Some(true),
-            brakes: guidance.brakes,
+            brakes: taxi_brake_override.unwrap_or(guidance.brakes),
         }
     }
+}
+
+/// Compute the crosstrack and heading errors needed by
+/// `NoseWheelController` given the current taxi leg and aircraft state.
+/// Falls back to zeros when no leg is supplied (keeps the aircraft in
+/// place instead of steering wildly).
+fn taxi_leg_errors(
+    target_path: Option<crate::types::StraightLeg>,
+    state: &AircraftState,
+) -> (f64, f64) {
+    let Some(leg) = target_path else {
+        return (0.0, 0.0);
+    };
+    let leg_vec = leg.end_ft - leg.start_ft;
+    let leg_len = leg_vec.length();
+    if leg_len < 1e-6 {
+        return (0.0, 0.0);
+    }
+    let leg_dir = leg_vec * (1.0 / leg_len);
+    // Right-perpendicular to the leg direction. `Vec2` is (east, north),
+    // so rotating (x, y) by -90° gives (y, -x).
+    let leg_right = crate::types::Vec2::new(leg_dir.y, -leg_dir.x);
+    let offset = state.position_ft - leg.start_ft;
+    let crosstrack_ft = offset.dot(leg_right);
+    let leg_bearing = crate::types::vector_to_heading(leg_vec);
+    let heading_err = wrap_degrees_180(leg_bearing - state.heading_deg);
+    (crosstrack_ft, heading_err)
 }

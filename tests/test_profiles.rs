@@ -6,12 +6,13 @@ use approx::assert_abs_diff_eq;
 use xplane_pilot::config::load_default_config_bundle;
 use xplane_pilot::core::mission_manager::PilotCore;
 use xplane_pilot::core::profiles::{
-    build_rotate_guidance, build_takeoff_roll_guidance, AltitudeHoldProfile, HeadingHoldProfile,
-    PatternFlyProfile, SpeedHoldProfile, TakeoffProfile,
+    build_rotate_guidance, build_takeoff_roll_guidance, AltitudeHoldProfile, GuidanceProfile,
+    HeadingHoldProfile, PatternFlyProfile, SpeedHoldProfile, TakeoffProfile, TaxiProfile,
 };
 use xplane_pilot::sim::simple_dynamics::SimpleAircraftModel;
 use xplane_pilot::types::{
-    heading_to_vector, AircraftState, FlightPhase, LateralMode, Vec2, VerticalMode, KT_TO_FPS,
+    heading_to_vector, AircraftState, FlightPhase, LateralMode, StraightLeg, Vec2, VerticalMode,
+    KT_TO_FPS,
 };
 
 fn make_pilot() -> (xplane_pilot::config::ConfigBundle, PilotCore) {
@@ -371,4 +372,99 @@ fn altitude_hold_end_to_end_climb_through_pilot() {
     );
     assert!(last_elevator > 0.0, "elevator was {}", last_elevator);
     let _ = VerticalMode::Tecs;
+}
+
+// ---------- TaxiProfile ----------
+
+fn taxi_state(pos: Vec2, heading_deg: f64, gs_kt: f64) -> AircraftState {
+    let mut s = AircraftState::synthetic_default();
+    s.on_ground = true;
+    s.position_ft = pos;
+    s.heading_deg = heading_deg;
+    s.track_deg = heading_deg;
+    s.ias_kt = gs_kt;
+    s.gs_kt = gs_kt;
+    s.alt_agl_ft = 0.0;
+    s.ground_velocity_ft_s = heading_to_vector(heading_deg, gs_kt * KT_TO_FPS);
+    s
+}
+
+/// Three legs: straight east, sharp left (~90°) to north, straight north.
+fn three_leg_ninety_deg() -> (Vec<StraightLeg>, Vec<String>) {
+    let legs = vec![
+        StraightLeg {
+            start_ft: Vec2::new(0.0, 0.0),
+            end_ft: Vec2::new(1000.0, 0.0),
+        },
+        StraightLeg {
+            start_ft: Vec2::new(1000.0, 0.0),
+            end_ft: Vec2::new(1000.0, 1000.0),
+        },
+        StraightLeg {
+            start_ft: Vec2::new(1000.0, 1000.0),
+            end_ft: Vec2::new(1000.0, 2000.0),
+        },
+    ];
+    let names = vec!["A".into(), "D".into(), "D".into()];
+    (legs, names)
+}
+
+#[test]
+fn taxi_profile_emits_taxi_follow_and_taxi_modes() {
+    let (legs, names) = three_leg_ninety_deg();
+    let mut p = TaxiProfile::new(legs, names);
+    let state = taxi_state(Vec2::new(10.0, 0.0), 90.0, 5.0);
+    let tick = p.contribute(&state, 0.2);
+    assert_eq!(tick.contribution.lateral_mode, Some(LateralMode::TaxiFollow));
+    assert_eq!(tick.contribution.vertical_mode, Some(VerticalMode::Taxi));
+    let leg = tick.contribution.target_path.expect("target_path");
+    assert_eq!(leg.end_ft, Vec2::new(1000.0, 0.0));
+}
+
+#[test]
+fn taxi_profile_advances_leg_on_proximity() {
+    let (legs, names) = three_leg_ninety_deg();
+    let mut p = TaxiProfile::new(legs, names);
+    // Close to the end of leg 0 (within 30 ft advance distance).
+    let state = taxi_state(Vec2::new(980.0, 0.0), 90.0, 5.0);
+    let tick = p.contribute(&state, 0.2);
+    let leg = tick.contribution.target_path.expect("target_path");
+    assert_eq!(
+        leg.start_ft,
+        Vec2::new(1000.0, 0.0),
+        "did not advance to leg 1; target start={:?}",
+        leg.start_ft
+    );
+    assert_eq!(p.current_idx, 1);
+}
+
+#[test]
+fn taxi_profile_slows_when_approaching_sharp_turn() {
+    let (legs, names) = three_leg_ninety_deg();
+    let mut p = TaxiProfile::new(legs, names);
+    // Well before the turn — should cruise.
+    let cruise = taxi_state(Vec2::new(200.0, 0.0), 90.0, 15.0);
+    let t1 = p.contribute(&cruise, 0.2);
+    assert_eq!(t1.contribution.target_speed_kt, Some(15.0));
+    // Close to the turn (within 180 ft lookahead) — should command turn speed.
+    let approach = taxi_state(Vec2::new(900.0, 0.0), 90.0, 12.0);
+    let t2 = p.contribute(&approach, 0.2);
+    assert_eq!(t2.contribution.target_speed_kt, Some(5.0));
+}
+
+#[test]
+fn taxi_profile_ramps_speed_to_zero_on_final_leg_and_finishes() {
+    let (legs, names) = three_leg_ninety_deg();
+    let mut p = TaxiProfile::new(legs, names);
+    p.current_idx = 2;
+    // 30 ft from the final end: ramps to 0.25 × cruise = 3.75 kt.
+    let near = taxi_state(Vec2::new(1000.0, 1970.0), 0.0, 5.0);
+    let tick = p.contribute(&near, 0.2);
+    let v = tick.contribution.target_speed_kt.unwrap();
+    assert!(v > 0.0 && v < 15.0, "speed was {}", v);
+    // At the end: profile flips to finished and targets 0 kt.
+    let at_end = taxi_state(Vec2::new(1000.0, 2005.0), 0.0, 2.0);
+    let tick = p.contribute(&at_end, 0.2);
+    assert!(p.finished);
+    assert_eq!(tick.contribution.target_speed_kt, Some(0.0));
 }

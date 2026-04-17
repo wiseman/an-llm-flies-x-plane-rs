@@ -909,6 +909,132 @@ impl GuidanceProfile for RouteFollowProfile {
     }
 }
 
+// ---------- taxi profile ----------
+
+/// Ground taxi profile: follows a pre-planned sequence of straight legs at
+/// target ground speed, slowing for sharp turns and stopping at the last
+/// leg. Owns all three axes so engaging it cleanly displaces any cruise /
+/// pattern profile.
+///
+/// Construction:
+/// - `legs_ft[i]` is the `i`-th straight segment in runway-frame feet.
+/// - `taxiway_names[i]` is the taxiway-name label (for status; not for
+///   control). May be empty for unnamed connector edges.
+///
+/// See `src/guidance/taxi_route.rs` for the planner that produces the
+/// leg list and `src/control/{ground_speed,nose_wheel}.rs` for the two
+/// low-level controllers `commands_from_guidance` runs when it sees the
+/// `TaxiFollow` / `Taxi` modes this profile raises.
+pub struct TaxiProfile {
+    pub legs_ft: Vec<StraightLeg>,
+    pub taxiway_names: Vec<String>,
+    pub current_idx: usize,
+    pub finished: bool,
+    pub leg_advance_distance_ft: f64,
+    pub turn_speed_kt: f64,
+    pub cruise_speed_kt: f64,
+    pub turn_lookahead_ft: f64,
+    pub final_stop_distance_ft: f64,
+}
+
+impl TaxiProfile {
+    pub fn new(legs_ft: Vec<StraightLeg>, taxiway_names: Vec<String>) -> Self {
+        Self {
+            legs_ft,
+            taxiway_names,
+            current_idx: 0,
+            finished: false,
+            leg_advance_distance_ft: 30.0,
+            turn_speed_kt: 5.0,
+            cruise_speed_kt: 15.0,
+            turn_lookahead_ft: 180.0,
+            final_stop_distance_ft: 60.0,
+        }
+    }
+
+    fn current_leg(&self) -> Option<StraightLeg> {
+        self.legs_ft.get(self.current_idx).copied()
+    }
+
+    fn advance_if_reached(&mut self, state: &AircraftState) {
+        let Some(current) = self.current_leg() else {
+            return;
+        };
+        let dist_to_end = (state.position_ft - current.end_ft).length();
+        if dist_to_end < self.leg_advance_distance_ft {
+            if self.current_idx + 1 < self.legs_ft.len() {
+                self.current_idx += 1;
+            } else {
+                self.finished = true;
+            }
+        }
+    }
+
+    /// Target ground speed given the upcoming geometry: stop on the final
+    /// leg inside `final_stop_distance_ft`, slow to `turn_speed_kt` when a
+    /// sharp turn (>20°) is within `turn_lookahead_ft`, otherwise cruise.
+    fn target_speed_kt(&self, state: &AircraftState) -> f64 {
+        if self.finished {
+            return 0.0;
+        }
+        let Some(current) = self.current_leg() else {
+            return 0.0;
+        };
+        let dist_to_end = (state.position_ft - current.end_ft).length();
+
+        if self.current_idx + 1 >= self.legs_ft.len() {
+            // Final leg — linearly ramp speed to 0 across the last
+            // 2 × final_stop_distance_ft feet so the ground-speed
+            // controller has room to bleed energy without a hard stop.
+            let ramp = self.final_stop_distance_ft * 2.0;
+            if dist_to_end < ramp {
+                return (dist_to_end / ramp) * self.cruise_speed_kt;
+            }
+            return self.cruise_speed_kt;
+        }
+
+        let next = self.legs_ft[self.current_idx + 1];
+        let cur_bearing = current.course_deg();
+        let next_bearing = next.course_deg();
+        let turn_deg = wrap_degrees_180(next_bearing - cur_bearing).abs();
+        if turn_deg > 20.0 && dist_to_end < self.turn_lookahead_ft {
+            return self.turn_speed_kt;
+        }
+        self.cruise_speed_kt
+    }
+
+    pub fn active_taxiway_name(&self) -> Option<&str> {
+        self.taxiway_names
+            .get(self.current_idx)
+            .map(String::as_str)
+    }
+}
+
+impl GuidanceProfile for TaxiProfile {
+    fn name(&self) -> &'static str { "taxi" }
+    fn owns(&self) -> BTreeSet<Axis> {
+        let mut s = BTreeSet::new();
+        s.insert(Axis::Lateral);
+        s.insert(Axis::Vertical);
+        s.insert(Axis::Speed);
+        s
+    }
+    fn contribute(&mut self, state: &AircraftState, _dt: f64) -> ProfileTick {
+        self.advance_if_reached(state);
+        let leg = self.current_leg();
+        let target_speed = self.target_speed_kt(state);
+        ProfileTick::contribution_only(ProfileContribution {
+            lateral_mode: Some(LateralMode::TaxiFollow),
+            vertical_mode: Some(VerticalMode::Taxi),
+            target_path: leg,
+            target_speed_kt: Some(target_speed),
+            target_pitch_deg: Some(0.0),
+            throttle_limit: Some((0.0, 1.0)),
+            ..Default::default()
+        })
+    }
+}
+
 // ---------- helpers ----------
 
 fn single(axis: Axis) -> BTreeSet<Axis> {

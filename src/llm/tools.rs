@@ -19,6 +19,7 @@ use crate::config::ConfigBundle;
 use crate::core::mission_manager::{PilotCore, StatusSnapshot};
 use crate::core::profiles::{
     AltitudeHoldProfile, HeadingHoldProfile, PatternFlyProfile, SpeedHoldProfile, TakeoffProfile,
+    TaxiProfile,
 };
 use crate::data::parquet::{
     AIRPORTS_FILE, COMMS_FILE, RUNWAYS_FILE, TAXI_EDGES_FILE, TAXI_NODES_FILE,
@@ -30,7 +31,7 @@ use crate::sim::datarefs::{
     LONGITUDE_DEG, PARKING_BRAKE_RATIO,
 };
 use crate::sim::xplane_bridge::{geodetic_offset_ft, GeoReference};
-use crate::types::{heading_to_vector, FlightPhase, Runway, TrafficSide};
+use crate::types::{heading_to_vector, FlightPhase, Runway, StraightLeg, TrafficSide};
 
 pub const SQL_QUERY_MAX_ROWS: usize = 50;
 
@@ -808,6 +809,115 @@ pub fn tool_broadcast_on_radio(ctx: &ToolContext, args: &Map<String, Value>) -> 
     format!("broadcast on {}: {}", radio, message)
 }
 
+pub fn tool_engage_taxi(ctx: &ToolContext, args: &Map<String, Value>) -> String {
+    let bridge = match ctx.bridge.as_ref() {
+        Some(b) => b.clone(),
+        None => {
+            return "error: no X-Plane bridge available; engage_taxi needs the georef".to_string();
+        }
+    };
+    let airport = match arg_str(args, "airport_ident") {
+        Ok(s) => s.to_string(),
+        Err(e) => return format!("error: {}", e),
+    };
+    let destination_runway = match arg_str(args, "destination_runway") {
+        Ok(s) => s.to_string(),
+        Err(e) => return format!("error: {}", e),
+    };
+    let via_taxiways: Vec<String> = args
+        .get("via_taxiways")
+        .and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+        .unwrap_or_default();
+
+    let (start_lat, start_lon) = match (
+        args.get("start_lat").and_then(|v| v.as_f64()),
+        args.get("start_lon").and_then(|v| v.as_f64()),
+    ) {
+        (Some(lat), Some(lon)) => (lat, lon),
+        _ => {
+            let lat = bridge.get_dataref_value(LATITUDE_DEG.name);
+            let lon = bridge.get_dataref_value(LONGITUDE_DEG.name);
+            match (lat, lon) {
+                (Some(lat), Some(lon)) => (lat, lon),
+                _ => {
+                    return "error: aircraft position unavailable; pass start_lat and start_lon or wait for a dataref update".to_string();
+                }
+            }
+        }
+    };
+
+    if let Err(e) = ensure_runway_conn(ctx) {
+        return format!("error: {}", e);
+    }
+    let plan = {
+        let guard = ctx.runway_conn.lock().unwrap();
+        let conn = guard.as_ref().unwrap();
+        let graph = match taxi_route::load_graph(conn, &airport) {
+            Ok(g) => g,
+            Err(e) => return format!("error: {}", e),
+        };
+        if graph.nodes.is_empty() {
+            return format!(
+                "error: airport {} has no taxi network in apt.dat",
+                airport
+            );
+        }
+        let start_node = match taxi_route::nearest_node(&graph, start_lat, start_lon) {
+            Ok(id) => id,
+            Err(e) => return format!("error: {}", e),
+        };
+        let dest_node = match taxi_route::resolve_destination(
+            conn,
+            &graph,
+            &airport,
+            &TaxiDestination::Runway(&destination_runway),
+        ) {
+            Ok(id) => id,
+            Err(e) => return format!("error: {}", e),
+        };
+        match taxi_route::plan(&graph, start_node, dest_node, &via_taxiways) {
+            Ok(p) => p,
+            Err(e) => return format!("error: {}", e),
+        }
+    };
+
+    let georef = bridge.georef();
+    let legs_ft: Vec<StraightLeg> = plan
+        .legs
+        .iter()
+        .map(|l| StraightLeg {
+            start_ft: geodetic_offset_ft(l.from_lat, l.from_lon, georef),
+            end_ft: geodetic_offset_ft(l.to_lat, l.to_lon, georef),
+        })
+        .collect();
+    let names: Vec<String> = plan.legs.iter().map(|l| l.taxiway_name.clone()).collect();
+    let profile = Box::new(TaxiProfile::new(legs_ft, names));
+    let displaced = ctx.pilot.lock().engage_profile(profile);
+
+    let mut summary = format!(
+        "engaged taxi {} — {} legs, {:.0} m",
+        plan.airport_ident,
+        plan.legs.len(),
+        plan.total_distance_m
+    );
+    if !plan.taxiway_sequence.is_empty() {
+        summary.push_str(&format!(" via {}", plan.taxiway_sequence.join(" -> ")));
+    }
+    if !plan.runway_crossings.is_empty() {
+        let mut seen = std::collections::HashSet::new();
+        let unique: Vec<&str> = plan
+            .runway_crossings
+            .iter()
+            .filter(|z| seen.insert(z.as_str()))
+            .map(String::as_str)
+            .collect();
+        summary.push_str(&format!(" (crossings: {})", unique.join("; ")));
+    }
+    summary.push_str(&format_displaced(&displaced));
+    summary
+}
+
 pub fn tool_plan_taxi_route(ctx: &ToolContext, args: &Map<String, Value>) -> String {
     let airport = match arg_str(args, "airport_ident") {
         Ok(s) => s.to_string(),
@@ -1057,6 +1167,7 @@ pub fn dispatch_tool(call: &Value, ctx: &ToolContext) -> String {
         "set_flaps" => tool_set_flaps(ctx, &map),
         "sql_query" => tool_sql_query(ctx, &map),
         "plan_taxi_route" => tool_plan_taxi_route(ctx, &map),
+        "engage_taxi" => tool_engage_taxi(ctx, &map),
         other => format!("error: unknown tool {:?}", other),
     }
 }
@@ -1246,6 +1357,34 @@ pub fn tool_schemas() -> Vec<Value> {
             &["query"],
         ),
         schema(
+            "engage_taxi",
+            ENGAGE_TAXI_DESCRIPTION,
+            json!({
+                "airport_ident": {
+                    "type": "string",
+                    "description": "Airport identifier as stored in apt.dat (e.g. 'KSFO')."
+                },
+                "destination_runway": {
+                    "type": "string",
+                    "description": "Runway you want to hold short of — either end ident works (e.g. '31' or '13')."
+                },
+                "via_taxiways": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Ordered list of taxiway names from the clearance, e.g. ['A', 'D']. Pass [] to let the planner pick the shortest route."
+                },
+                "start_lat": {
+                    "type": ["number", "null"],
+                    "description": "Starting latitude. If null, the current aircraft position from X-Plane is used."
+                },
+                "start_lon": {
+                    "type": ["number", "null"],
+                    "description": "Starting longitude. If null, the current aircraft position from X-Plane is used."
+                }
+            }),
+            &["airport_ident", "destination_runway", "via_taxiways", "start_lat", "start_lon"],
+        ),
+        schema(
             "plan_taxi_route",
             PLAN_TAXI_ROUTE_DESCRIPTION,
             json!({
@@ -1275,6 +1414,21 @@ pub fn tool_schemas() -> Vec<Value> {
         ),
     ]
 }
+
+const ENGAGE_TAXI_DESCRIPTION: &str = "Engage the ground-taxi autopilot. \
+Plans the route via the same logic as plan_taxi_route, then takes control \
+of the aircraft: nose-wheel steering tracks the leg centerline, ground \
+speed targets ~15 kt on straights / ~5 kt through sharp turns / 0 at the \
+final node where the aircraft parks with hold brake applied. Displaces \
+any currently-engaged three-axis profile (pattern_fly, takeoff, cruise).
+
+Requires the aircraft to be on the ground with the parking brake \
+RELEASED. Requires a live X-Plane bridge (needs the georef anchor to \
+convert the planned lat/lon waypoints into the pilot's runway-frame feet).
+
+For clearances where you want to preview the route before committing, \
+call plan_taxi_route first — its output has the same summary plus \
+leg-by-leg waypoints.";
 
 const PLAN_TAXI_ROUTE_DESCRIPTION: &str = "Plan a taxi route across an airport \
 surface. Returns the ordered sequence of waypoint legs (lat/lon pairs plus the \

@@ -177,6 +177,10 @@ pub enum LateralMode {
     PathFollow,
     CenterlineIntercept,
     RolloutCenterline,
+    /// Ground taxi lateral control: follow `target_path` (leg start→end in
+    /// runway-frame feet) via `NoseWheelController` on rudder; aileron is
+    /// locked to zero.
+    TaxiFollow,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -187,6 +191,9 @@ pub enum VerticalMode {
     Tecs,
     GlidepathTrack,
     FlareTrack,
+    /// Ground taxi: `GroundSpeedController` drives throttle and brake from
+    /// `target_speed_kt`. Elevator is held to zero pitch.
+    Taxi,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
