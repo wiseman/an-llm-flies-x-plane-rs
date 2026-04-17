@@ -504,6 +504,33 @@ pub fn tool_engage_takeoff(ctx: &ToolContext, _args: &Map<String, Value>) -> Str
             );
         }
     }
+
+    // Alignment + stopped gate. The LLM was observed calling
+    // engage_takeoff ~1 s after engage_line_up, which displaced the
+    // in-progress line-up at ~90° off runway heading and started the
+    // takeoff roll in the wrong direction. These two checks refuse the
+    // engage until the aircraft is actually on the centerline pointed
+    // down the runway.
+    {
+        let pilot = ctx.pilot.lock();
+        if let Some(snap) = pilot.latest_snapshot.as_ref() {
+            let runway_course = pilot.runway_frame.runway.course_deg;
+            let heading_err = crate::types::wrap_degrees_180(runway_course - snap.state.heading_deg).abs();
+            if heading_err > 15.0 {
+                return format!(
+                    "error: aircraft heading {:.0}° is not aligned with runway course {:.0}° (Δ={:.0}° > 15°) — wait for engage_line_up to finish (aircraft needs to be stopped on the runway centerline, nose pointed down the runway) before calling engage_takeoff. Poll get_status until heading matches runway course and gs_kt is near zero.",
+                    snap.state.heading_deg, runway_course, heading_err
+                );
+            }
+            if snap.state.gs_kt > 3.0 {
+                return format!(
+                    "error: aircraft is moving at {:.1} kt — stop on the runway centerline before engage_takeoff (usually means engage_line_up is still in progress — wait for it to finish)",
+                    snap.state.gs_kt
+                );
+            }
+        }
+    }
+
     let new_config = ctx.config.lock().clone();
     let runway_frame = ctx.pilot.lock().runway_frame.clone();
     let profile = Box::new(TakeoffProfile::new(new_config, runway_frame));
@@ -567,6 +594,34 @@ pub fn tool_takeoff_checklist(ctx: &ToolContext, _args: &Map<String, Value>) -> 
         lines.push("  [OK]     on ground".to_string());
     } else {
         lines.push("  [ERROR]  not on ground — you cannot engage_takeoff from the air".to_string());
+        action_needed = true;
+    }
+
+    {
+        let pilot = ctx.pilot.lock();
+        let runway_course = pilot.runway_frame.runway.course_deg;
+        drop(pilot);
+        let heading_err =
+            crate::types::wrap_degrees_180(runway_course - state.heading_deg).abs();
+        if heading_err <= 15.0 {
+            lines.push(format!(
+                "  [OK]     aligned with runway course {:.0}° (heading {:.0}°, Δ={:.0}°)",
+                runway_course, state.heading_deg, heading_err
+            ));
+        } else {
+            lines.push(format!(
+                "  [ACTION] heading {:.0}° is {:.0}° off runway course {:.0}° — run engage_line_up and wait for it to finish (aircraft stopped, pointed down the runway) before engage_takeoff",
+                state.heading_deg, heading_err, runway_course
+            ));
+            action_needed = true;
+        }
+    }
+
+    if state.gs_kt > 3.0 {
+        lines.push(format!(
+            "  [ACTION] still moving at {:.1} kt ground speed — wait for engage_line_up to finish and the aircraft to stop before engage_takeoff",
+            state.gs_kt
+        ));
         action_needed = true;
     }
 
