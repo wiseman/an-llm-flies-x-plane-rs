@@ -172,14 +172,24 @@ pub fn format_snapshot_display(snapshot: Option<&StatusSnapshot>) -> String {
     };
 
     out.push_str(&format!(
-        "  throttle {} {:4.2}   flaps {:<5}   gear {}   {}   {}",
+        "  throttle {} {:4.2}   rudder {:+.2}   brake {:.2}   flaps {:<5}   gear {}   {}   {}",
         throttle_bar,
         commands.throttle,
+        commands.rudder,
+        commands.brakes,
         flap_str,
         gear_str,
         air_str,
         rwy_str,
     ));
+
+    // Per-profile debug lines (taxi leg progress, etc.) emitted after the
+    // main status block so they show up in both the TUI and the log.
+    for line in &snapshot.debug_lines {
+        out.push('\n');
+        out.push_str("  ");
+        out.push_str(line);
+    }
 
     // Drop a trailing empty line if any
     let trimmed: Vec<&str> = out.lines().collect();

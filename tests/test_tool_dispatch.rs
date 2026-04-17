@@ -576,6 +576,7 @@ fn seed_snapshot(ctx: &ToolContext, flap_index: i32, on_ground: bool) {
         airport_ident: None,
         runway_id: None,
         field_elevation_ft: None,
+        debug_lines: Vec::new(),
     });
 }
 

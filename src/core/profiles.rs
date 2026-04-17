@@ -79,6 +79,17 @@ pub trait GuidanceProfile: Send {
     fn pattern_metadata(&self) -> Option<PatternMetadata> {
         None
     }
+
+    /// Optional one-line debug string surfaced in the status pane. Profiles
+    /// with non-trivial internal state (e.g. `TaxiProfile`'s leg sequencer)
+    /// use this to expose the values a human would need to diagnose why the
+    /// aircraft is doing what it is — current leg index, crosstrack /
+    /// heading-error feeding the controllers, target speed, distance to the
+    /// upcoming node. Default: no debug line (most profiles have all their
+    /// state in the already-rendered guidance targets).
+    fn debug_line(&self, _state: &AircraftState) -> Option<String> {
+        None
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1065,6 +1076,37 @@ impl GuidanceProfile for TaxiProfile {
             throttle_limit: Some((0.0, 1.0)),
             ..Default::default()
         })
+    }
+
+    fn debug_line(&self, state: &AircraftState) -> Option<String> {
+        let Some(leg) = self.current_leg() else {
+            return Some(format!("taxi finished={} legs={}", self.finished, self.legs_ft.len()));
+        };
+        let leg_vec = leg.end_ft - leg.start_ft;
+        let leg_len = leg_vec.length().max(1e-6);
+        let leg_dir = leg_vec * (1.0 / leg_len);
+        let leg_right = crate::types::Vec2::new(leg_dir.y, -leg_dir.x);
+        let offset = state.position_ft - leg.start_ft;
+        let xtrack_ft = offset.dot(leg_right);
+        let leg_bearing = crate::types::vector_to_heading(leg_vec);
+        let hdg_err = wrap_degrees_180(leg_bearing - state.heading_deg);
+        let dist_to_end = (state.position_ft - leg.end_ft).length();
+        let name = self
+            .taxiway_names
+            .get(self.current_idx)
+            .map(String::as_str)
+            .filter(|s| !s.is_empty())
+            .unwrap_or("(connector)");
+        Some(format!(
+            "taxi leg {}/{} \"{}\" xtrack {:+.0}ft hdg-err {:+.0}° to-end {:.0}ft target {:.0}kt",
+            self.current_idx + 1,
+            self.legs_ft.len(),
+            name,
+            xtrack_ft,
+            hdg_err,
+            dist_to_end,
+            self.target_speed_kt(state),
+        ))
     }
 }
 

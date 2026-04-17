@@ -68,6 +68,7 @@ fn make_snapshot(
         airport_ident: None,
         runway_id: None,
         field_elevation_ft: None,
+        debug_lines: Vec::new(),
     }
 }
 

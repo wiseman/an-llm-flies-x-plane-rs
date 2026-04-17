@@ -40,6 +40,11 @@ pub struct StatusSnapshot {
     pub airport_ident: Option<String>,
     pub runway_id: Option<String>,
     pub field_elevation_ft: Option<f64>,
+    /// Per-profile debug lines collected from `GuidanceProfile::debug_line`.
+    /// Surfaced in the status pane and log so taxi / pattern sequencers can
+    /// expose their internal state (leg index, crosstrack, target speed,
+    /// etc.) for live debugging.
+    pub debug_lines: Vec<String>,
 }
 
 pub struct PilotCore {
@@ -188,6 +193,11 @@ impl PilotCore {
         let (guidance, metadata) = self.compose_guidance(&state, dt);
         let commands = self.commands_from_guidance(&state, &guidance);
         let phase = self.current_phase();
+        let debug_lines: Vec<String> = self
+            .active_profiles
+            .iter()
+            .filter_map(|p| p.debug_line(&state))
+            .collect();
         let snapshot = StatusSnapshot {
             t_sim: state.t_sim,
             active_profiles: self.list_profile_names(),
@@ -199,6 +209,7 @@ impl PilotCore {
             airport_ident: metadata.as_ref().and_then(|m| m.airport_ident.clone()),
             runway_id: metadata.as_ref().and_then(|m| m.runway_id.clone()),
             field_elevation_ft: metadata.as_ref().and_then(|m| m.field_elevation_ft),
+            debug_lines,
         };
         self.latest_snapshot = Some(snapshot);
         (state, commands)
