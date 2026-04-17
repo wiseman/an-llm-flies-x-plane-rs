@@ -738,7 +738,9 @@ fn break_outer(stop: &AtomicBool) {
 }
 
 fn is_verbose_line(line: &str) -> bool {
-    line.contains("[llm-worker] tool ") || line.contains("[heartbeat]")
+    line.contains("[llm-worker] tool ")
+        || line.contains("[heartbeat]")
+        || line.contains("voice:")
 }
 
 /// Compute a `Paragraph::scroll` y-offset that keeps the most recent line at
