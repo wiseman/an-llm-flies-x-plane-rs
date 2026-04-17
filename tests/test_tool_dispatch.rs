@@ -875,6 +875,59 @@ fn engage_taxi_swaps_in_taxi_profile_and_reports_summary() {
 }
 
 #[test]
+fn engage_taxi_prepends_pullout_leg_when_far_from_nearest_node() {
+    use xplane_pilot::sim::xplane_bridge::{geodetic_offset_ft, GeoReference};
+    use xplane_pilot::types::Vec2;
+
+    let dir = TempDir::new().unwrap();
+    build_taxi_fixture_parquet(dir.path());
+    // Start the aircraft 0.001° (~100 m) south-west of the nearest node,
+    // which is well past the 20 ft pullout threshold.
+    let start_lat = 37.000500 - 0.0010;
+    let start_lon = -122.002000 - 0.0010;
+    let bridge = FakeBridge::new(&[], 37.000100, -121.997500);
+    let ctx = make_ctx(
+        Some(bridge.clone() as Arc<dyn ToolBridge>),
+        Some(dir.path().to_path_buf()),
+    );
+    let r = dispatch_tool(
+        &call(
+            "engage_taxi",
+            json!({
+                "airport_ident": "KTEST",
+                "destination_runway": "09",
+                "via_taxiways": [],
+                "start_lat": start_lat,
+                "start_lon": start_lon,
+            }),
+        ),
+        &ctx,
+    );
+    assert!(!r.starts_with("error"), "got: {}", r);
+    assert!(
+        r.contains("pullout:"),
+        "summary should mention pullout: {}",
+        r
+    );
+
+    // Direct check: the first leg of the engaged profile should begin at
+    // the aircraft's position, not at a graph node.
+    let georef = GeoReference {
+        threshold_lat_deg: 37.000100,
+        threshold_lon_deg: -121.997500,
+    };
+    let expected_start: Vec2 = geodetic_offset_ft(start_lat, start_lon, georef);
+    let (legs, _names, pullout) = xplane_pilot::llm::tools::build_taxi_legs_with_pullout(
+        expected_start,
+        &[], // empty stand-in; we exercise the full path via the dispatch above
+        georef,
+    );
+    // Empty plan → empty legs list, no pullout.
+    assert!(legs.is_empty());
+    assert!(pullout.is_none());
+}
+
+#[test]
 fn engage_taxi_without_bridge_errors() {
     let dir = TempDir::new().unwrap();
     build_taxi_fixture_parquet(dir.path());

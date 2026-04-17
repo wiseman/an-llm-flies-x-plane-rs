@@ -809,6 +809,55 @@ pub fn tool_broadcast_on_radio(ctx: &ToolContext, args: &Map<String, Value>) -> 
     format!("broadcast on {}: {}", radio, message)
 }
 
+/// Produce the `(legs, names)` fed into `TaxiProfile::new`, inserting a
+/// synthetic "pullout" leg from the aircraft's current position to the
+/// graph's first node when they are not already essentially coincident.
+///
+/// The planner produces a route that starts at the taxi-graph node nearest
+/// to the aircraft. At a gate or a hold-short the aircraft can easily be
+/// 50–150 ft away from that node, oriented at any heading. Without a
+/// pullout leg the nose-wheel controller sees a giant crosstrack error
+/// immediately and tries to cut diagonally across the ramp. With one,
+/// the first leg is "drive from here to node X" which the controllers
+/// handle cleanly: crosstrack starts at zero, heading error drives the
+/// rotation, proximity triggers the advance to leg 1 of the real route.
+///
+/// Returned `pullout_ft` is `None` when no pullout was needed, or `Some(d)`
+/// where `d` is the distance of the inserted leg in feet.
+pub fn build_taxi_legs_with_pullout(
+    aircraft_pos_ft: crate::types::Vec2,
+    plan_legs: &[taxi_route::TaxiLeg],
+    georef: GeoReference,
+) -> (Vec<StraightLeg>, Vec<String>, Option<f64>) {
+    const PULLOUT_THRESHOLD_FT: f64 = 20.0;
+    let mut legs_ft: Vec<StraightLeg> = plan_legs
+        .iter()
+        .map(|l| StraightLeg {
+            start_ft: geodetic_offset_ft(l.from_lat, l.from_lon, georef),
+            end_ft: geodetic_offset_ft(l.to_lat, l.to_lon, georef),
+        })
+        .collect();
+    let mut names: Vec<String> = plan_legs.iter().map(|l| l.taxiway_name.clone()).collect();
+
+    let Some(first) = legs_ft.first().copied() else {
+        return (legs_ft, names, None);
+    };
+    let offset = first.start_ft - aircraft_pos_ft;
+    let d_ft = offset.length();
+    if d_ft <= PULLOUT_THRESHOLD_FT {
+        return (legs_ft, names, None);
+    }
+    legs_ft.insert(
+        0,
+        StraightLeg {
+            start_ft: aircraft_pos_ft,
+            end_ft: first.start_ft,
+        },
+    );
+    names.insert(0, String::new());
+    (legs_ft, names, Some(d_ft))
+}
+
 pub fn tool_engage_taxi(ctx: &ToolContext, args: &Map<String, Value>) -> String {
     let bridge = match ctx.bridge.as_ref() {
         Some(b) => b.clone(),
@@ -883,24 +932,20 @@ pub fn tool_engage_taxi(ctx: &ToolContext, args: &Map<String, Value>) -> String 
     };
 
     let georef = bridge.georef();
-    let legs_ft: Vec<StraightLeg> = plan
-        .legs
-        .iter()
-        .map(|l| StraightLeg {
-            start_ft: geodetic_offset_ft(l.from_lat, l.from_lon, georef),
-            end_ft: geodetic_offset_ft(l.to_lat, l.to_lon, georef),
-        })
-        .collect();
-    let names: Vec<String> = plan.legs.iter().map(|l| l.taxiway_name.clone()).collect();
+    let aircraft_pos_ft = geodetic_offset_ft(start_lat, start_lon, georef);
+    let (legs_ft, names, pullout_ft) =
+        build_taxi_legs_with_pullout(aircraft_pos_ft, &plan.legs, georef);
+    let leg_count = legs_ft.len();
     let profile = Box::new(TaxiProfile::new(legs_ft, names));
     let displaced = ctx.pilot.lock().engage_profile(profile);
 
     let mut summary = format!(
         "engaged taxi {} — {} legs, {:.0} m",
-        plan.airport_ident,
-        plan.legs.len(),
-        plan.total_distance_m
+        plan.airport_ident, leg_count, plan.total_distance_m
     );
+    if let Some(d) = pullout_ft {
+        summary.push_str(&format!(" (pullout: {:.0} ft from start)", d));
+    }
     if !plan.taxiway_sequence.is_empty() {
         summary.push_str(&format!(" via {}", plan.taxiway_sequence.join(" -> ")));
     }
