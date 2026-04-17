@@ -970,9 +970,18 @@ impl TaxiProfile {
         }
     }
 
-    /// Target ground speed given the upcoming geometry: stop on the final
-    /// leg inside `final_stop_distance_ft`, slow to `turn_speed_kt` when a
-    /// sharp turn (>20°) is within `turn_lookahead_ft`, otherwise cruise.
+    /// Target ground speed given the upcoming geometry and the aircraft's
+    /// current alignment with the active leg:
+    /// - if heading error > 45°, creep at ~2 kt so the nose wheel can
+    ///   pivot the aircraft onto the leg before we start accelerating;
+    /// - if heading error > 20°, stay at `turn_speed_kt` for the same
+    ///   reason (less extreme);
+    /// - if a sharp turn (>20°) is within `turn_lookahead_ft`, slow to
+    ///   `turn_speed_kt` ahead of it;
+    /// - on the final leg, linearly ramp speed to 0 across the last
+    ///   `2 × final_stop_distance_ft` so the ground-speed controller can
+    ///   bleed energy without a hard stop;
+    /// - otherwise cruise.
     fn target_speed_kt(&self, state: &AircraftState) -> f64 {
         if self.finished {
             return 0.0;
@@ -982,25 +991,38 @@ impl TaxiProfile {
         };
         let dist_to_end = (state.position_ft - current.end_ft).length();
 
-        if self.current_idx + 1 >= self.legs_ft.len() {
-            // Final leg — linearly ramp speed to 0 across the last
-            // 2 × final_stop_distance_ft feet so the ground-speed
-            // controller has room to bleed energy without a hard stop.
+        // Heading-alignment limit: when we're badly off-heading (common on
+        // the pullout leg from a gate) the nose wheel needs time to turn
+        // the aircraft before forward thrust pushes us past the intercept.
+        let leg_bearing = current.course_deg();
+        let heading_err_deg = wrap_degrees_180(leg_bearing - state.heading_deg).abs();
+        let alignment_limit = if heading_err_deg > 45.0 {
+            2.0
+        } else if heading_err_deg > 20.0 {
+            self.turn_speed_kt
+        } else {
+            f64::INFINITY
+        };
+
+        let nominal = if self.current_idx + 1 >= self.legs_ft.len() {
             let ramp = self.final_stop_distance_ft * 2.0;
             if dist_to_end < ramp {
-                return (dist_to_end / ramp) * self.cruise_speed_kt;
+                (dist_to_end / ramp) * self.cruise_speed_kt
+            } else {
+                self.cruise_speed_kt
             }
-            return self.cruise_speed_kt;
-        }
-
-        let next = self.legs_ft[self.current_idx + 1];
-        let cur_bearing = current.course_deg();
-        let next_bearing = next.course_deg();
-        let turn_deg = wrap_degrees_180(next_bearing - cur_bearing).abs();
-        if turn_deg > 20.0 && dist_to_end < self.turn_lookahead_ft {
-            return self.turn_speed_kt;
-        }
-        self.cruise_speed_kt
+        } else {
+            let next = self.legs_ft[self.current_idx + 1];
+            let cur_bearing = current.course_deg();
+            let next_bearing = next.course_deg();
+            let turn_deg = wrap_degrees_180(next_bearing - cur_bearing).abs();
+            if turn_deg > 20.0 && dist_to_end < self.turn_lookahead_ft {
+                self.turn_speed_kt
+            } else {
+                self.cruise_speed_kt
+            }
+        };
+        nominal.min(alignment_limit)
     }
 
     pub fn active_taxiway_name(&self) -> Option<&str> {

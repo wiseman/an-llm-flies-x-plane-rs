@@ -453,6 +453,31 @@ fn taxi_profile_slows_when_approaching_sharp_turn() {
 }
 
 #[test]
+fn taxi_profile_creeps_when_heading_far_off_leg() {
+    let (legs, names) = three_leg_ninety_deg();
+    let mut p = TaxiProfile::new(legs, names);
+    // Leg 0 points due east (heading 90°). Aircraft pointed due north (0°)
+    // — that's 90° off, so the alignment limiter kicks in at the most
+    // aggressive tier (~2 kt creep).
+    let pivot = taxi_state(Vec2::new(0.0, 0.0), 0.0, 1.0);
+    let tick = p.contribute(&pivot, 0.2);
+    let target = tick.contribution.target_speed_kt.unwrap();
+    assert!(
+        target <= 2.0,
+        "expected pivot-speed creep, got {} kt",
+        target
+    );
+    // A moderate heading offset (~25°) drops us to turn speed, not creep.
+    let moderate = taxi_state(Vec2::new(10.0, 0.0), 65.0, 4.0);
+    let tick = p.contribute(&moderate, 0.2);
+    assert_eq!(tick.contribution.target_speed_kt, Some(5.0));
+    // Aligned to the leg heading — cruise.
+    let aligned = taxi_state(Vec2::new(10.0, 0.0), 90.0, 10.0);
+    let tick = p.contribute(&aligned, 0.2);
+    assert_eq!(tick.contribution.target_speed_kt, Some(15.0));
+}
+
+#[test]
 fn taxi_profile_ramps_speed_to_zero_on_final_leg_and_finishes() {
     let (legs, names) = three_leg_ninety_deg();
     let mut p = TaxiProfile::new(legs, names);

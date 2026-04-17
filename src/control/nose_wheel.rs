@@ -20,12 +20,15 @@ use crate::types::clamp;
 
 #[derive(Debug, Clone)]
 pub struct NoseWheelController {
-    /// Rudder per foot of crosstrack error. At 20 ft crosstrack with the
-    /// default gain, the crosstrack term alone saturates the rudder to -1.
+    /// Rudder per foot of crosstrack error. At the default the crosstrack
+    /// term alone saturates the rudder at ~12 ft — tighter than a 20 ft
+    /// band so the aircraft actually pulls onto the leg instead of
+    /// S-curving indefinitely at low gain.
     pub kp_crosstrack: f64,
-    /// Rudder per degree of heading error.
+    /// Rudder per degree of heading error. Saturates at ~20° alone.
     pub kp_heading: f64,
-    /// Rudder damping on yaw rate (deg/s).
+    /// Rudder damping on yaw rate (deg/s). Sized to blunt the nose-wheel
+    /// snap but not fight the steady-state turn toward the leg.
     pub kp_yaw_rate: f64,
 }
 
@@ -55,11 +58,15 @@ impl NoseWheelController {
 impl Default for NoseWheelController {
     fn default() -> Self {
         Self {
-            // Rule of thumb: saturate rudder at ~20 ft crosstrack, ~30° of
-            // heading error, or ~5°/s of residual yaw rate.
-            kp_crosstrack: 0.05,
-            kp_heading: 0.03,
-            kp_yaw_rate: 0.18,
+            // Rule of thumb: saturate rudder at ~12 ft crosstrack, ~20° of
+            // heading error, or ~4°/s of residual yaw rate. The gentler
+            // gains in the first draft of this controller left the C172
+            // struggling to pull onto a taxiway from a ramp lead-in —
+            // doubling the heading gain and pushing the crosstrack gain
+            // up ~60 % makes the nose wheel actually follow.
+            kp_crosstrack: 0.08,
+            kp_heading: 0.05,
+            kp_yaw_rate: 0.25,
         }
     }
 }
