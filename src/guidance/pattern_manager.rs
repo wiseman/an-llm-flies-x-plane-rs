@@ -132,6 +132,26 @@ pub fn glidepath_target_altitude_ft_default(
     glidepath_target_altitude_ft(runway_frame, runway_x_ft, field_elevation_ft, 3.0, 0.0)
 }
 
+/// Same as `glidepath_target_altitude_ft` but shifts the aim point
+/// `lead_ft` feet *before* `touchdown_runway_x_ft`. TECS tracks a 3°
+/// line that hits 0 AGL at the leading point so the aircraft is already
+/// touched-down-ready when it enters the roundout/flare float — prevents
+/// the "high over the numbers, lands long" pattern where TECS converges
+/// on the 3° line only as the plane crosses the aim.
+pub fn glidepath_target_altitude_leading_ft(
+    runway_frame: &RunwayFrame,
+    runway_x_ft: f64,
+    field_elevation_ft: f64,
+    slope_deg: f64,
+    lead_ft: f64,
+) -> f64 {
+    let slope_rad = clamp(slope_deg / 57.2958, 0.0, 0.2);
+    let effective_aim_x = runway_frame.touchdown_runway_x_ft() - lead_ft;
+    let distance_to_aim = effective_aim_x - runway_x_ft;
+    let path_height = distance_to_aim * slope_rad;
+    field_elevation_ft + path_height.max(0.0)
+}
+
 // Unused-name suppression (the original Python code exposes the TrafficSide
 // constants through build_pattern_geometry; Rust's use brings them in).
 #[allow(dead_code)]

@@ -19,7 +19,7 @@ use crate::core::mode_manager::ModeManager;
 use crate::core::safety_monitor::SafetyMonitor;
 use crate::guidance::lateral::L1PathFollower;
 use crate::guidance::pattern_manager::{
-    build_pattern_geometry, glidepath_target_altitude_ft_default, PatternGeometry,
+    build_pattern_geometry, glidepath_target_altitude_leading_ft, PatternGeometry,
 };
 use crate::guidance::route_manager::RouteManager;
 use crate::guidance::runway_geometry::RunwayFrame;
@@ -714,10 +714,12 @@ impl PatternFlyProfile {
             ),
             FlightPhase::Final => {
                 let final_slope = 4.0;
-                let target_altitude = glidepath_target_altitude_ft_default(
+                let target_altitude = glidepath_target_altitude_leading_ft(
                     &self.runway_frame,
                     state.runway_x_ft.unwrap_or(-3000.0),
                     self.config.airport.field_elevation_ft,
+                    3.0,
+                    800.0,
                 );
                 (
                     target_altitude,
