@@ -992,12 +992,18 @@ impl TaxiProfile {
         let dist_to_end = (state.position_ft - current.end_ft).length();
 
         // Heading-alignment limit: when we're badly off-heading (common on
-        // the pullout leg from a gate) the nose wheel needs time to turn
-        // the aircraft before forward thrust pushes us past the intercept.
+        // the pullout leg from a gate, or turning onto a taxiway from a
+        // perpendicular approach) the nose wheel needs time to turn the
+        // aircraft before forward thrust pushes us past the intercept.
+        // The floor (4 kt) is chosen so the aircraft keeps moving forward
+        // even with the nose wheel fully deflected — below that, C172
+        // tire scrub can stall the aircraft in place on live X-Plane
+        // ground physics, which we saw stuck at the pullout-to-taxiway
+        // transition.
         let leg_bearing = current.course_deg();
         let heading_err_deg = wrap_degrees_180(leg_bearing - state.heading_deg).abs();
         let alignment_limit = if heading_err_deg > 45.0 {
-            2.0
+            4.0
         } else if heading_err_deg > 20.0 {
             self.turn_speed_kt
         } else {

@@ -18,18 +18,26 @@ use crate::types::clamp;
 #[derive(Debug, Clone)]
 pub struct GroundSpeedController {
     /// Throttle added per knot of (target - current) when accelerating.
+    /// Sized so that ~4 kt of deficit saturates the throttle to 1.0 — the
+    /// C172 nose wheel fully deflected can scrub enough that nothing less
+    /// than full thrust breaks free, and artificially capping the output
+    /// leaves the aircraft frozen on a ramp. If the aircraft is close to
+    /// target, the proportional term naturally gives a small nudge.
     pub kp_throttle: f64,
     /// Brake applied per knot of (current - target) when decelerating.
     pub kp_brake: f64,
-    /// Throttle held when the speed is already at target (idle on ground).
+    /// Throttle held when we're inside the deadband (coasting at target).
+    /// Zero on the ground because there is no headwind/drag we need to
+    /// actively fight; friction will bring us back to target and the
+    /// proportional term re-engages then.
     pub idle_throttle: f64,
     /// ±kt band around the target where we neither add throttle nor brake.
     pub deadband_kt: f64,
     /// Hard brake applied when the commanded speed is zero and the
-    /// aircraft is essentially stopped.
+    /// aircraft is essentially stopped. 1.0 = full brake; no need to leave
+    /// slack — if the aircraft is at rest and asked to stay that way, we
+    /// want the firmest possible hold.
     pub hold_brake: f64,
-    /// Minimum throttle used to break static friction from a standstill.
-    pub breakaway_throttle: f64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -60,10 +68,11 @@ impl GroundSpeedController {
             return GroundSpeedCommand { throttle: 0.0, brake };
         }
         if err > self.deadband_kt {
-            let mut throttle = clamp(self.idle_throttle + err * self.kp_throttle, 0.0, 1.0);
-            if current_kt < 0.5 {
-                throttle = throttle.max(self.breakaway_throttle);
-            }
+            // err × kp_throttle naturally saturates at 1.0 for big errors
+            // (e.g. 5 kt deficit → 1.25 → clamps to full throttle, which
+            // is what we want when the aircraft is stationary and the
+            // nose wheel is scrubbing). Small errors give a small nudge.
+            let throttle = clamp(self.idle_throttle + err * self.kp_throttle, 0.0, 1.0);
             return GroundSpeedCommand { throttle, brake: 0.0 };
         }
         GroundSpeedCommand {
@@ -76,14 +85,17 @@ impl GroundSpeedController {
 impl Default for GroundSpeedController {
     fn default() -> Self {
         Self {
-            // Tuned against the C172 ground model: at 15 kt target from rest,
-            // the aircraft reaches target within ~6 s without overshoot.
-            kp_throttle: 0.06,
+            // Tuned so ~4 kt of deficit saturates throttle to 1.0. The
+            // aircraft physics then decide how much power it actually
+            // needs to break free: if scrub is light, the proportional
+            // term fades naturally as speed builds; if scrub is heavy
+            // (nose wheel fully deflected), the controller sits at full
+            // throttle until the aircraft finally starts rolling.
+            kp_throttle: 0.25,
             kp_brake: 0.12,
             idle_throttle: 0.0,
             deadband_kt: 0.5,
-            hold_brake: 0.8,
-            breakaway_throttle: 0.35,
+            hold_brake: 1.0,
         }
     }
 }
@@ -97,11 +109,25 @@ mod tests {
     }
 
     #[test]
-    fn stationary_with_positive_target_applies_breakaway_throttle() {
+    fn stationary_with_positive_target_saturates_throttle() {
         let c = ctrl();
         let cmd = c.update(15.0, 0.0);
-        assert!(cmd.brake == 0.0);
-        assert!(cmd.throttle >= c.breakaway_throttle, "throttle {}", cmd.throttle);
+        assert_eq!(cmd.brake, 0.0);
+        // 15 kt of deficit → 15 × 0.25 = 3.75 → clamps to 1.0 full throttle.
+        assert!((cmd.throttle - 1.0).abs() < 1e-9, "throttle {}", cmd.throttle);
+    }
+
+    #[test]
+    fn small_positive_error_gives_small_throttle_nudge() {
+        let c = ctrl();
+        // 1 kt of deficit from cruise: 1 × 0.25 = 0.25.
+        let cmd = c.update(15.0, 14.0);
+        assert_eq!(cmd.brake, 0.0);
+        assert!(
+            (cmd.throttle - 0.25).abs() < 1e-9,
+            "throttle {}",
+            cmd.throttle
+        );
     }
 
     #[test]
@@ -141,12 +167,11 @@ mod tests {
     }
 
     #[test]
-    fn moving_below_target_uses_proportional_throttle_not_breakaway() {
+    fn moving_well_below_target_saturates_throttle() {
         let c = ctrl();
         let cmd = c.update(15.0, 5.0);
-        // err=10, throttle = err * kp_throttle = 0.6, clamp to 1.0. Not
-        // forced to breakaway because we're already moving.
-        assert!(cmd.throttle > c.breakaway_throttle);
+        // 10 kt deficit × 0.25 = 2.5 → clamps to 1.0 full throttle.
+        assert!((cmd.throttle - 1.0).abs() < 1e-9);
         assert_eq!(cmd.brake, 0.0);
     }
 }

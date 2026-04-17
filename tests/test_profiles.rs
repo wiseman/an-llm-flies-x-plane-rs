@@ -457,14 +457,15 @@ fn taxi_profile_creeps_when_heading_far_off_leg() {
     let (legs, names) = three_leg_ninety_deg();
     let mut p = TaxiProfile::new(legs, names);
     // Leg 0 points due east (heading 90°). Aircraft pointed due north (0°)
-    // — that's 90° off, so the alignment limiter kicks in at the most
-    // aggressive tier (~2 kt creep).
+    // — that's 90° off, so the alignment limiter clamps target speed to
+    // the creep floor (4 kt — enough forward motion to beat nose-wheel
+    // tire scrub on a live X-Plane C172).
     let pivot = taxi_state(Vec2::new(0.0, 0.0), 0.0, 1.0);
     let tick = p.contribute(&pivot, 0.2);
     let target = tick.contribution.target_speed_kt.unwrap();
     assert!(
-        target <= 2.0,
-        "expected pivot-speed creep, got {} kt",
+        (target - 4.0).abs() < 1e-9,
+        "expected 4 kt creep, got {}",
         target
     );
     // A moderate heading offset (~25°) drops us to turn speed, not creep.
