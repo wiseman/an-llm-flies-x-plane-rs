@@ -62,6 +62,7 @@ fn make_snapshot(
             flaps: None,
             gear_down: Some(true),
             brakes: 0.0,
+            pivot_brake: 0.0,
         },
         last_guidance: guidance,
         go_around_reason: None,

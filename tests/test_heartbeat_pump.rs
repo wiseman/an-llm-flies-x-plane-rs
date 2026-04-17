@@ -63,6 +63,7 @@ fn make_snapshot(
             flaps: None,
             gear_down: Some(true),
             brakes: 0.0,
+            pivot_brake: 0.0,
         },
         last_guidance: None,
         go_around_reason: go_around_reason.map(|s| s.to_string()),

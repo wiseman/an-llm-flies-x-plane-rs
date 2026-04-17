@@ -278,19 +278,25 @@ impl PilotCore {
     }
 
     fn commands_from_guidance(&mut self, state: &AircraftState, guidance: &GuidanceTargets) -> ActuatorCommands {
+        // `taxi_pivot_brake` is produced by the nose-wheel controller when
+        // the rudder is saturated at low ground speed — differential
+        // braking layered on top of the symmetric `brakes` field.
+        let mut taxi_pivot_brake: f64 = 0.0;
         let (aileron, rudder) = if guidance.lateral_mode == LateralMode::TaxiFollow {
             // Ground taxi: follow target_path on the nose wheel. Aileron is
             // irrelevant on the ground, so lock it to zero and reset the
             // bank controller integrator so it doesn't wind up.
             let (crosstrack_ft, heading_err_deg) =
                 taxi_leg_errors(guidance.target_path, state);
-            let rudder = self.nose_wheel_controller.update(
+            let nw = self.nose_wheel_controller.update(
                 crosstrack_ft,
                 heading_err_deg,
                 state.r_rad_s.to_degrees(),
+                state.gs_kt,
             );
+            taxi_pivot_brake = nw.pivot_brake;
             self.bank_controller.reset();
-            (0.0, rudder)
+            (0.0, nw.rudder)
         } else if guidance.lateral_mode == LateralMode::RolloutCenterline {
             let track_ref = if state.on_ground { state.heading_deg } else { state.track_deg };
             let track_error = wrap_degrees_180(self.runway_frame.runway.course_deg - track_ref);
@@ -366,6 +372,7 @@ impl PilotCore {
             flaps: guidance.flaps_cmd,
             gear_down: Some(true),
             brakes: taxi_brake_override.unwrap_or(guidance.brakes),
+            pivot_brake: clamp(taxi_pivot_brake, -1.0, 1.0),
         }
     }
 }

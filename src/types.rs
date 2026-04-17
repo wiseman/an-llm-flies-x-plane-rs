@@ -350,7 +350,18 @@ pub struct ActuatorCommands {
     pub throttle: f64,
     pub flaps: Option<i32>,
     pub gear_down: Option<bool>,
+    /// Symmetric brake applied to both mains. Used for speed control
+    /// (ground-speed overshoot), runway rollout, and the parked-stop hold.
     pub brakes: f64,
+    /// Asymmetric component layered on top of `brakes` for tight-turn
+    /// differential braking: positive = extra right-main, negative = extra
+    /// left-main. The bridge writes
+    ///   left_wheel  = brakes + max(0, -pivot_brake)
+    ///   right_wheel = brakes + max(0,  pivot_brake)
+    /// Coupled to the nose-wheel controller — kicks in when the rudder is
+    /// saturated and the aircraft is below ~5 kt, where nose-wheel alone
+    /// can't produce a tight-enough pivot on a C172.
+    pub pivot_brake: f64,
 }
 
 #[derive(Debug, Clone, PartialEq)]

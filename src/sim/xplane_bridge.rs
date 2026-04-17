@@ -465,6 +465,14 @@ impl XPlaneWebBridge {
         let last_gear = *self.last_gear_down.lock().unwrap();
         let gear_down = commands.gear_down.unwrap_or(last_gear);
         let brake = clamp(commands.brakes, 0.0, 1.0);
+        // Differential braking: layer `pivot_brake` onto the symmetric
+        // `brakes` baseline. Positive pivot = right wheel takes the
+        // extra; negative = left wheel. The ± pairing lets the nose
+        // wheel coupled logic pivot the aircraft without needing its
+        // own dataref split.
+        let pivot = clamp(commands.pivot_brake, -1.0, 1.0);
+        let left_brake = clamp(brake + (-pivot).max(0.0), 0.0, 1.0);
+        let right_brake = clamp(brake + pivot.max(0.0), 0.0, 1.0);
         let cmd_ids = self.command_ids.lock().unwrap();
         let writes = vec![
             json!({ "id": cmd_ids[YOKE_PITCH_RATIO.name], "value": clamp(commands.elevator, -1.0, 1.0) }),
@@ -473,8 +481,8 @@ impl XPlaneWebBridge {
             json!({ "id": cmd_ids[THROTTLE_ALL.name], "value": clamp(commands.throttle, 0.0, 1.0) }),
             json!({ "id": cmd_ids[GEAR_HANDLE_DOWN.name], "value": if gear_down { 1.0 } else { 0.0 } }),
             json!({ "id": cmd_ids[FLAP_HANDLE_REQUEST_RATIO.name], "value": clamp(flap_ratio, 0.0, 1.0) }),
-            json!({ "id": cmd_ids[LEFT_BRAKE_RATIO.name], "value": brake }),
-            json!({ "id": cmd_ids[RIGHT_BRAKE_RATIO.name], "value": brake }),
+            json!({ "id": cmd_ids[LEFT_BRAKE_RATIO.name], "value": left_brake }),
+            json!({ "id": cmd_ids[RIGHT_BRAKE_RATIO.name], "value": right_brake }),
         ];
         drop(cmd_ids);
         self.send_message(json!({
