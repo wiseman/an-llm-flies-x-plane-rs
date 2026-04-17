@@ -16,9 +16,10 @@ cargo run --release --                     # default: zero-wind pattern → land
 cargo run --release -- --crosswind-kt 10 --log-csv output/flight.csv --plots-dir output/plots
 
 # Live X-Plane run (requires X-Plane 12 with web API on 8086, OPENAI_API_KEY in .env).
+# Runway truth auto-parses from the detected X-Plane 12 apt.dat into a cached
+# CSV under ~/.cache/sim_pilot/; pass --apt-dat-path or --runway-csv-path to override.
 cargo run --release -- \
   --backend xplane --interactive-atc \
-  --runway-csv-path ../xplane-pilot/data/runways.csv \
   --llm-model gpt-5.4-mini-2026-03-17
 
 # Tests.
@@ -71,6 +72,19 @@ Both backends share `load_default_config_bundle()`, `PilotCore`, `RunwayFrame`, 
 ### Runway-frame coordinates
 
 Everything inside the pilot reasons in a **runway frame** where `x` points down the runway centerline and the threshold is at the origin. `guidance/runway_geometry.rs::RunwayFrame` converts between this frame and the world frame. Pattern geometry (`guidance/pattern_manager.rs`) is built in runway-frame coords and only converted out when feeding `L1PathFollower`. For live X-Plane, a `GeoReference` (lat/lon anchor) handles the flat-earth geodetic-to-feet conversion.
+
+### Runway/airport data
+
+`src/data/apt_dat.rs` parses X-Plane's `Global Scenery/Global Airports/Earth
+nav data/apt.dat` (rows `1`/`16`/`17` for airports, `100` for land runways,
+`1302` for ICAO/IATA/FAA metadata) into the same column layout the DuckDB view
+in `llm/tools.rs` expects. Runway length and per-end heading are derived from
+the two end coordinates (great-circle distance and initial bearing); per-end
+elevation falls back to the airport header's single elevation field since
+apt.dat doesn't carry per-end values. `resolve_runways_csv` writes a cached
+CSV to `~/.cache/sim_pilot/runways-<hash>.csv` keyed off the apt.dat path and
+mtime; rebuilds are ~1 s in release mode for the 360 MB global file. Tests
+live in-module.
 
 ### Configuration
 

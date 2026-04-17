@@ -1062,9 +1062,13 @@ pub fn tool_schemas() -> Vec<Value> {
     ]
 }
 
-// Mirrors sim_pilot/llm/tools.py::SQL_QUERY_DESCRIPTION verbatim, plus one
-// added sentence ("ALWAYS prefix spatial functions with ST_...") below to
-// steer the LLM away from writing bare POINT(...) which fails on DuckDB.
+// Derived from sim_pilot/llm/tools.py::SQL_QUERY_DESCRIPTION. Rust-side
+// additions (not in the Python version):
+//   * "ALWAYS prefix spatial functions with ST_" — the LLM was observed
+//     emitting bare POINT(...) which fails on DuckDB.
+//   * the ST_Distance_Sphere-only-accepts-POINT warning + the crosstrack /
+//     along-track example below — the LLM tried to pass a LINESTRING to
+//     ST_Distance_Sphere when asked for off-centerline offset.
 const SQL_QUERY_DESCRIPTION: &str = "Run an arbitrary read-only SQL query against the runway/airport database. This is \
 the AUTHORITATIVE source for runway and airport facts — never guess a runway \
 identifier, airport code, course, length, or elevation; query for it. The backend \
@@ -1099,6 +1103,9 @@ LONGITUDE comes first — plus ST_Distance_Sphere(p1, p2) which returns meters
 along the great circle. Use these for 'nearest runway', 'within N nm', etc.
 Other ST_* functions (ST_Distance, ST_DWithin, ST_AsGeoJSON) are also available.
 ALWAYS prefix spatial functions with ST_ (e.g. ST_Point, not POINT).
+ST_Distance_Sphere ONLY accepts two POINTs. It will error on a LINESTRING.
+For point-to-centerline distance (crosstrack offset) use the local flat-earth
+projection shown below — do NOT pass a runway LINESTRING to ST_Distance_Sphere.
 
 Common queries:
 
@@ -1158,6 +1165,28 @@ Common queries:
     AND le_latitude_deg IS NOT NULL AND he_latitude_deg IS NOT NULL
   ORDER BY dist_nm
   LIMIT 5;
+
+  -- Crosstrack (off-centerline) and along-track offsets, in feet, of an
+  -- aircraft from a specified runway's centerline. Uses a local flat-earth
+  -- projection rooted at the low-end threshold (1 degree of latitude ≈
+  -- 364000 ft; scale longitude by cos(lat)). Accurate to better than a
+  -- foot over any single runway.
+  --   crosstrack_ft = signed perpendicular distance, positive = RIGHT of
+  --                   centerline when facing from le toward he.
+  --   alongtrack_ft = position along centerline, 0 at le threshold, and
+  --                   approximately length_ft at he threshold.
+  SELECT
+    (ax*dy - ay*dx) / SQRT(dx*dx + dy*dy) AS crosstrack_ft,
+    (ax*dx + ay*dy) / SQRT(dx*dx + dy*dy) AS alongtrack_ft
+  FROM (
+    SELECT
+      (he_longitude_deg - le_longitude_deg) * 364000 * COS(RADIANS(le_latitude_deg)) AS dx,
+      (he_latitude_deg  - le_latitude_deg ) * 364000                                 AS dy,
+      (<lon>            - le_longitude_deg) * 364000 * COS(RADIANS(le_latitude_deg)) AS ax,
+      (<lat>            - le_latitude_deg )  * 364000                                AS ay
+    FROM runways
+    WHERE airport_ident = 'KEMT' AND le_ident = '1'
+  );
 ";
 
 // keep fs import alive for future disk-based config overrides
