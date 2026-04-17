@@ -284,9 +284,26 @@ fn resolve_runway_hold_short(
         });
     }
 
+    // A node is a real hold-short candidate only if it has at least one
+    // non-forbidden adjacent edge — i.e. it sits at the *boundary* of the
+    // active zone with a path leading away from the runway. Nodes whose
+    // every adjacent edge is forbidden live entirely inside the active
+    // zone (e.g. the far end of the runway-crossing edge, or the node
+    // that is the runway centerline itself) and are unreachable without
+    // crossing.
     let candidate_ids: HashSet<i64> = forbidden_edges
         .iter()
         .flat_map(|&i| [graph.edges[i].from_node, graph.edges[i].to_node])
+        .filter(|id| {
+            graph
+                .adj
+                .get(id)
+                .map(|adj| {
+                    adj.iter()
+                        .any(|(_, eid)| !forbidden_edges.contains(eid))
+                })
+                .unwrap_or(false)
+        })
         .collect();
     let best = candidate_ids
         .iter()
@@ -301,7 +318,7 @@ fn resolve_runway_hold_short(
         .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(Ordering::Equal))
         .ok_or_else(|| {
             anyhow!(
-                "runway {:?} at {} has active-zone edges but no candidate hold-short nodes",
+                "runway {:?} at {} has active-zone edges but no reachable hold-short node (every boundary node is inside the zone)",
                 runway_ident,
                 airport_ident
             )
@@ -759,5 +776,72 @@ mod tests {
         // Asking for node 3 with the crossing forbidden is infeasible.
         let err = plan(&g, 1, 3, &[], &forbidden).unwrap_err();
         assert!(err.to_string().contains("no taxi route"));
+    }
+
+    /// Regression: at KWHP the taxiway-B edge crossing runway 12/30 had
+    /// 1204 departure:12,30 on it, and the node on the *runway* side also
+    /// had the runway pavement edge (also 1204:12) as its only other
+    /// neighbour. Picking the "closest" candidate blindly picked the
+    /// runway-side node — unreachable because every adjacent edge was
+    /// forbidden. The boundary filter fixes this.
+    #[test]
+    fn hold_short_picker_skips_nodes_with_only_forbidden_edges() {
+        // Graph: 1 --[clean]-- 2 --[rwy-cross]-- 3 --[rwy-pavement]-- 4.
+        // Both edges incident on node 3 are forbidden — it's *inside* the
+        // runway active zone, not the hold-short.
+        let mk = |id, lat, lon| TaxiNode {
+            node_id: id,
+            latitude_deg: lat,
+            longitude_deg: lon,
+            usage: "both".to_string(),
+        };
+        let mut nodes = HashMap::new();
+        nodes.insert(1, mk(1, 37.0000, -122.0000));
+        nodes.insert(2, mk(2, 37.0001, -122.0000));
+        nodes.insert(3, mk(3, 37.0002, -122.0000));
+        nodes.insert(4, mk(4, 37.0003, -122.0000));
+        let edges = vec![
+            TaxiEdge {
+                from_node: 1,
+                to_node: 2,
+                direction: "twoway".into(),
+                name: "B".into(),
+                active_zones: String::new(),
+            },
+            TaxiEdge {
+                from_node: 2,
+                to_node: 3,
+                direction: "twoway".into(),
+                name: "B".into(),
+                active_zones: "departure:12,30".into(),
+            },
+            TaxiEdge {
+                from_node: 3,
+                to_node: 4,
+                direction: "twoway".into(),
+                name: "12/30".into(),
+                active_zones: "departure:12,30".into(),
+            },
+        ];
+        let mut adj: HashMap<i64, Vec<(i64, usize)>> = HashMap::new();
+        for (i, e) in edges.iter().enumerate() {
+            adj.entry(e.from_node).or_default().push((e.to_node, i));
+            adj.entry(e.to_node).or_default().push((e.from_node, i));
+        }
+        // Nodes incident on forbidden edges: {2, 3, 4}. Node 3 has only
+        // forbidden neighbours; nodes 2 and 4 each have one clean
+        // neighbour (2→1 on B, and 4 has only 4→3 — forbidden — so 4 is
+        // also not a valid hold-short). Only node 2 qualifies.
+        let forbidden: HashSet<usize> = [1, 2].into_iter().collect();
+        let valid: HashSet<i64> = forbidden
+            .iter()
+            .flat_map(|&i| [edges[i].from_node, edges[i].to_node])
+            .filter(|id| {
+                adj.get(id)
+                    .map(|a| a.iter().any(|(_, e)| !forbidden.contains(e)))
+                    .unwrap_or(false)
+            })
+            .collect();
+        assert_eq!(valid, [2].into_iter().collect::<HashSet<_>>());
     }
 }
