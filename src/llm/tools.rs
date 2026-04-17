@@ -980,6 +980,44 @@ pub fn tool_engage_line_up(ctx: &ToolContext, args: &Map<String, Value>) -> Stri
     let georef = bridge.georef();
     let aircraft_pos_ft = geodetic_offset_ft(start_lat, start_lon, georef);
     let threshold_ft = geodetic_offset_ft(thr_lat, thr_lon, georef);
+
+    // Install the resolved runway into PilotCore. Without this, engage_
+    // takeoff's alignment guard compares the aircraft heading against
+    // whatever startup-default runway was in the config, not the runway
+    // we're actually lining up on. Live KWHP log showed exactly this —
+    // "aircraft heading 128° is not aligned with runway course 318°"
+    // when the LLM had explicitly asked for runway 12 (course 139°).
+    match lookup_runway_for_pattern(ctx, &airport, &runway, "left") {
+        Ok((rwy, field_elev)) => install_runway_in_pilot_core(ctx, &airport, rwy, field_elev),
+        Err(e) => return format!("error: {}", e),
+    }
+
+    // Short-circuit if we're already aligned on the runway centerline.
+    // Otherwise the fresh line-up route drags the aircraft back toward
+    // the threshold from its current on-runway position, which — when
+    // the aircraft is near the far end of the runway — plans a 180°
+    // reverse trip. Live KWHP log showed this exact sequence: "you were
+    // lined up perfectly, then you turned 180°."
+    {
+        let forward = heading_to_vector(heading_deg, 1.0);
+        let right = heading_to_vector(heading_deg + 90.0, 1.0);
+        let offset = aircraft_pos_ft - threshold_ft;
+        let along_track_ft = offset.x * forward.x + offset.y * forward.y;
+        let crosstrack_ft = offset.x * right.x + offset.y * right.y;
+        let heading_err =
+            crate::types::wrap_degrees_180(heading_deg - start_heading_deg(&bridge)).abs();
+        let on_runway = along_track_ft > -200.0 && along_track_ft < 12_000.0;
+        let aligned = heading_err < 10.0 && crosstrack_ft.abs() < 30.0;
+        if on_runway && aligned {
+            return format!(
+                "already lined up on {} runway {} — heading {:.0}° (course {:.0}°, Δ={:.0}°), \
+                 {:.0} ft along the runway, {:.0} ft off centerline. no-op.",
+                airport, runway, start_heading_deg(&bridge), heading_deg, heading_err,
+                along_track_ft.max(0.0), crosstrack_ft.abs()
+            );
+        }
+    }
+
     // Final line-up pose: 100 ft past the pavement end along the runway
     // course. Enough for the aircraft to stop with nose aligned and wheels
     // clear of the hold-short line; leaves a full runway ahead for the
@@ -1006,6 +1044,14 @@ pub fn tool_engage_line_up(ctx: &ToolContext, args: &Map<String, Value>) -> Stri
         heading_deg,
         format_displaced(&displaced)
     )
+}
+
+fn start_heading_deg(bridge: &Arc<dyn ToolBridge>) -> f64 {
+    // Prefer the bridge's live heading. `TRUE_PSI` isn't in our set of
+    // state datarefs (we read HEADING_DEG = heading_true_degmag from the
+    // bridge cache), so pull that. Falls back to 0 if unavailable.
+    use crate::sim::datarefs::HEADING_DEG;
+    bridge.get_dataref_value(HEADING_DEG.name).unwrap_or(0.0)
 }
 
 pub fn tool_engage_taxi(ctx: &ToolContext, args: &Map<String, Value>) -> String {
