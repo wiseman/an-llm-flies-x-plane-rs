@@ -440,12 +440,13 @@ fn engage_pattern_fly_for_takeoff_roll() {
 }
 
 #[test]
-fn engage_pattern_fly_offsets_threshold_by_displaced_threshold() {
+fn engage_pattern_fly_anchors_at_pavement_end_and_exposes_displacement() {
     // Runway "09" pavement end coincides with the georef anchor
-    // (47.4638, -122.308) and extends due east, so the pavement_end_ft the
-    // tool computes is (0, 0) and the resulting runway-frame threshold
-    // should be (+disp_ft, 0) — a clean check that the displaced-threshold
-    // offset is being applied along the runway heading.
+    // (47.4638, -122.308) and extends due east, so pavement_end_ft is
+    // (0, 0). The runway frame anchors at the pavement end — NOT at
+    // the displaced landing threshold — and stores the displacement
+    // separately so takeoff and landing can use the same frame
+    // consistently.
     let dir = TempDir::new().unwrap();
     let disp_ft = 88.0_f64 * 3.280_839_895_013_123;
     let extra = [
@@ -472,15 +473,26 @@ fn engage_pattern_fly_offsets_threshold_by_displaced_threshold() {
     assert!(!r.contains("error"), "got {}", r);
     let pilot = ctx.pilot.lock();
     let threshold = pilot.runway_frame.runway.threshold_ft;
+    // Threshold = pavement end (georef anchor), not displacement-shifted.
+    assert!(threshold.x.abs() < 1.0, "east: got {}", threshold.x);
+    assert!(threshold.y.abs() < 1.0, "north: got {}", threshold.y);
+    // Displacement is exposed as its own field.
     assert!(
-        (threshold.x - disp_ft).abs() < 1.0,
-        "east: got {}, want {}",
-        threshold.x,
+        (pilot.runway_frame.runway.displaced_threshold_ft - disp_ft).abs() < 1.0,
+        "displaced_threshold_ft: got {}, want {}",
+        pilot.runway_frame.runway.displaced_threshold_ft,
         disp_ft
     );
-    assert!(threshold.y.abs() < 1.0, "north: got {}, want ~0", threshold.y);
-    // Aim point is 1000 ft past threshold on any reasonably long runway.
-    assert_eq!(pilot.runway_frame.touchdown_runway_x_ft(), 1000.0);
+    // Aim point = displaced_threshold + 1000 ft: that's where the aircraft
+    // actually wants to touch down on a standard runway with apt.dat
+    // displacement.
+    let aim = pilot.runway_frame.touchdown_runway_x_ft();
+    assert!(
+        (aim - (disp_ft + 1000.0)).abs() < 1.0,
+        "aim: got {}, want {}",
+        aim,
+        disp_ft + 1000.0
+    );
 }
 
 #[test]

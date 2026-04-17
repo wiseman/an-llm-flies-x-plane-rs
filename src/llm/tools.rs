@@ -411,24 +411,25 @@ fn lookup_runway_for_pattern(
     };
     let traffic_side = TrafficSide::from_str(side)
         .ok_or_else(|| anyhow!("invalid side {:?}; expected 'left' or 'right'", side))?;
-    // The CSV's le_/he_ lat/lon is the physical pavement end. The real
-    // landing threshold is that far *inside* the runway (displaced_threshold
-    // metres/feet toward the far end), so we shift the runway-frame origin
-    // along the runway heading by the displaced-threshold distance. This
-    // matters: at KEMT runway 1 the displaced threshold is 289 ft, so the
-    // aim point and TDZ would otherwise sit 289 ft earlier than real.
+    // Runway frame anchors at the pavement end (apt.dat row-100 lat/lon)
+    // so x=0 means "start of usable takeoff pavement" and x=length is
+    // "far end of pavement". The displaced landing threshold sits
+    // `displaced_ft` inside from x=0 — `touchdown_runway_x_ft()` adds
+    // that offset when computing the landing aim point. Earlier code
+    // baked the displacement into `threshold_ft` itself, which made
+    // takeoff position checks think the aircraft was off the runway
+    // when it was at the pavement end.
     let pavement_end_ft = geodetic_offset_ft(lat, lon, bridge.georef());
-    let threshold_ft = pavement_end_ft
-        + heading_to_vector(course, displaced_ft.unwrap_or(0.0));
     let field_elev = runway_elev.unwrap_or(0.0);
     let resolved_length = length_ft.unwrap_or(5000.0);
     Ok((
         Runway {
             id: Some(runway_ident.to_string()),
-            threshold_ft,
+            threshold_ft: pavement_end_ft,
             course_deg: course,
             length_ft: resolved_length,
             touchdown_zone_ft: synthesize_touchdown_zone_ft(resolved_length),
+            displaced_threshold_ft: displaced_ft.unwrap_or(0.0),
             traffic_side,
         },
         field_elev,

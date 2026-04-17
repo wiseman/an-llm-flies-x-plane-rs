@@ -278,10 +278,21 @@ pub struct Waypoint {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Runway {
     pub id: Option<String>,
+    /// Runway-frame origin in world-frame feet. Always set to the
+    /// **pavement end** — the lat/lon apt.dat row 100 gives for the
+    /// runway end — NOT the displaced landing threshold. That keeps
+    /// the runway frame consistent between takeoff (which uses the
+    /// full runway from x=0) and landing (which aims past the
+    /// displaced threshold via `touchdown_runway_x_ft`).
     pub threshold_ft: Vec2,
     pub course_deg: f64,
     pub length_ft: f64,
     pub touchdown_zone_ft: f64,
+    /// Displacement (feet) from the pavement end to the painted landing
+    /// threshold. Non-zero when apt.dat row 100 encodes a displaced
+    /// threshold — the aircraft must touch down past this point on
+    /// landing, but can use the full runway for takeoff.
+    pub displaced_threshold_ft: f64,
     pub traffic_side: TrafficSide,
 }
 

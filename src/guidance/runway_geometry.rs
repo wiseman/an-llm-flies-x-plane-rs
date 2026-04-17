@@ -29,11 +29,21 @@ impl RunwayFrame {
         self.runway.threshold_ft + self.forward() * point_ft.x + self.right() * point_ft.y
     }
 
-    /// Aim-point x in the runway frame. Mirrors the Python clamp:
-    /// `clamp(tdz/2, 500, length/3)`.
+    /// Aim-point x in the runway frame — i.e. how far past x=0 (the
+    /// pavement end, frame origin) the aircraft should touch down on
+    /// landing.
+    ///
+    /// Composed of two parts:
+    /// - `displaced_threshold_ft`: skip past any displaced threshold so
+    ///   the aim point falls on usable landing pavement (the runway
+    ///   markings in apt.dat put the landing threshold this far inside
+    ///   the pavement end).
+    /// - `clamp(tdz/2, 500, length/3)`: the standard 1000 ft TDZ aim
+    ///   (via `touchdown_zone_ft = 2000`), clamped for short runways.
     pub fn touchdown_runway_x_ft(&self) -> f64 {
         let half_tdz = self.runway.touchdown_zone_ft * 0.5;
-        half_tdz.max(500.0).min(self.runway.length_ft / 3.0)
+        let aim_from_landing_threshold = half_tdz.max(500.0).min(self.runway.length_ft / 3.0);
+        self.runway.displaced_threshold_ft + aim_from_landing_threshold
     }
 
     pub fn touchdown_point_ft(&self) -> Vec2 {

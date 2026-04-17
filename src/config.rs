@@ -274,6 +274,11 @@ fn load_config_bundle_from(
         course_deg: airport.runway.course_deg,
         length_ft: airport.runway.length_ft,
         touchdown_zone_ft: airport.runway.touchdown_zone_ft,
+        // Config YAML doesn't model a displaced threshold — test configs
+        // use the simple full-pavement runway. Real-runway displacement
+        // comes in through `lookup_runway_for_pattern` which reads it
+        // from apt.dat.
+        displaced_threshold_ft: 0.0,
         traffic_side: TrafficSide::from_str(&airport.runway.traffic_side).ok_or_else(|| {
             anyhow!(
                 "invalid traffic_side {:?}; expected 'left' or 'right'",
