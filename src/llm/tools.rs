@@ -916,16 +916,22 @@ pub fn tool_engage_taxi(ctx: &ToolContext, args: &Map<String, Value>) -> String 
             Ok(id) => id,
             Err(e) => return format!("error: {}", e),
         };
-        let dest_node = match taxi_route::resolve_destination(
+        let dest = match taxi_route::resolve_destination(
             conn,
             &graph,
             &airport,
             &TaxiDestination::Runway(&destination_runway),
         ) {
-            Ok(id) => id,
+            Ok(d) => d,
             Err(e) => return format!("error: {}", e),
         };
-        match taxi_route::plan(&graph, start_node, dest_node, &via_taxiways) {
+        match taxi_route::plan(
+            &graph,
+            start_node,
+            dest.node,
+            &via_taxiways,
+            &dest.forbidden_edges,
+        ) {
             Ok(p) => p,
             Err(e) => return format!("error: {}", e),
         }
@@ -1014,16 +1020,22 @@ pub fn tool_plan_taxi_route(ctx: &ToolContext, args: &Map<String, Value>) -> Str
         Ok(id) => id,
         Err(e) => return format!("error: {}", e),
     };
-    let dest_node = match taxi_route::resolve_destination(
+    let dest = match taxi_route::resolve_destination(
         conn,
         &graph,
         &airport,
         &TaxiDestination::Runway(&destination_runway),
     ) {
-        Ok(id) => id,
+        Ok(d) => d,
         Err(e) => return format!("error: {}", e),
     };
-    let plan = match taxi_route::plan(&graph, start_node, dest_node, &via_taxiways) {
+    let plan = match taxi_route::plan(
+        &graph,
+        start_node,
+        dest.node,
+        &via_taxiways,
+        &dest.forbidden_edges,
+    ) {
         Ok(p) => p,
         Err(e) => return format!("error: {}", e),
     };

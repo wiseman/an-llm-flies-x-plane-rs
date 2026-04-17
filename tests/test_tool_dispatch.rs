@@ -756,7 +756,6 @@ fn build_taxi_fixture_parquet(dir: &std::path::Path) -> PathBuf {
          1202 10 1 twoway taxiway_E \n\
          1202 1 2 twoway taxiway_E A\n\
          1202 2 3 twoway taxiway_E D\n\
-         1204 departure 09\n\
          1202 2 4 twoway taxiway_E C\n\
          1202 4 3 twoway taxiway_E C\n"
             .to_string(),
