@@ -946,7 +946,12 @@ impl TaxiProfile {
             finished: false,
             leg_advance_distance_ft: 30.0,
             turn_speed_kt: 5.0,
-            cruise_speed_kt: 15.0,
+            // Real GA taxi is 5–10 kt; 15 kt was too fast for the nose
+            // wheel controller to keep the aircraft on winding taxiways,
+            // so it overshot the approach to the hold-short. 10 kt
+            // cruise leaves enough headroom for the final-leg ramp and
+            // the upcoming-turn slowdown to decelerate cleanly.
+            cruise_speed_kt: 10.0,
             turn_lookahead_ft: 180.0,
             final_stop_distance_ft: 60.0,
         }

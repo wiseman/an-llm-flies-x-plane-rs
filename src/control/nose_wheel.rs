@@ -58,15 +58,21 @@ impl NoseWheelController {
 impl Default for NoseWheelController {
     fn default() -> Self {
         Self {
-            // Rule of thumb: saturate rudder at ~12 ft crosstrack, ~20° of
-            // heading error, or ~4°/s of residual yaw rate. The gentler
-            // gains in the first draft of this controller left the C172
-            // struggling to pull onto a taxiway from a ramp lead-in —
-            // doubling the heading gain and pushing the crosstrack gain
-            // up ~60 % makes the nose wheel actually follow.
+            // Crosstrack and heading gains sized to saturate rudder at
+            // ~12 ft crosstrack or ~20° of heading error so the nose wheel
+            // actually pulls onto the leg from a perpendicular pullout.
+            //
+            // kp_yaw_rate 0.08 damps turns without reversing them — a
+            // healthy PD ratio here is ~0.5 × (peak yaw rate × P term at
+            // typical error). At 30° heading error the P term is 1.5; at
+            // a 10°/s yaw rate the damping is 0.8 — net rudder is a
+            // moderate +0.7, i.e. we're still turning but the peak rate
+            // is blunted. An earlier tuning (0.25) swung the output
+            // negative as soon as yaw rate passed ~6°/s, which produced
+            // bang-bang behaviour and visible overshoot on live taxi.
             kp_crosstrack: 0.08,
             kp_heading: 0.05,
-            kp_yaw_rate: 0.25,
+            kp_yaw_rate: 0.08,
         }
     }
 }
