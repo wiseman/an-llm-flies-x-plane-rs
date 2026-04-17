@@ -8,6 +8,6 @@ pitch:
   ki: 0.01
 tecs:
   kp_total: 0.003
-  ki_total: 0.0008
+  ki_total: 0.003
   kp_balance: 0.02
   kd_balance: 0.002

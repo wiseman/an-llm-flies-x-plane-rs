@@ -188,8 +188,6 @@ impl GuidanceProfile for HeadingHoldProfile {
     }
 }
 
-const ALT_HOLD_CAPTURE_BAND_FT: f64 = 150.0;
-const PATTERN_CLIMB_CAPTURE_BAND_FT: f64 = 150.0;
 
 pub struct AltitudeHoldProfile {
     pub altitude_ft: f64,
@@ -202,31 +200,18 @@ impl AltitudeHoldProfile {
 impl GuidanceProfile for AltitudeHoldProfile {
     fn name(&self) -> &'static str { "altitude_hold" }
     fn owns(&self) -> BTreeSet<Axis> { single(Axis::Vertical) }
-    fn contribute(&mut self, state: &AircraftState, _dt: f64) -> ProfileTick {
-        let error = self.altitude_ft - state.alt_msl_ft;
-        let c = if error > ALT_HOLD_CAPTURE_BAND_FT {
-            ProfileContribution {
-                vertical_mode: Some(VerticalMode::Tecs),
-                target_altitude_ft: Some(self.altitude_ft),
-                throttle_limit: Some((0.7, 1.0)),
-                tecs_phase_override: Some(FlightPhase::EnrouteClimb),
-                ..Default::default()
-            }
-        } else if error < -ALT_HOLD_CAPTURE_BAND_FT {
-            ProfileContribution {
-                vertical_mode: Some(VerticalMode::Tecs),
-                target_altitude_ft: Some(self.altitude_ft),
-                throttle_limit: Some((0.1, 0.5)),
-                tecs_phase_override: Some(FlightPhase::Descent),
-                ..Default::default()
-            }
-        } else {
-            ProfileContribution {
-                vertical_mode: Some(VerticalMode::Tecs),
-                target_altitude_ft: Some(self.altitude_ft),
-                throttle_limit: Some((0.1, 0.9)),
-                ..Default::default()
-            }
+    fn contribute(&mut self, _state: &AircraftState, _dt: f64) -> ProfileTick {
+        // Let TECS command the throttle it needs within the physical
+        // envelope. A previous revision switched between three discrete
+        // throttle regimes at ±150 ft of altitude error, each with its
+        // own phase-override trim value — classic hysteresis-free mode
+        // switching that limit-cycles when steady-state authority sits
+        // near a threshold.
+        let c = ProfileContribution {
+            vertical_mode: Some(VerticalMode::Tecs),
+            target_altitude_ft: Some(self.altitude_ft),
+            throttle_limit: Some((0.0, 1.0)),
+            ..Default::default()
         };
         ProfileTick::contribution_only(c)
     }
@@ -548,12 +533,12 @@ impl PatternFlyProfile {
         let track_error = wrap_degrees_180(course - state.track_deg);
         let bank_cmd = clamp(track_error * 0.35, -bank_limit, bank_limit);
         let pattern_alt = self.config.pattern_altitude_msl_ft();
-        let alt_error = pattern_alt - state.alt_msl_ft;
-        let (throttle_limit, tecs_override) = if alt_error > 100.0 {
-            ((0.9, 1.0), None)
-        } else {
-            ((0.2, 0.55), Some(FlightPhase::PatternEntry))
-        };
+        // Go-around is "committed to climb" — firewall the throttle and
+        // hold it until pattern altitude is captured and PatternFlyProfile
+        // takes over. A previous revision dropped to (0.2, 0.55) once
+        // within 100 ft of pattern alt, which would cut power exactly
+        // when crossing a threshold and produce the same discrete-regime
+        // bouncing as the pattern downwind bug.
         GuidanceTargets {
             lateral_mode: LateralMode::TrackHold,
             vertical_mode: VerticalMode::Tecs,
@@ -562,8 +547,8 @@ impl PatternFlyProfile {
             target_heading_deg: Some(course),
             target_altitude_ft: Some(pattern_alt),
             target_speed_kt: Some(self.config.performance.vy_kt),
-            throttle_limit: Some(throttle_limit),
-            tecs_phase_override: tecs_override,
+            throttle_limit: Some((0.9, 1.0)),
+            tecs_phase_override: None,
             flaps_cmd: Some(10),
             gear_down: Some(true),
             ..Default::default()
@@ -673,14 +658,21 @@ impl PatternFlyProfile {
             self.lateral_guidance.follow_leg(state, leg, bank_limit)
         };
 
-        let mut tecs_phase_override: Option<FlightPhase> = None;
-        let (target_altitude_ft, target_speed_kt, vertical_mode, glidepath, mut throttle_limit, flaps_cmd) = match phase {
+        // Throttle limits are the physical envelope only (idle .. firewall).
+        // Operational policy (cruise vs climb thrust) is handled by TECS
+        // trim + PI authority, not by clamping the controller output. A
+        // previous revision clipped Downwind to 0.55 which combined with
+        // an `alt_error > 150 ft` override flipping to (0.7, 1.0) caused a
+        // limit cycle when steady-state altitude sat right on the
+        // threshold.
+        let tecs_phase_override: Option<FlightPhase> = None;
+        let (target_altitude_ft, target_speed_kt, vertical_mode, glidepath, throttle_limit, flaps_cmd) = match phase {
             FlightPhase::PatternEntry => (
                 self.config.pattern_altitude_msl_ft(),
                 self.config.performance.downwind_speed_kt,
                 VerticalMode::Tecs,
                 None,
-                (0.2, 0.6),
+                (0.0, 1.0),
                 Some(0),
             ),
             FlightPhase::Downwind => (
@@ -688,7 +680,7 @@ impl PatternFlyProfile {
                 self.config.performance.downwind_speed_kt,
                 VerticalMode::Tecs,
                 None,
-                (0.2, 0.55),
+                (0.0, 1.0),
                 Some(10),
             ),
             FlightPhase::Base => (
@@ -696,7 +688,7 @@ impl PatternFlyProfile {
                 self.config.performance.base_speed_kt,
                 VerticalMode::Tecs,
                 None,
-                (0.05, 0.5),
+                (0.0, 1.0),
                 Some(20),
             ),
             FlightPhase::Final => {
@@ -715,19 +707,12 @@ impl PatternFlyProfile {
                         threshold_crossing_height_ft: 0.0,
                         aimpoint_ft_from_threshold: self.runway_frame.touchdown_runway_x_ft(),
                     }),
-                    (0.05, 0.65),
+                    (0.0, 1.0),
                     Some(30),
                 )
             }
             _ => unreachable!(),
         };
-        if matches!(phase, FlightPhase::PatternEntry | FlightPhase::Downwind) {
-            let alt_error = target_altitude_ft - state.alt_msl_ft;
-            if alt_error > PATTERN_CLIMB_CAPTURE_BAND_FT {
-                throttle_limit = (0.7, 1.0);
-                tecs_phase_override = Some(FlightPhase::EnrouteClimb);
-            }
-        }
         // Stable display heading (non-L1) so the TUI doesn't flicker while L1
         // chatters intercept angles.
         let course = self.runway_frame.runway.course_deg;

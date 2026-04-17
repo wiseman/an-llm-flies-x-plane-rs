@@ -252,44 +252,34 @@ fn invalid_direction_raises() {
 }
 
 #[test]
-fn altitude_hold_climb_capture_picks_enroute_climb() {
+fn altitude_hold_contribution_is_regime_free() {
+    // After the limit-cycle fix, AltitudeHoldProfile no longer switches
+    // between discrete throttle/override regimes at ±150 ft. Its
+    // contribution is identical whether the aircraft is far below, far
+    // above, or near the target — TECS decides the actual thrust.
     use xplane_pilot::core::profiles::GuidanceProfile;
     let mut profile = AltitudeHoldProfile::new(2000.0);
-    let state = AircraftState {
+    let far_below = AircraftState {
         alt_msl_ft: 1387.0,
-        alt_agl_ft: 0.0,
         ..AircraftState::synthetic_default()
     };
-    let tick = profile.contribute(&state, 0.2);
-    assert_eq!(tick.contribution.tecs_phase_override, Some(FlightPhase::EnrouteClimb));
-    assert_eq!(tick.contribution.throttle_limit, Some((0.7, 1.0)));
-}
-
-#[test]
-fn altitude_hold_descent_capture_picks_descent() {
-    use xplane_pilot::core::profiles::GuidanceProfile;
-    let mut profile = AltitudeHoldProfile::new(2000.0);
-    let state = AircraftState {
+    let far_above = AircraftState {
         alt_msl_ft: 3000.0,
-        alt_agl_ft: 0.0,
         ..AircraftState::synthetic_default()
     };
-    let tick = profile.contribute(&state, 0.2);
-    assert_eq!(tick.contribution.tecs_phase_override, Some(FlightPhase::Descent));
-    assert_eq!(tick.contribution.throttle_limit, Some((0.1, 0.5)));
-}
-
-#[test]
-fn altitude_hold_small_error_uses_default_tuning() {
-    use xplane_pilot::core::profiles::GuidanceProfile;
-    let mut profile = AltitudeHoldProfile::new(2000.0);
-    let state = AircraftState {
+    let near_target = AircraftState {
         alt_msl_ft: 1950.0,
         ..AircraftState::synthetic_default()
     };
-    let tick = profile.contribute(&state, 0.2);
-    assert_eq!(tick.contribution.tecs_phase_override, None);
-    assert_eq!(tick.contribution.throttle_limit, Some((0.1, 0.9)));
+    for state in [far_below, far_above, near_target] {
+        let tick = profile.contribute(&state, 0.2);
+        assert_eq!(tick.contribution.tecs_phase_override, None);
+        assert_eq!(tick.contribution.throttle_limit, Some((0.0, 1.0)));
+        assert_eq!(
+            tick.contribution.target_altitude_ft,
+            Some(2000.0)
+        );
+    }
 }
 
 #[test]
@@ -359,9 +349,26 @@ fn altitude_hold_end_to_end_climb_through_pilot() {
         flap_index: 0,
         gear_down: true,
     };
-    let (_, cmds) = pilot.update(&raw, 0.2);
-    assert!(cmds.throttle >= 0.7, "throttle was {}", cmds.throttle);
-    // VerticalMode::Tecs is used in capture — elevator pushes pitch up.
-    assert!(cmds.elevator > 0.0, "elevator was {}", cmds.elevator);
+    // Run enough ticks for TECS to integrate up toward its climb
+    // authority — the old regime switch floored throttle at 0.7
+    // instantly; the new continuous loop needs a few ticks to wind up
+    // from the cruise trim (0.58) via the integrator.
+    let mut last_throttle = 0.0;
+    let mut last_elevator = 0.0;
+    for _ in 0..20 {
+        let (_, cmds) = pilot.update(&raw, 0.2);
+        last_throttle = cmds.throttle;
+        last_elevator = cmds.elevator;
+    }
+    // With 613 ft of alt error sustained, throttle should rise above
+    // the cruise trim (0.58) under TECS integral authority and elevator
+    // should be pushing pitch up. Hard values depend on gains; we only
+    // assert that the control loop is responding in the right direction.
+    assert!(
+        last_throttle > 0.6,
+        "throttle did not climb above trim: {}",
+        last_throttle
+    );
+    assert!(last_elevator > 0.0, "elevator was {}", last_elevator);
     let _ = VerticalMode::Tecs;
 }
