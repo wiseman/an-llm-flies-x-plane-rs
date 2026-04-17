@@ -26,7 +26,7 @@ use crate::transcribe::realtime_ws::{RealtimeClient, RealtimeEvent};
 
 #[derive(Debug, Clone)]
 pub enum PttEvent {
-    Start { prefix: String },
+    Start { prefix: String, prompt: Option<String> },
     Stop,
     Shutdown,
 }
@@ -107,8 +107,8 @@ impl PttController {
         })
     }
 
-    pub fn start(&self, prefix: String) {
-        let _ = self.event_tx.send(PttEvent::Start { prefix });
+    pub fn start(&self, prefix: String, prompt: Option<String>) {
+        let _ = self.event_tx.send(PttEvent::Start { prefix, prompt });
     }
 
     pub fn stop(&self) {
@@ -171,7 +171,7 @@ fn worker_loop(
     loop {
         // 1. Drain control events.
         match event_rx.try_recv() {
-            Ok(PttEvent::Start { prefix }) => {
+            Ok(PttEvent::Start { prefix, prompt }) => {
                 if ws.is_none() {
                     match RealtimeClient::connect(&api_key) {
                         Ok(c) => {
@@ -184,6 +184,11 @@ fn worker_loop(
                             state.lock().last_error = Some(msg);
                             continue;
                         }
+                    }
+                }
+                if let Some(c) = ws.as_mut() {
+                    if let Err(e) = c.send_session_update_with_prompt(prompt.as_deref()) {
+                        log(format!("voice: session update: {e}"));
                     }
                 }
                 {

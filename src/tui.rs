@@ -600,6 +600,29 @@ impl PttKey {
         }
     }
 
+    /// Transcription biasing prompt for this key. Narrower context ⇒
+    /// better recognition of runway numbers, taxiway letters, and
+    /// ATC phraseology.
+    fn transcribe_prompt(self) -> &'static str {
+        match self {
+            PttKey::Space => {
+                "Aviation conversation. Common words: runway, heading, \
+                 altitude, taxi, takeoff, landing, flaps, throttle, pattern, \
+                 downwind, base, final, VFR, IFR, squawk."
+            }
+            PttKey::Tab => {
+                "Air traffic control radio communication. Common phrases: \
+                 cleared to land runway [number], cleared for takeoff, hold \
+                 short of [taxiway], taxi via [taxiway] to runway [number], \
+                 line up and wait, contact tower, contact ground, go around, \
+                 traffic pattern, left traffic, right traffic, squawk \
+                 [code], ident. Callsigns: tower, ground, approach, \
+                 departure, unicom, CTAF. Numbers are spoken digit by \
+                 digit (one-two-zero not one hundred twenty)."
+            }
+        }
+    }
+
     fn from_code(code: &KeyCode) -> Option<Self> {
         match code {
             KeyCode::Char(' ') => Some(PttKey::Space),
@@ -613,13 +636,13 @@ impl PttKey {
 /// `handle_ptt_key` decoupled from `PttController` makes it trivially
 /// unit-testable with a stub.
 trait PttControl {
-    fn start(&self, prefix: String);
+    fn start(&self, prefix: String, prompt: Option<String>);
     fn stop(&self);
 }
 
 impl PttControl for PttController {
-    fn start(&self, prefix: String) {
-        PttController::start(self, prefix);
+    fn start(&self, prefix: String, prompt: Option<String>) {
+        PttController::start(self, prefix, prompt);
     }
     fn stop(&self) {
         PttController::stop(self);
@@ -679,7 +702,10 @@ fn handle_ptt_key<P: PttControl + ?Sized>(
                     input_buffer.push_str(key.prefix());
                 }
                 if let Some(p) = ptt {
-                    p.start(key.prefix().to_string());
+                    p.start(
+                        key.prefix().to_string(),
+                        Some(key.transcribe_prompt().to_string()),
+                    );
                 }
                 tracker.pending = Some(PendingPtt {
                     key,
@@ -1098,8 +1124,14 @@ mod tests {
     }
 
     impl PttControl for FakePtt {
-        fn start(&self, prefix: String) {
-            self.calls.borrow_mut().push(format!("start:{prefix}"));
+        fn start(&self, prefix: String, prompt: Option<String>) {
+            let tag = prompt
+                .as_deref()
+                .map(|p| if p.contains("radio communication") { "atc" } else { "conv" })
+                .unwrap_or("none");
+            self.calls
+                .borrow_mut()
+                .push(format!("start:{prefix}|prompt={tag}"));
         }
         fn stop(&self) {
             self.calls.borrow_mut().push("stop".to_string());
@@ -1156,7 +1188,7 @@ mod tests {
         );
         // Stray trailing space stripped; no prefix for operator mode.
         assert_eq!(buf, "hello ");
-        assert_eq!(*ptt.calls.borrow(), vec!["start:".to_string()]);
+        assert_eq!(*ptt.calls.borrow(), vec!["start:|prompt=conv".to_string()]);
         assert!(tracker.pending.as_ref().unwrap().recording);
     }
 
@@ -1182,7 +1214,7 @@ mod tests {
         );
         // Stray tab stripped, [atc] prefix inserted.
         assert_eq!(buf, "[atc] ");
-        assert_eq!(*ptt.calls.borrow(), vec!["start:[atc] ".to_string()]);
+        assert_eq!(*ptt.calls.borrow(), vec!["start:[atc] |prompt=atc".to_string()]);
     }
 
     #[test]
@@ -1236,7 +1268,7 @@ mod tests {
         );
         assert_eq!(
             *ptt2.calls.borrow(),
-            vec!["start:".to_string(), "stop".to_string()]
+            vec!["start:|prompt=conv".to_string(), "stop".to_string()]
         );
         assert!(tracker2.pending.is_none());
     }
@@ -1267,7 +1299,7 @@ mod tests {
         // The second Press is treated as a synthetic Repeat, stripping
         // the stray space and starting PTT.
         assert_eq!(buf, "");
-        assert_eq!(*ptt.calls.borrow(), vec!["start:".to_string()]);
+        assert_eq!(*ptt.calls.borrow(), vec!["start:|prompt=conv".to_string()]);
         assert!(tracker.pending.as_ref().unwrap().recording);
     }
 

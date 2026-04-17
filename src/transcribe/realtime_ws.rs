@@ -73,6 +73,13 @@ impl RealtimeClient {
     }
 
     fn send_session_update(&mut self) -> Result<()> {
+        self.send_session_update_with_prompt(None)
+    }
+
+    /// Send a `transcription_session.update`. Called once on connect and
+    /// again on each PTT hold so the prompt can switch between "aviation
+    /// conversation" (space) and "ATC radio" (tab).
+    pub fn send_session_update_with_prompt(&mut self, prompt: Option<&str>) -> Result<()> {
         // `transcription_session.update` requires config under `session` —
         // the live server rejects the flat form with "Missing required
         // parameter: 'session'." (The developers.openai.com docs show the
@@ -84,14 +91,18 @@ impl RealtimeClient {
         // own `input_audio_buffer.commit` on key release — doing so races
         // with the server's auto-commit and produces "buffer too small"
         // errors when release arrives after the server already committed.
+        let mut transcription = json!({
+            "model": "gpt-4o-transcribe",
+            "language": "en",
+        });
+        if let Some(p) = prompt {
+            transcription["prompt"] = Value::String(p.to_string());
+        }
         let msg = json!({
             "type": "transcription_session.update",
             "session": {
                 "input_audio_format": "pcm16",
-                "input_audio_transcription": {
-                    "model": "gpt-4o-transcribe",
-                    "language": "en"
-                },
+                "input_audio_transcription": transcription,
                 "turn_detection": {
                     "type": "server_vad",
                     "threshold": 0.5,
