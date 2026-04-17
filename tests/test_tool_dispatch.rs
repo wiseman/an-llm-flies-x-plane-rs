@@ -333,6 +333,7 @@ fn engage_takeoff_refuses_when_not_on_runway() {
         runway_id: None,
         field_elevation_ft: None,
         debug_lines: Vec::new(),
+        completed_profiles: Vec::new(),
     });
     let r = dispatch_tool(
         &call(
@@ -655,6 +656,7 @@ fn seed_snapshot(ctx: &ToolContext, flap_index: i32, on_ground: bool) {
         runway_id: None,
         field_elevation_ft: None,
         debug_lines: Vec::new(),
+        completed_profiles: Vec::new(),
     });
 }
 

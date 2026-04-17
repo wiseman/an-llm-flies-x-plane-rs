@@ -53,6 +53,7 @@ struct HeartbeatState {
     last_heartbeat_s: f64,
     last_seen_phase: Option<FlightPhase>,
     last_seen_profiles: Option<Vec<String>>,
+    last_seen_completed: Option<Vec<String>>,
 }
 
 pub struct HeartbeatPump {
@@ -88,6 +89,7 @@ impl HeartbeatPump {
                 last_heartbeat_s: now,
                 last_seen_phase: None,
                 last_seen_profiles: None,
+                last_seen_completed: None,
             }),
         }
     }
@@ -103,17 +105,28 @@ impl HeartbeatPump {
         let Some(snapshot) = snapshot_opt else { return };
         let current_phase = snapshot.phase;
         let current_profiles: Vec<String> = snapshot.active_profiles.clone();
+        let current_completed: Vec<String> = snapshot.completed_profiles.clone();
 
         let mut st = self.state.lock().unwrap();
         if st.last_seen_profiles.is_none() {
             st.last_seen_phase = current_phase;
             st.last_seen_profiles = Some(current_profiles);
+            st.last_seen_completed = Some(current_completed);
             return;
         }
         let phase_changed = st.last_seen_phase != current_phase;
         let profiles_changed = st.last_seen_profiles.as_deref() != Some(current_profiles.as_slice());
+        // New completions only — if a profile that was already complete
+        // stays complete, no need to re-wake the LLM.
+        let prev_completed = st.last_seen_completed.as_deref().unwrap_or(&[]);
+        let new_completions: Vec<String> = current_completed
+            .iter()
+            .filter(|n| !prev_completed.contains(n))
+            .cloned()
+            .collect();
+        let completions_changed = !new_completions.is_empty();
 
-        if phase_changed || profiles_changed {
+        if phase_changed || profiles_changed || completions_changed {
             if phase_changed
                 && current_phase == Some(FlightPhase::GoAround)
                 && st.last_seen_phase != Some(FlightPhase::GoAround)
@@ -129,6 +142,7 @@ impl HeartbeatPump {
                     current_phase,
                     st.last_seen_profiles.as_deref().unwrap_or(&[]),
                     &current_profiles,
+                    &new_completions,
                     snapshot.go_around_reason.as_deref(),
                 );
                 st.last_heartbeat_s = now;
@@ -138,6 +152,7 @@ impl HeartbeatPump {
             }
             st.last_seen_phase = current_phase;
             st.last_seen_profiles = Some(current_profiles);
+            st.last_seen_completed = Some(current_completed);
             return;
         }
 
@@ -159,6 +174,7 @@ fn describe_change(
     new_phase: Option<FlightPhase>,
     old_profiles: &[String],
     new_profiles: &[String],
+    new_completions: &[String],
     go_around_reason: Option<&str>,
 ) -> String {
     let mut parts: Vec<String> = Vec::new();
@@ -187,6 +203,9 @@ fn describe_change(
         if !profile_parts.is_empty() {
             parts.push(format!("profiles {}", profile_parts.join("; ")));
         }
+    }
+    if !new_completions.is_empty() {
+        parts.push(format!("completed: {}", new_completions.join(", ")));
     }
     if parts.is_empty() {
         "state changed".to_string()

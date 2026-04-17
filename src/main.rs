@@ -83,8 +83,12 @@ struct Cli {
     #[arg(long)]
     no_log_file: bool,
 
-    /// Idle-period before the heartbeat pump wakes the LLM (seconds).
-    #[arg(long, default_value_t = 30.0)]
+    /// Idle-period before the heartbeat pump wakes the LLM (seconds). The
+    /// pump also wakes immediately when automation state changes — a
+    /// flight-phase transition, profile engage/disengage, or profile
+    /// completion (e.g. taxi reaches hold-short) — so this only gates the
+    /// fallback "nothing is happening, check in" cadence.
+    #[arg(long, default_value_t = 60.0)]
     heartbeat_interval: f64,
 
     /// Disable the heartbeat pump entirely.

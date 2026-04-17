@@ -45,6 +45,11 @@ pub struct StatusSnapshot {
     /// expose their internal state (leg index, crosstrack, target speed,
     /// etc.) for live debugging.
     pub debug_lines: Vec<String>,
+    /// Names of active profiles reporting `is_complete() == true`. The
+    /// heartbeat pump uses transitions in this set to wake the LLM the
+    /// moment an automated sequence finishes (e.g. taxi arrives at the
+    /// hold-short), instead of making it wait for the idle heartbeat.
+    pub completed_profiles: Vec<String>,
 }
 
 pub struct PilotCore {
@@ -198,6 +203,12 @@ impl PilotCore {
             .iter()
             .filter_map(|p| p.debug_line(&state))
             .collect();
+        let completed_profiles: Vec<String> = self
+            .active_profiles
+            .iter()
+            .filter(|p| p.is_complete())
+            .map(|p| p.name().to_string())
+            .collect();
         let snapshot = StatusSnapshot {
             t_sim: state.t_sim,
             active_profiles: self.list_profile_names(),
@@ -210,6 +221,7 @@ impl PilotCore {
             runway_id: metadata.as_ref().and_then(|m| m.runway_id.clone()),
             field_elevation_ft: metadata.as_ref().and_then(|m| m.field_elevation_ft),
             debug_lines,
+            completed_profiles,
         };
         self.latest_snapshot = Some(snapshot);
         (state, commands)

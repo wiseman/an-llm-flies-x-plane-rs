@@ -70,6 +70,7 @@ fn make_snapshot(
         runway_id: None,
         field_elevation_ft: None,
         debug_lines: Vec::new(),
+        completed_profiles: Vec::new(),
     }
 }
 

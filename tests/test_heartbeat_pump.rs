@@ -71,6 +71,7 @@ fn make_snapshot(
         runway_id: None,
         field_elevation_ft: None,
         debug_lines: Vec::new(),
+        completed_profiles: Vec::new(),
     }
 }
 
@@ -156,6 +157,38 @@ fn phase_change_fires_heartbeat() {
     assert_eq!(msgs.len(), 1);
     assert!(msgs[0].text.contains("downwind"));
     assert!(msgs[0].text.contains("base"));
+}
+
+#[test]
+fn profile_completion_fires_heartbeat() {
+    let (pilot, clock, rx, pump) = setup();
+    seed(&pilot, &["taxi"], None);
+    pump.check_and_emit();
+    clock.advance_secs(3.0);
+    let mut snap = make_snapshot(&["taxi"], None, 425.0, None);
+    snap.completed_profiles = vec!["taxi".to_string()];
+    pilot.lock().latest_snapshot = Some(snap);
+    pump.check_and_emit();
+    let msgs = drain(&rx);
+    assert_eq!(msgs.len(), 1);
+    assert_eq!(msgs[0].source, IncomingSource::Heartbeat);
+    assert!(msgs[0].text.contains("completed: taxi"));
+}
+
+#[test]
+fn already_completed_profile_does_not_refire_heartbeat() {
+    let (pilot, clock, rx, pump) = setup();
+    let mut snap = make_snapshot(&["taxi"], None, 425.0, None);
+    snap.completed_profiles = vec!["taxi".to_string()];
+    pilot.lock().latest_snapshot = Some(snap);
+    pump.check_and_emit();
+    // Same completion state a few ticks later — no new completion, no fire.
+    clock.advance_secs(3.0);
+    let mut snap2 = make_snapshot(&["taxi"], None, 425.0, None);
+    snap2.completed_profiles = vec!["taxi".to_string()];
+    pilot.lock().latest_snapshot = Some(snap2);
+    pump.check_and_emit();
+    assert!(drain(&rx).is_empty());
 }
 
 #[test]

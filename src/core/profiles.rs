@@ -80,6 +80,16 @@ pub trait GuidanceProfile: Send {
         None
     }
 
+    /// Report that the profile has completed its mission — the airplane
+    /// has finished taxiing to the hold-short, the line-up is parked on
+    /// the centerline, etc. Used by `HeartbeatPump` to wake the LLM the
+    /// moment an automated sequence finishes, instead of waiting out the
+    /// idle heartbeat interval. The profile stays engaged (holding the
+    /// brake, etc.); only the completion edge is a signal. Default false.
+    fn is_complete(&self) -> bool {
+        false
+    }
+
     /// Optional one-line debug string surfaced in the status pane. Profiles
     /// with non-trivial internal state (e.g. `TaxiProfile`'s leg sequencer)
     /// use this to expose the values a human would need to diagnose why the
@@ -1185,6 +1195,10 @@ impl GuidanceProfile for TaxiProfile {
             throttle_limit: Some((0.0, 1.0)),
             ..Default::default()
         })
+    }
+
+    fn is_complete(&self) -> bool {
+        self.finished
     }
 
     fn debug_line(&self, state: &AircraftState) -> Option<String> {
