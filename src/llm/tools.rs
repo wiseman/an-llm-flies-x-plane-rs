@@ -26,7 +26,7 @@ use crate::sim::datarefs::{
     LONGITUDE_DEG, PARKING_BRAKE_RATIO,
 };
 use crate::sim::xplane_bridge::{geodetic_offset_ft, GeoReference};
-use crate::types::{FlightPhase, Runway, TrafficSide};
+use crate::types::{heading_to_vector, FlightPhase, Runway, TrafficSide};
 
 pub const SQL_QUERY_MAX_ROWS: usize = 50;
 
@@ -247,8 +247,13 @@ pub fn tool_engage_cruise(ctx: &ToolContext, args: &Map<String, Value>) -> Strin
     )
 }
 
-fn synthesize_touchdown_zone_ft(length_ft: f64) -> f64 {
-    (length_ft * 0.5).clamp(500.0, 2000.0)
+/// Touchdown zone length (feet) used when the runway is installed dynamically
+/// from a query — `RunwayFrame::touchdown_runway_x_ft` halves this and then
+/// clamps to `[500, length/3]` to produce the aim-point. Returning 2000 here
+/// targets the standard 1000 ft aim point past the threshold on any runway
+/// long enough to support it; short strips fall out via the downstream clamp.
+fn synthesize_touchdown_zone_ft(_length_ft: f64) -> f64 {
+    2000.0
 }
 
 fn ensure_runway_conn(ctx: &ToolContext) -> Result<()> {
@@ -295,8 +300,8 @@ fn lookup_runway_for_pattern(
     let conn = guard.as_ref().unwrap();
     let mut stmt = conn.prepare(
         "SELECT le_ident, he_ident, \
-                le_latitude_deg, le_longitude_deg, le_heading_degT, le_elevation_ft, \
-                he_latitude_deg, he_longitude_deg, he_heading_degT, he_elevation_ft, \
+                le_latitude_deg, le_longitude_deg, le_heading_degT, le_elevation_ft, le_displaced_threshold_ft, \
+                he_latitude_deg, he_longitude_deg, he_heading_degT, he_elevation_ft, he_displaced_threshold_ft, \
                 length_ft \
          FROM runways \
          WHERE airport_ident = ? AND (le_ident = ? OR he_ident = ?) AND closed = 0 \
@@ -312,17 +317,19 @@ fn lookup_runway_for_pattern(
     let le_lon: Option<f64> = row.get(3)?;
     let le_hdg: Option<f64> = row.get(4)?;
     let le_elev: Option<f64> = row.get(5)?;
-    let he_lat: Option<f64> = row.get(6)?;
-    let he_lon: Option<f64> = row.get(7)?;
-    let he_hdg: Option<f64> = row.get(8)?;
-    let he_elev: Option<f64> = row.get(9)?;
-    let length_ft: Option<f64> = row.get(10)?;
+    let le_disp: Option<f64> = row.get(6)?;
+    let he_lat: Option<f64> = row.get(7)?;
+    let he_lon: Option<f64> = row.get(8)?;
+    let he_hdg: Option<f64> = row.get(9)?;
+    let he_elev: Option<f64> = row.get(10)?;
+    let he_disp: Option<f64> = row.get(11)?;
+    let length_ft: Option<f64> = row.get(12)?;
 
-    let (threshold_lat, threshold_lon, course_hdg, runway_elev) =
+    let (threshold_lat, threshold_lon, course_hdg, runway_elev, displaced_ft) =
         if Some(runway_ident.to_string()) == le_ident {
-            (le_lat, le_lon, le_hdg, le_elev)
+            (le_lat, le_lon, le_hdg, le_elev, le_disp)
         } else if Some(runway_ident.to_string()) == he_ident {
-            (he_lat, he_lon, he_hdg, he_elev)
+            (he_lat, he_lon, he_hdg, he_elev, he_disp)
         } else {
             return Err(anyhow!(
                 "runway lookup returned {:?}/{:?} for query {:?}; internal mismatch",
@@ -340,7 +347,15 @@ fn lookup_runway_for_pattern(
     };
     let traffic_side = TrafficSide::from_str(side)
         .ok_or_else(|| anyhow!("invalid side {:?}; expected 'left' or 'right'", side))?;
-    let threshold_ft = geodetic_offset_ft(lat, lon, bridge.georef());
+    // The CSV's le_/he_ lat/lon is the physical pavement end. The real
+    // landing threshold is that far *inside* the runway (displaced_threshold
+    // metres/feet toward the far end), so we shift the runway-frame origin
+    // along the runway heading by the displaced-threshold distance. This
+    // matters: at KEMT runway 1 the displaced threshold is 289 ft, so the
+    // aim point and TDZ would otherwise sit 289 ft earlier than real.
+    let pavement_end_ft = geodetic_offset_ft(lat, lon, bridge.georef());
+    let threshold_ft = pavement_end_ft
+        + heading_to_vector(course, displaced_ft.unwrap_or(0.0));
     let field_elev = runway_elev.unwrap_or(0.0);
     let resolved_length = length_ft.unwrap_or(5000.0);
     Ok((

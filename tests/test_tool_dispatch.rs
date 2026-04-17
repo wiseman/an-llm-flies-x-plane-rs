@@ -328,6 +328,55 @@ fn engage_pattern_fly_for_takeoff_roll() {
 }
 
 #[test]
+fn engage_pattern_fly_offsets_threshold_by_displaced_threshold() {
+    // Runway 1 pavement end coincides with the georef anchor (47.4638, -122.308),
+    // so `pavement_end_ft` becomes (0, 0) and the resulting runway-frame
+    // threshold should equal the displacement vector along the runway heading.
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("runways.csv");
+    let disp_ft = 289.0_f64;
+    let heading_deg = 25.0_f64;
+    let extra = [
+        "99,99,KTEST,4000,75,ASP,1,0,\
+         1,47.4638,-122.308,0,25.0,289,\
+         19,47.4749,-122.3009,0,205.0,0",
+    ];
+    build_fake_runway_csv(&path, &extra);
+    let (ctx, _bridge) = make_ctx_with_csv(&path);
+    let r = dispatch_tool(
+        &call(
+            "engage_pattern_fly",
+            json!({
+                "airport_ident": "KTEST",
+                "runway_ident": "1",
+                "side": "left",
+                "start_phase": "pattern_entry",
+            }),
+        ),
+        &ctx,
+    );
+    assert!(!r.contains("error"), "got {}", r);
+    let pilot = ctx.pilot.lock();
+    let threshold = pilot.runway_frame.runway.threshold_ft;
+    let expected_east = disp_ft * heading_deg.to_radians().sin();
+    let expected_north = disp_ft * heading_deg.to_radians().cos();
+    assert!(
+        (threshold.x - expected_east).abs() < 1.0,
+        "east: got {}, want {}",
+        threshold.x,
+        expected_east
+    );
+    assert!(
+        (threshold.y - expected_north).abs() < 1.0,
+        "north: got {}, want {}",
+        threshold.y,
+        expected_north
+    );
+    // Aim point is 1000 ft past threshold on any reasonably long runway.
+    assert_eq!(pilot.runway_frame.touchdown_runway_x_ft(), 1000.0);
+}
+
+#[test]
 fn engage_pattern_fly_unknown_airport_errors() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("runways.csv");
