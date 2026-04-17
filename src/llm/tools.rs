@@ -494,7 +494,7 @@ pub fn tool_engage_pattern_fly(ctx: &ToolContext, args: &Map<String, Value>) -> 
     )
 }
 
-pub fn tool_engage_takeoff(ctx: &ToolContext, _args: &Map<String, Value>) -> String {
+pub fn tool_engage_takeoff(ctx: &ToolContext, args: &Map<String, Value>) -> String {
     let pb = parking_brake_ratio(ctx);
     if let Some(v) = pb {
         if v >= 0.5 {
@@ -505,29 +505,65 @@ pub fn tool_engage_takeoff(ctx: &ToolContext, _args: &Map<String, Value>) -> Str
         }
     }
 
-    // Alignment + stopped gate. The LLM was observed calling
-    // engage_takeoff ~1 s after engage_line_up, which displaced the
-    // in-progress line-up at ~90° off runway heading and started the
-    // takeoff roll in the wrong direction. These two checks refuse the
-    // engage until the aircraft is actually on the centerline pointed
-    // down the runway.
+    let airport = match arg_str(args, "airport_ident") {
+        Ok(s) => s.to_string(),
+        Err(e) => return format!("error: {}", e),
+    };
+    let runway_ident = match arg_str(args, "runway_ident") {
+        Ok(s) => s.to_string(),
+        Err(e) => return format!("error: {}", e),
+    };
+
+    // Resolve runway from apt.dat and install it into pilot core. This
+    // gives runway_frame the correct threshold position, course, and
+    // length — not whatever was grabbed at startup from the aircraft's
+    // boot heading. The rollout centerline controller tracks that
+    // course to keep the aircraft on centerline during the roll.
+    match lookup_runway_for_pattern(ctx, &airport, &runway_ident, "left") {
+        Ok((rwy, field_elev)) => install_runway_in_pilot_core(ctx, &airport, rwy, field_elev),
+        Err(e) => return format!("error: {}", e),
+    }
+
+    // Verify aircraft is actually on the runway we just installed, not
+    // just happening to be pointed in its direction. Position check
+    // catches the "I forgot to taxi/line up" case where the old
+    // heading-only guard was a false positive.
     {
         let pilot = ctx.pilot.lock();
-        if let Some(snap) = pilot.latest_snapshot.as_ref() {
-            let runway_course = pilot.runway_frame.runway.course_deg;
-            let heading_err = crate::types::wrap_degrees_180(runway_course - snap.state.heading_deg).abs();
-            if heading_err > 15.0 {
-                return format!(
-                    "error: aircraft heading {:.0}° is not aligned with runway course {:.0}° (Δ={:.0}° > 15°) — wait for engage_line_up to finish (aircraft needs to be stopped on the runway centerline, nose pointed down the runway) before calling engage_takeoff. Poll get_status until heading matches runway course and gs_kt is near zero.",
-                    snap.state.heading_deg, runway_course, heading_err
-                );
-            }
-            if snap.state.gs_kt > 3.0 {
-                return format!(
-                    "error: aircraft is moving at {:.1} kt — stop on the runway centerline before engage_takeoff (usually means engage_line_up is still in progress — wait for it to finish)",
-                    snap.state.gs_kt
-                );
-            }
+        let Some(snap) = pilot.latest_snapshot.as_ref() else {
+            return "error: no aircraft state yet — call get_status first so the control loop publishes a snapshot".to_string();
+        };
+        let runway_frame = &pilot.runway_frame;
+        let pos_rwy = runway_frame.to_runway_frame(snap.state.position_ft);
+        let along = pos_rwy.x;
+        let cross = pos_rwy.y;
+        let length = runway_frame.runway.length_ft;
+        let course = runway_frame.runway.course_deg;
+        let heading_err = crate::types::wrap_degrees_180(course - snap.state.heading_deg).abs();
+
+        if cross.abs() > 100.0 {
+            return format!(
+                "error: aircraft is {:.0} ft off runway {} centerline (max 100 ft). Taxi onto the runway first — call engage_line_up runway={} to move into position.",
+                cross.abs(), runway_ident, runway_ident
+            );
+        }
+        if along < -100.0 || along > length {
+            return format!(
+                "error: aircraft is at along-track {:.0} ft on runway {} (runway extends 0..{:.0} ft). Position is not on the runway — use engage_taxi or engage_line_up to get here first.",
+                along, runway_ident, length
+            );
+        }
+        if heading_err > 15.0 {
+            return format!(
+                "error: aircraft heading {:.0}° is not aligned with runway {} course {:.0}° (Δ={:.0}° > 15°). Call engage_line_up runway={} and wait for it to finish before engage_takeoff.",
+                snap.state.heading_deg, runway_ident, course, heading_err, runway_ident
+            );
+        }
+        if snap.state.gs_kt > 3.0 {
+            return format!(
+                "error: aircraft moving at {:.1} kt — stop on the runway centerline before engage_takeoff (usually means engage_line_up is still in progress)",
+                snap.state.gs_kt
+            );
         }
     }
 
@@ -536,8 +572,9 @@ pub fn tool_engage_takeoff(ctx: &ToolContext, _args: &Map<String, Value>) -> Str
     let profile = Box::new(TakeoffProfile::new(new_config, runway_frame));
     let displaced = ctx.pilot.lock().engage_profile(profile);
     format!(
-        "engaged takeoff {}{}",
-        pilot_reference_label(ctx),
+        "engaged takeoff {} runway {}{}",
+        airport,
+        runway_ident,
         format_displaced(&displaced)
     )
 }
@@ -1531,9 +1568,12 @@ pub fn tool_schemas() -> Vec<Value> {
         ),
         schema(
             "engage_takeoff",
-            "Start the takeoff sequence: full power, accelerate on the runway centerline, rotate at Vr, then hold a straight-ahead climb at Vy along the runway track. Owns all three axes. Does NOT auto-disengage — once you're safely airborne, transition by engaging another profile (engage_heading_hold, engage_altitude_hold, engage_pattern_fly, etc.), which will displace this one via axis-ownership conflict. REFUSES to engage if the parking brake is set; call takeoff_checklist first to see what needs to be fixed.",
-            json!({}),
-            &[],
+            "Start the takeoff sequence on the specified airport + runway: resolve the runway's threshold and course from apt.dat, verify the aircraft is actually on that runway (within 100 ft of centerline, inside the runway's along-track length, heading within 15° of course, ground speed < 3 kt), then go full power, hold centerline via the rollout controller, rotate at Vr, and climb at Vy along the runway track. Owns all three axes. Does NOT auto-disengage — once you're safely airborne, transition by engaging another profile (engage_heading_hold, engage_altitude_hold, engage_pattern_fly, etc.), which will displace this one via axis-ownership conflict. REFUSES to engage if the parking brake is set, the aircraft is not on the specified runway, or heading is off course — the error message names the specific check. Call takeoff_checklist first to see a human-readable status summary.",
+            json!({
+                "airport_ident": {"type": "string", "description": "Airport identifier as stored in apt.dat (e.g. 'KSFO')."},
+                "runway_ident": {"type": "string", "description": "Runway end ident you're departing on (e.g. '12', '28R')."}
+            }),
+            &["airport_ident", "runway_ident"],
         ),
         schema(
             "takeoff_checklist",

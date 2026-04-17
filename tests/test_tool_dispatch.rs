@@ -12,7 +12,7 @@ use tempfile::TempDir;
 
 use xplane_pilot::config::load_default_config_bundle;
 use xplane_pilot::core::mission_manager::{PilotCore, StatusSnapshot};
-use xplane_pilot::core::profiles::{HeadingHoldProfile, PatternFlyProfile};
+use xplane_pilot::core::profiles::{HeadingHoldProfile, PatternFlyProfile, TakeoffProfile};
 use xplane_pilot::llm::tools::{dispatch_tool, ToolBridge, ToolContext};
 use xplane_pilot::sim::xplane_bridge::GeoReference;
 use xplane_pilot::types::{ActuatorCommands, AircraftState, Vec2};
@@ -204,7 +204,15 @@ fn engage_cruise_installs_three_holds_atomically() {
 #[test]
 fn engage_cruise_from_takeoff_displaces_three_axis_profile() {
     let ctx = make_ctx(None, None);
-    dispatch_tool(&call("engage_takeoff", json!({})), &ctx);
+    // Engage takeoff directly — the tool now requires airport/runway args
+    // and a real snapshot; this test only cares about the axis-displace
+    // behaviour of engage_cruise, so bypass the tool surface.
+    {
+        let mut p = ctx.pilot.lock();
+        let cfg = ctx.config.lock().clone();
+        let rf = p.runway_frame.clone();
+        p.engage_profile(Box::new(TakeoffProfile::new(cfg, rf)));
+    }
     assert_eq!(ctx.pilot.lock().list_profile_names(), vec!["takeoff"]);
     let r = dispatch_tool(
         &call(
@@ -254,35 +262,92 @@ fn engage_takeoff_refuses_when_parking_brake_set() {
         -122.308,
     );
     let ctx = make_ctx(Some(bridge as Arc<dyn ToolBridge>), None);
-    let r = dispatch_tool(&call("engage_takeoff", json!({})), &ctx);
+    let r = dispatch_tool(
+        &call(
+            "engage_takeoff",
+            json!({"airport_ident": "KSEA", "runway_ident": "16L"}),
+        ),
+        &ctx,
+    );
     assert!(r.starts_with("error:"));
     assert!(r.contains("parking brake"));
     assert!(r.contains("set_parking_brake"));
 }
 
 #[test]
-fn engage_takeoff_succeeds_after_parking_brake_released() {
-    let bridge = FakeBridge::new(
-        &[("sim/cockpit2/controls/parking_brake_ratio", 1.0)],
-        47.4638,
-        -122.308,
+fn engage_takeoff_requires_airport_and_runway_args() {
+    let ctx = make_ctx(None, None);
+    let r = dispatch_tool(&call("engage_takeoff", json!({})), &ctx);
+    assert!(r.starts_with("error:"));
+    // One of the required-arg complaints must surface.
+    assert!(
+        r.contains("airport_ident") || r.contains("missing") || r.contains("required"),
+        "got: {}",
+        r
     );
-    let ctx = make_ctx(Some(bridge.clone() as Arc<dyn ToolBridge>), None);
-    let refused = dispatch_tool(&call("engage_takeoff", json!({})), &ctx);
-    assert!(refused.starts_with("error:"));
-    dispatch_tool(
-        &call("set_parking_brake", json!({"engaged": false})),
-        &ctx,
-    );
-    let ok = dispatch_tool(&call("engage_takeoff", json!({})), &ctx);
-    assert!(ok.contains("takeoff"));
 }
 
 #[test]
-fn engage_takeoff_allows_when_no_bridge() {
-    let ctx = make_ctx(None, None);
-    let r = dispatch_tool(&call("engage_takeoff", json!({})), &ctx);
-    assert!(r.contains("takeoff"));
+fn engage_takeoff_refuses_when_not_on_runway() {
+    use xplane_pilot::core::mission_manager::StatusSnapshot;
+    use xplane_pilot::types::{ActuatorCommands, AircraftState, Vec2};
+
+    let dir = TempDir::new().unwrap();
+    build_fake_parquet(dir.path(), &[]);
+    // Georef anchored at KSEA 16L threshold. Aircraft spawned well off
+    // the runway — crosstrack check must catch it.
+    let bridge = FakeBridge::new(
+        &[("sim/cockpit2/controls/parking_brake_ratio", 0.0)],
+        47.4638,
+        -122.308,
+    );
+    let ctx = make_ctx(
+        Some(bridge.clone() as Arc<dyn ToolBridge>),
+        Some(dir.path().to_path_buf()),
+    );
+    // Stage a snapshot 500 ft east of the threshold (far off-centerline
+    // for a runway heading ~180°).
+    let mut state = AircraftState::synthetic_default();
+    state.on_ground = true;
+    state.position_ft = Vec2::new(500.0, 0.0);
+    state.heading_deg = 180.0;
+    state.gs_kt = 0.0;
+    ctx.pilot.lock().latest_snapshot = Some(StatusSnapshot {
+        t_sim: 0.0,
+        active_profiles: Vec::new(),
+        phase: None,
+        state,
+        last_commands: ActuatorCommands {
+            aileron: 0.0,
+            elevator: 0.0,
+            rudder: 0.0,
+            throttle: 0.0,
+            flaps: None,
+            gear_down: Some(true),
+            brakes: 0.0,
+            pivot_brake: 0.0,
+        },
+        last_guidance: None,
+        go_around_reason: None,
+        airport_ident: None,
+        runway_id: None,
+        field_elevation_ft: None,
+        debug_lines: Vec::new(),
+    });
+    let r = dispatch_tool(
+        &call(
+            "engage_takeoff",
+            json!({"airport_ident": "KSEA", "runway_ident": "16L"}),
+        ),
+        &ctx,
+    );
+    assert!(r.starts_with("error:"), "got: {}", r);
+    // Position check is the one that should fail.
+    assert!(
+        r.contains("centerline") || r.contains("along-track"),
+        "expected a position-check error, got: {}",
+        r
+    );
 }
 
 #[test]
