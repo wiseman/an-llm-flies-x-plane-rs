@@ -823,6 +823,9 @@ pub fn tool_tune_radio(ctx: &ToolContext, args: &Map<String, Value>) -> String {
     if let Err(e) = bridge.write_dataref_values(&[(dref.to_string(), freq_khz as f64)]) {
         return format!("error: {}", e);
     }
+    if let Some(bus) = &ctx.bus {
+        bus.push_radio(format!("[{} tuned to {:.3}]", radio.to_uppercase(), freq));
+    }
     format!(
         "tuned {} to {:.3} MHz (set dataref={} value={})",
         radio, freq, dref, freq_khz
@@ -882,10 +885,18 @@ pub fn tool_broadcast_on_radio(ctx: &ToolContext, args: &Map<String, Value>) -> 
         Ok(s) => s.to_string(),
         Err(e) => return format!("error: {}", e),
     };
-    if radio != "com1" && radio != "com2" {
-        return format!("error: unknown radio {:?} (expected com1, com2)", radio);
-    }
-    let line = format!("[BROADCAST {}] {}", radio, message);
+    let dref = match radio.as_str() {
+        "com1" => COM1_FREQUENCY_HZ_833.name,
+        "com2" => COM2_FREQUENCY_HZ_833.name,
+        _ => return format!("error: unknown radio {:?} (expected com1, com2)", radio),
+    };
+    let freq_label = ctx
+        .bridge
+        .as_ref()
+        .and_then(|b| b.get_dataref_value(dref))
+        .map(|khz| format!("{:.3}", khz / 1000.0))
+        .unwrap_or_else(|| "---".to_string());
+    let line = format!("[{} {}] {}", radio.to_uppercase(), freq_label, message);
     if let Some(bus) = &ctx.bus {
         bus.push_radio(line.clone());
     } else {

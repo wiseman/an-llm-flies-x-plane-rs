@@ -577,7 +577,9 @@ fn broadcast_appends_to_recent_and_logs() {
     assert!(r.contains("hello"));
     let broadcasts = ctx.recent_broadcasts.lock();
     assert_eq!(broadcasts.len(), 1);
-    assert!(broadcasts[0].contains("[BROADCAST com1] hello"));
+    // No bridge → frequency shows as "---" but the COM1 label + message are present.
+    assert!(broadcasts[0].contains("[COM1"));
+    assert!(broadcasts[0].contains("hello"));
 }
 
 #[test]
