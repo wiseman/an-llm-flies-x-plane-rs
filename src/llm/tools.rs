@@ -20,8 +20,11 @@ use crate::core::mission_manager::{PilotCore, StatusSnapshot};
 use crate::core::profiles::{
     AltitudeHoldProfile, HeadingHoldProfile, PatternFlyProfile, SpeedHoldProfile, TakeoffProfile,
 };
-use crate::data::parquet::{AIRPORTS_FILE, COMMS_FILE, RUNWAYS_FILE};
+use crate::data::parquet::{
+    AIRPORTS_FILE, COMMS_FILE, RUNWAYS_FILE, TAXI_EDGES_FILE, TAXI_NODES_FILE,
+};
 use crate::guidance::runway_geometry::RunwayFrame;
+use crate::guidance::taxi_route::{self, TaxiDestination};
 use crate::sim::datarefs::{
     COM1_FREQUENCY_HZ_833, COM2_FREQUENCY_HZ_833, FLAP_HANDLE_REQUEST_RATIO, LATITUDE_DEG,
     LONGITUDE_DEG, PARKING_BRAKE_RATIO,
@@ -269,7 +272,9 @@ fn ensure_runway_conn(ctx: &ToolContext) -> Result<()> {
     let airports = dir.join(AIRPORTS_FILE);
     let runways = dir.join(RUNWAYS_FILE);
     let comms = dir.join(COMMS_FILE);
-    for p in [&airports, &runways, &comms] {
+    let taxi_nodes = dir.join(TAXI_NODES_FILE);
+    let taxi_edges = dir.join(TAXI_EDGES_FILE);
+    for p in [&airports, &runways, &comms, &taxi_nodes, &taxi_edges] {
         if !p.exists() {
             return Err(anyhow!("parquet file missing at {}", p.display()));
         }
@@ -290,6 +295,11 @@ fn open_apt_dat_parquet(
     // Spatial extension is required — the parquet files carry GEOMETRY
     // columns (WKB) that only decode when spatial is loaded.
     conn.execute_batch("INSTALL spatial; LOAD spatial;")?;
+    // Computed GEOMETRY columns live in the view, not in the parquet — the
+    // current duckdb-rs + DuckDB spatial pairing panics on `SELECT *` when a
+    // GEOMETRY column comes off disk. Running ST_Point at view time avoids
+    // that, costs nothing perf-wise (38k rows), and keeps the schema the
+    // LLM queries (`arp`, `centerline`, `le_threshold`, `he_threshold`).
     // Computed GEOMETRY columns live in the view, not in the parquet — the
     // current duckdb-rs + DuckDB spatial pairing panics on `SELECT *` when a
     // GEOMETRY column comes off disk. Running ST_Point at view time avoids
@@ -318,12 +328,24 @@ fn open_apt_dat_parquet(
                   ST_Point(he_longitude_deg, he_latitude_deg) AS he_threshold
            FROM read_parquet('{runways}');
          CREATE VIEW comms AS
-           SELECT * FROM read_parquet('{comms}');",
+           SELECT * FROM read_parquet('{comms}');
+         CREATE VIEW taxi_nodes AS
+           SELECT airport_ident, node_id, latitude_deg, longitude_deg, usage,
+                  ST_Point(longitude_deg, latitude_deg) AS point
+           FROM read_parquet('{taxi_nodes}');
+         CREATE VIEW taxi_edges AS
+           SELECT * FROM read_parquet('{taxi_edges}');",
         airports = airports.display(),
         runways = runways.display(),
         comms = comms.display(),
+        taxi_nodes = dir_join(airports, TAXI_NODES_FILE).display(),
+        taxi_edges = dir_join(airports, TAXI_EDGES_FILE).display(),
     ))?;
     Ok(conn)
+}
+
+fn dir_join(sibling: &std::path::Path, name: &str) -> PathBuf {
+    sibling.parent().unwrap_or_else(|| std::path::Path::new("")).join(name)
 }
 
 fn lookup_runway_for_pattern(
@@ -786,6 +808,116 @@ pub fn tool_broadcast_on_radio(ctx: &ToolContext, args: &Map<String, Value>) -> 
     format!("broadcast on {}: {}", radio, message)
 }
 
+pub fn tool_plan_taxi_route(ctx: &ToolContext, args: &Map<String, Value>) -> String {
+    let airport = match arg_str(args, "airport_ident") {
+        Ok(s) => s.to_string(),
+        Err(e) => return format!("error: {}", e),
+    };
+    let destination_runway = match arg_str(args, "destination_runway") {
+        Ok(s) => s.to_string(),
+        Err(e) => return format!("error: {}", e),
+    };
+    let via_taxiways: Vec<String> = args
+        .get("via_taxiways")
+        .and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+        .unwrap_or_default();
+    let start_lat = args.get("start_lat").and_then(|v| v.as_f64());
+    let start_lon = args.get("start_lon").and_then(|v| v.as_f64());
+
+    let (start_lat, start_lon) = match (start_lat, start_lon) {
+        (Some(lat), Some(lon)) => (lat, lon),
+        _ => match ctx
+            .bridge
+            .as_ref()
+            .and_then(|b| Some((b.get_dataref_value(LATITUDE_DEG.name)?, b.get_dataref_value(LONGITUDE_DEG.name)?)))
+        {
+            Some(v) => v,
+            None => {
+                return "error: aircraft position unavailable; pass start_lat and start_lon or connect to X-Plane".to_string();
+            }
+        },
+    };
+
+    if let Err(e) = ensure_runway_conn(ctx) {
+        return format!("error: {}", e);
+    }
+    let guard = ctx.runway_conn.lock().unwrap();
+    let conn = guard.as_ref().unwrap();
+
+    let graph = match taxi_route::load_graph(conn, &airport) {
+        Ok(g) => g,
+        Err(e) => return format!("error: {}", e),
+    };
+    if graph.nodes.is_empty() {
+        return format!(
+            "error: airport {} has no taxi network in apt.dat",
+            airport
+        );
+    }
+    let start_node = match taxi_route::nearest_node(&graph, start_lat, start_lon) {
+        Ok(id) => id,
+        Err(e) => return format!("error: {}", e),
+    };
+    let dest_node = match taxi_route::resolve_destination(
+        conn,
+        &graph,
+        &airport,
+        &TaxiDestination::Runway(&destination_runway),
+    ) {
+        Ok(id) => id,
+        Err(e) => return format!("error: {}", e),
+    };
+    let plan = match taxi_route::plan(&graph, start_node, dest_node, &via_taxiways) {
+        Ok(p) => p,
+        Err(e) => return format!("error: {}", e),
+    };
+    format_taxi_plan(&plan)
+}
+
+fn format_taxi_plan(plan: &taxi_route::TaxiPlan) -> String {
+    let mut out = String::new();
+    out.push_str(&format!(
+        "taxi plan {} — distance {:.0} m across {} legs\n",
+        plan.airport_ident,
+        plan.total_distance_m,
+        plan.legs.len(),
+    ));
+    if !plan.taxiway_sequence.is_empty() {
+        out.push_str(&format!(
+            "  taxiways: {}\n",
+            plan.taxiway_sequence.join(" -> ")
+        ));
+    }
+    if !plan.runway_crossings.is_empty() {
+        let mut seen = std::collections::HashSet::new();
+        let unique: Vec<&str> = plan
+            .runway_crossings
+            .iter()
+            .filter(|z| seen.insert(z.as_str()))
+            .map(String::as_str)
+            .collect();
+        out.push_str(&format!("  runway zones: {}\n", unique.join("; ")));
+    }
+    out.push_str(&format!(
+        "  start_node={} destination_node={}\n",
+        plan.start_node, plan.destination_node
+    ));
+    out.push_str("legs (from_lat,from_lon -> to_lat,to_lon  taxiway  distance_m):\n");
+    for leg in &plan.legs {
+        let name = if leg.taxiway_name.is_empty() {
+            "(connector)"
+        } else {
+            leg.taxiway_name.as_str()
+        };
+        out.push_str(&format!(
+            "  {:.6},{:.6} -> {:.6},{:.6}  {}  {:.1}\n",
+            leg.from_lat, leg.from_lon, leg.to_lat, leg.to_lon, name, leg.distance_m,
+        ));
+    }
+    out
+}
+
 pub fn tool_sql_query(ctx: &ToolContext, args: &Map<String, Value>) -> String {
     let query = match arg_str(args, "query") {
         Ok(s) => s.to_string(),
@@ -924,6 +1056,7 @@ pub fn dispatch_tool(call: &Value, ctx: &ToolContext) -> String {
         "set_parking_brake" => tool_set_parking_brake(ctx, &map),
         "set_flaps" => tool_set_flaps(ctx, &map),
         "sql_query" => tool_sql_query(ctx, &map),
+        "plan_taxi_route" => tool_plan_taxi_route(ctx, &map),
         other => format!("error: unknown tool {:?}", other),
     }
 }
@@ -1112,8 +1245,58 @@ pub fn tool_schemas() -> Vec<Value> {
             json!({"query": {"type": "string", "description": "A single SQL statement to execute."}}),
             &["query"],
         ),
+        schema(
+            "plan_taxi_route",
+            PLAN_TAXI_ROUTE_DESCRIPTION,
+            json!({
+                "airport_ident": {
+                    "type": "string",
+                    "description": "Airport identifier as stored in apt.dat (e.g. 'KSFO')."
+                },
+                "destination_runway": {
+                    "type": "string",
+                    "description": "Runway you want to hold short of — either end ident works (e.g. '31' or '13')."
+                },
+                "via_taxiways": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Ordered list of taxiway names from the clearance, e.g. ['A', 'D']. Pass [] to let the planner pick the shortest route and report which taxiways it used."
+                },
+                "start_lat": {
+                    "type": ["number", "null"],
+                    "description": "Starting latitude. If null, the current aircraft position from X-Plane is used."
+                },
+                "start_lon": {
+                    "type": ["number", "null"],
+                    "description": "Starting longitude. If null, the current aircraft position from X-Plane is used."
+                }
+            }),
+            &["airport_ident", "destination_runway", "via_taxiways", "start_lat", "start_lon"],
+        ),
     ]
 }
+
+const PLAN_TAXI_ROUTE_DESCRIPTION: &str = "Plan a taxi route across an airport \
+surface. Returns the ordered sequence of waypoint legs (lat/lon pairs plus the \
+taxiway each segment rides), total distance, and any runway active-zones the \
+path crosses (arrival / departure / ILS-critical). PLANNING ONLY in this phase \
+— no autopilot engagement.
+
+Use when the operator or ATC issues a taxi clearance like 'taxi via Alpha, \
+Delta, hold short runway 31'. Pass the taxiway names in order through \
+via_taxiways (e.g. ['A', 'D']). The planner runs a constrained Dijkstra over \
+the apt.dat taxi network: it requires the path to traverse the given taxiways \
+in order, allows unnamed connector edges at the start/end to cover gate \
+lead-ins and runway lead-outs, and resolves destination_runway to the taxi \
+node nearest the runway threshold.
+
+If via_taxiways is [] the planner returns the shortest overall route and \
+reports which taxiways it actually used so you can echo them back to the \
+user.
+
+If the airport has no taxi network in apt.dat (small uncontrolled strips), \
+this tool errors. Use sql_query against the `taxi_nodes` / `taxi_edges` \
+tables for ad-hoc exploration.";
 
 // Derived from sim_pilot/llm/tools.py::SQL_QUERY_DESCRIPTION. Rust-side
 // departures from the Python version:
@@ -1173,6 +1356,29 @@ View: comms (one row per ATC frequency entry)
   kind VARCHAR                 -- 'ATIS' | 'UNICOM' | 'CD' | 'GND' | 'TWR' | 'APP' | 'DEP'
   freq_mhz DOUBLE              -- e.g. 118.200, 127.275
   label VARCHAR                -- free-form label ('TWR', 'NORCAL APP', 'AWOS 1', ...)
+
+View: taxi_nodes (one row per taxi route network node — apt.dat row 1201)
+  airport_ident VARCHAR        -- joins to airports.ident
+  node_id INTEGER              -- unique *within* the airport only
+  latitude_deg DOUBLE
+  longitude_deg DOUBLE
+  usage VARCHAR                -- 'init' | 'end' | 'both' (where a route may start/end)
+  point GEOMETRY               -- POINT(longitude, latitude)
+
+View: taxi_edges (one row per taxiway segment — apt.dat row 1202)
+  airport_ident VARCHAR        -- joins to airports.ident
+  from_node INTEGER            -- joins to taxi_nodes.node_id
+  to_node INTEGER
+  direction VARCHAR            -- 'twoway' | 'oneway' (oneway traverses from_node → to_node only)
+  category VARCHAR             -- raw apt.dat token ('taxiway_E', 'runway', ...); width class letter is the suffix
+  name VARCHAR                 -- taxiway name as painted, e.g. 'A', 'A2', 'B' (may be empty for connectors)
+  active_zones VARCHAR         -- semicolon-delimited 'kind:runways' entries for runway conflicts (1204 rows),
+                               -- e.g. 'departure:10L,28R;ils:28L'. Empty when none.
+
+For concrete route planning ('taxi via A, D to 31') prefer the `plan_taxi_route` \
+tool — it handles the Dijkstra and destination resolution for you. Use \
+taxi_nodes/taxi_edges directly for exploratory queries ('what taxiways connect \
+at node 42?', 'which edges conflict with runway 31 on departure?').
 
 Spatial functions (DuckDB spatial extension): ST_Point(lon, lat) — note that
 LONGITUDE comes first — plus ST_Distance_Sphere(p1, p2) which returns meters

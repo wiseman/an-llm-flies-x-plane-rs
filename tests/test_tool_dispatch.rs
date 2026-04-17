@@ -731,6 +731,109 @@ fn sql_row_cap_truncates_large_results() {
     assert!(lines.last().unwrap().contains("truncated"));
 }
 
+// ---------- plan_taxi_route ----------
+
+fn build_taxi_fixture_parquet(dir: &std::path::Path) -> PathBuf {
+    // A tiny synthetic KTEST that has both runway data and a taxi network,
+    // enough to exercise the tool end-to-end.
+    //
+    //   gate (start) -- connector --> N1 == A ==> N2 == D ==> N3 (near 09 thr)
+    //                                                \== C ==> N4
+    // Runway 09 threshold sits right at node 3; destination resolution
+    // will therefore land the plan at node 3, which is only reachable via
+    // A then D. A parallel C taxiway routes through node 4 (slightly
+    // longer; used by the constrained test below).
+    let extra = vec![
+        "1 0 0 0 KTEST KTEST Test Airport\n\
+         100 22.86 1 0 0.25 0 2 0 \
+         09 37.000100 -121.997500 0.00 0 0 0 0 0 \
+         27 37.000100 -121.987500 0.00 0 0 0 0 0\n\
+         1201 37.000200 -122.001000 both 1\n\
+         1201 37.000200 -121.999500 both 2\n\
+         1201 37.000100 -121.997500 both 3\n\
+         1201 37.000300 -121.998500 both 4\n\
+         1201 37.000500 -122.002000 both 10\n\
+         1202 10 1 twoway taxiway_E \n\
+         1202 1 2 twoway taxiway_E A\n\
+         1202 2 3 twoway taxiway_E D\n\
+         1204 departure 09\n\
+         1202 2 4 twoway taxiway_E C\n\
+         1202 4 3 twoway taxiway_E C\n"
+            .to_string(),
+    ];
+    build_fake_parquet(dir, &extra)
+}
+
+#[test]
+fn plan_taxi_route_shortest_returns_formatted_plan() {
+    let dir = TempDir::new().unwrap();
+    build_taxi_fixture_parquet(dir.path());
+    let (ctx, _bridge) = make_ctx_with_parquet(dir.path());
+    let r = dispatch_tool(
+        &call(
+            "plan_taxi_route",
+            json!({
+                "airport_ident": "KTEST",
+                "destination_runway": "09",
+                "via_taxiways": [],
+                "start_lat": 37.000500,
+                "start_lon": -122.002000,
+            }),
+        ),
+        &ctx,
+    );
+    assert!(!r.starts_with("error"), "got: {}", r);
+    assert!(r.contains("taxi plan KTEST"), "output: {}", r);
+    assert!(r.contains("A -> D"), "output: {}", r);
+    assert!(r.contains("legs"));
+}
+
+#[test]
+fn plan_taxi_route_constrained_honors_via_taxiways() {
+    let dir = TempDir::new().unwrap();
+    build_taxi_fixture_parquet(dir.path());
+    let (ctx, _bridge) = make_ctx_with_parquet(dir.path());
+    // Force A then C (which routes via N4 instead of the shorter D leg) —
+    // destination_runway 09 still resolves, and the plan takes the longer path.
+    let r = dispatch_tool(
+        &call(
+            "plan_taxi_route",
+            json!({
+                "airport_ident": "KTEST",
+                "destination_runway": "09",
+                "via_taxiways": ["A", "C"],
+                "start_lat": 37.000500,
+                "start_lon": -122.002000,
+            }),
+        ),
+        &ctx,
+    );
+    assert!(!r.starts_with("error"), "got: {}", r);
+    assert!(r.contains("A -> C"), "plan did not honor via list: {}", r);
+}
+
+#[test]
+fn plan_taxi_route_airport_without_network_errors() {
+    let dir = TempDir::new().unwrap();
+    build_fake_parquet(dir.path(), &[]); // Base fixture has no taxi rows.
+    let (ctx, _bridge) = make_ctx_with_parquet(dir.path());
+    let r = dispatch_tool(
+        &call(
+            "plan_taxi_route",
+            json!({
+                "airport_ident": "KSEA",
+                "destination_runway": "16L",
+                "via_taxiways": [],
+                "start_lat": 47.46,
+                "start_lon": -122.30,
+            }),
+        ),
+        &ctx,
+    );
+    assert!(r.starts_with("error"));
+    assert!(r.contains("no taxi network"));
+}
+
 // ---------- spatial extension ----------
 
 #[test]

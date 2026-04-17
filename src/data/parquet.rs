@@ -34,6 +34,8 @@ use crate::data::apt_dat;
 pub const AIRPORTS_FILE: &str = "airports.parquet";
 pub const RUNWAYS_FILE: &str = "runways.parquet";
 pub const COMMS_FILE: &str = "comms.parquet";
+pub const TAXI_NODES_FILE: &str = "taxi_nodes.parquet";
+pub const TAXI_EDGES_FILE: &str = "taxi_edges.parquet";
 
 pub struct AptDatCache {
     pub dir: PathBuf,
@@ -49,8 +51,23 @@ impl AptDatCache {
     pub fn comms(&self) -> PathBuf {
         self.dir.join(COMMS_FILE)
     }
+    pub fn taxi_nodes(&self) -> PathBuf {
+        self.dir.join(TAXI_NODES_FILE)
+    }
+    pub fn taxi_edges(&self) -> PathBuf {
+        self.dir.join(TAXI_EDGES_FILE)
+    }
+    pub fn all_files(&self) -> [PathBuf; 5] {
+        [
+            self.airports(),
+            self.runways(),
+            self.comms(),
+            self.taxi_nodes(),
+            self.taxi_edges(),
+        ]
+    }
     pub fn all_files_exist(&self) -> bool {
-        self.airports().exists() && self.runways().exists() && self.comms().exists()
+        self.all_files().iter().all(|p| p.exists())
     }
 }
 
@@ -92,7 +109,7 @@ fn cache_is_fresh(apt_dat: &Path, cache: &AptDatCache) -> Result<bool> {
     let src = fs::metadata(apt_dat)?
         .modified()
         .unwrap_or(SystemTime::UNIX_EPOCH);
-    for f in [cache.airports(), cache.runways(), cache.comms()] {
+    for f in cache.all_files() {
         let dst = fs::metadata(&f)?.modified().unwrap_or(SystemTime::UNIX_EPOCH);
         if dst < src {
             return Ok(false);
@@ -123,9 +140,13 @@ fn write_parquets(parsed: &apt_dat::ParsedAptDat, cache: &AptDatCache) -> Result
     create_airport_table(&conn, &parsed.airports)?;
     create_runway_table(&conn, &parsed.runways)?;
     create_comm_table(&conn, &parsed.comms)?;
+    create_taxi_node_table(&conn, &parsed.taxi_nodes)?;
+    create_taxi_edge_table(&conn, &parsed.taxi_edges)?;
     copy_to_parquet(&conn, "airports", &cache.airports())?;
     copy_to_parquet(&conn, "runways", &cache.runways())?;
     copy_to_parquet(&conn, "comms", &cache.comms())?;
+    copy_to_parquet(&conn, "taxi_nodes", &cache.taxi_nodes())?;
+    copy_to_parquet(&conn, "taxi_edges", &cache.taxi_edges())?;
     Ok(())
 }
 
@@ -257,6 +278,71 @@ fn create_runway_table(conn: &Connection, runways: &[apt_dat::ParsedRunway]) -> 
     Ok(())
 }
 
+fn create_taxi_node_table(conn: &Connection, nodes: &[apt_dat::ParsedTaxiNode]) -> Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE taxi_nodes (
+            airport_ident VARCHAR,
+            node_id INTEGER,
+            latitude_deg DOUBLE,
+            longitude_deg DOUBLE,
+            usage VARCHAR
+        );",
+    )?;
+    let mut app = conn.appender("taxi_nodes")?;
+    for n in nodes {
+        app.append_row(params![
+            n.airport_ident,
+            n.node_id as i32,
+            n.latitude_deg,
+            n.longitude_deg,
+            n.usage,
+        ])?;
+    }
+    app.flush()?;
+    Ok(())
+}
+
+fn create_taxi_edge_table(conn: &Connection, edges: &[apt_dat::ParsedTaxiEdge]) -> Result<()> {
+    // active_zones is serialised as a semicolon-delimited "kind:runways"
+    // string (e.g. "departure:10L,28R;ils:28L"). Empty when the edge has
+    // no runway conflicts. Phase-two code can normalize into a separate
+    // table if query ergonomics demand it.
+    conn.execute_batch(
+        "CREATE TABLE taxi_edges (
+            airport_ident VARCHAR,
+            from_node INTEGER,
+            to_node INTEGER,
+            direction VARCHAR,
+            category VARCHAR,
+            name VARCHAR,
+            active_zones VARCHAR
+        );",
+    )?;
+    let mut app = conn.appender("taxi_edges")?;
+    for e in edges {
+        let zones = if e.active_zones.is_empty() {
+            String::new()
+        } else {
+            e.active_zones
+                .iter()
+                .map(|z| format!("{}:{}", z.kind, z.runways))
+                .collect::<Vec<_>>()
+                .join(";")
+        };
+        app.append_row(params![
+            e.airport_ident,
+            e.from_node as i32,
+            e.to_node as i32,
+            e.direction,
+            e.category,
+            e.name,
+            zones,
+        ])?;
+    }
+    app.flush()?;
+    Ok(())
+}
+
 fn create_comm_table(conn: &Connection, comms: &[apt_dat::ParsedComm]) -> Result<()> {
     conn.execute_batch(
         "CREATE TABLE comms (
@@ -292,6 +378,10 @@ mod tests {
 1302 datum_lon -122.311777778
 1054 119900 TWR
 100 45.72 1 0 0.25 1 2 0 16L 47.46380000 -122.30800000 0 60 2 1 1 2 34R 47.43130000 -122.30800000 0 60 2 1 1 2
+1201 47.44990 -122.31180 both 1
+1201 47.44500 -122.31180 both 2
+1202 1 2 twoway taxiway_E A
+1204 departure 16L
 
 1     13 0 0 KSFO San Francisco Intl
 100 61.00 1 0 0.0 1 3 0 10L 37.62875970 -122.39343890 0 250 3 0 0 3 28R 37.61353400 -122.35715510 90 100 3 2 1 3
@@ -306,11 +396,11 @@ mod tests {
     }
 
     #[test]
-    fn parquet_cache_has_all_three_files() {
+    fn parquet_cache_has_all_files() {
         let (_tmp, cache) = build_fixture_cache();
-        assert!(cache.airports().exists());
-        assert!(cache.runways().exists());
-        assert!(cache.comms().exists());
+        for f in cache.all_files() {
+            assert!(f.exists(), "missing {}", f.display());
+        }
     }
 
     #[test]
@@ -364,6 +454,35 @@ mod tests {
         assert_eq!(he, "28R");
         assert!(len > 11_000.0 && len < 12_000.0);
         assert!((hdg - 117.0).abs() < 1.5);
+    }
+
+    #[test]
+    fn taxi_nodes_and_edges_round_trip() {
+        let (_tmp, cache) = build_fixture_cache();
+        let conn = Connection::open_in_memory().unwrap();
+        let node_count: i64 = conn
+            .query_row(
+                &format!(
+                    "SELECT COUNT(*) FROM read_parquet('{}')",
+                    cache.taxi_nodes().display()
+                ),
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(node_count, 2);
+        let (airport, zones): (String, String) = conn
+            .query_row(
+                &format!(
+                    "SELECT airport_ident, active_zones FROM read_parquet('{}') WHERE name = 'A'",
+                    cache.taxi_edges().display()
+                ),
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(airport, "KSEA");
+        assert_eq!(zones, "departure:16L");
     }
 
     #[test]

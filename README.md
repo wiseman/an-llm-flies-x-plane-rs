@@ -50,6 +50,7 @@ cruise legs. The X-Plane bridge communicates via the built-in web API on port
 | `set_parking_brake` | Engage or release the parking brake |
 | `set_flaps` | Set the flap handle position (0/10/20/30) |
 | `sql_query` | Read-only SQL against the worldwide runway/airport database (DuckDB) |
+| `plan_taxi_route` | Plan a taxi route via named taxiways to a runway (apt.dat taxi network). Planning only; does not engage the autopilot |
 
 ## Running
 

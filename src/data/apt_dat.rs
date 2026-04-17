@@ -83,16 +83,63 @@ pub struct ParsedComm {
     pub label: String,
 }
 
+/// A single node on an airport's taxi route network (apt.dat row 1201).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ParsedTaxiNode {
+    pub airport_ident: String,
+    /// Node id as written in apt.dat — unique *within* the airport block
+    /// only; composite key is (airport_ident, node_id).
+    pub node_id: u32,
+    pub latitude_deg: f64,
+    pub longitude_deg: f64,
+    /// Usage flag: "init" (path can start here), "end" (path can end
+    /// here), or "both".
+    pub usage: String,
+}
+
+/// A single edge on an airport's taxi route network (apt.dat row 1202),
+/// plus any 1204 active-zone rows attached to it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ParsedTaxiEdge {
+    pub airport_ident: String,
+    pub from_node: u32,
+    pub to_node: u32,
+    /// "twoway" or "oneway". When "oneway", traversal is `from_node` →
+    /// `to_node` only.
+    pub direction: String,
+    /// Raw apt.dat category token ("taxiway_E", "taxiway_F", "runway",
+    /// "taxiway"). The trailing letter is the ICAO width class.
+    pub category: String,
+    /// Taxiway name as painted on pavement ("A", "A2", "B", "L", …). May
+    /// be empty for some runway-threshold connector edges.
+    pub name: String,
+    /// 1204 rows attached to this edge — one per (usage, runway_list)
+    /// tuple. Usage is "arrival" / "departure" / "ils"; runway list is
+    /// comma-separated raw from apt.dat (e.g. "01L,01R,19L,19R").
+    pub active_zones: Vec<ParsedActiveZone>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ParsedActiveZone {
+    pub kind: String,
+    pub runways: String,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct ParsedAptDat {
     pub airports: Vec<ParsedAirport>,
     pub runways: Vec<ParsedRunway>,
     pub comms: Vec<ParsedComm>,
+    pub taxi_nodes: Vec<ParsedTaxiNode>,
+    pub taxi_edges: Vec<ParsedTaxiEdge>,
 }
 
 pub fn parse<R: BufRead>(reader: R) -> Result<ParsedAptDat> {
     let mut out = ParsedAptDat::default();
     let mut cur: Option<ParsedAirport> = None;
+    // Index of the last 1202 edge pushed, so any 1204 rows that follow can
+    // attach to it. Reset between airports.
+    let mut last_edge_idx: Option<usize> = None;
 
     for (i, line) in reader.lines().enumerate() {
         let line = line.with_context(|| format!("reading line {}", i + 1))?;
@@ -113,6 +160,7 @@ pub fn parse<R: BufRead>(reader: R) -> Result<ParsedAptDat> {
                     out.airports.push(a);
                 }
                 cur = parse_airport_header(rest);
+                last_edge_idx = None;
             }
             "100" => {
                 if let Some(a) = cur.as_ref() {
@@ -130,6 +178,30 @@ pub fn parse<R: BufRead>(reader: R) -> Result<ParsedAptDat> {
                 if let Some(a) = cur.as_ref() {
                     if let Some(comm) = parse_comm_row(code, rest, &a.ident) {
                         out.comms.push(comm);
+                    }
+                }
+            }
+            "1201" => {
+                if let Some(a) = cur.as_ref() {
+                    if let Some(node) = parse_taxi_node(rest, &a.ident) {
+                        out.taxi_nodes.push(node);
+                    }
+                }
+            }
+            "1202" => {
+                if let Some(a) = cur.as_ref() {
+                    if let Some(edge) = parse_taxi_edge(rest, &a.ident) {
+                        out.taxi_edges.push(edge);
+                        last_edge_idx = Some(out.taxi_edges.len() - 1);
+                    } else {
+                        last_edge_idx = None;
+                    }
+                }
+            }
+            "1204" => {
+                if let Some(idx) = last_edge_idx {
+                    if let Some(zone) = parse_active_zone(rest) {
+                        out.taxi_edges[idx].active_zones.push(zone);
                     }
                 }
             }
@@ -256,6 +328,54 @@ fn parse_comm_row(code: &str, rest: &str, airport_ident: &str) -> Option<ParsedC
     })
 }
 
+fn parse_taxi_node(rest: &str, airport_ident: &str) -> Option<ParsedTaxiNode> {
+    // 1201 <lat> <lon> <usage> <node_id> [<name ...>]
+    let mut parts = rest.split_whitespace();
+    let lat: f64 = parts.next()?.parse().ok()?;
+    let lon: f64 = parts.next()?.parse().ok()?;
+    let usage = parts.next()?.to_string();
+    let node_id: u32 = parts.next()?.parse().ok()?;
+    Some(ParsedTaxiNode {
+        airport_ident: airport_ident.to_string(),
+        node_id,
+        latitude_deg: lat,
+        longitude_deg: lon,
+        usage,
+    })
+}
+
+fn parse_taxi_edge(rest: &str, airport_ident: &str) -> Option<ParsedTaxiEdge> {
+    // 1202 <from> <to> <direction> <category> [<name ...>]
+    // The name may contain whitespace (e.g. "A 2" is unusual but possible);
+    // splitn keeps everything after the category as the full name.
+    let mut parts = rest.splitn(5, char::is_whitespace);
+    let from_node: u32 = parts.next()?.parse().ok()?;
+    let to_node: u32 = parts.next()?.parse().ok()?;
+    let direction = parts.next()?.to_string();
+    let category = parts.next()?.to_string();
+    let name = parts.next().unwrap_or("").trim().to_string();
+    Some(ParsedTaxiEdge {
+        airport_ident: airport_ident.to_string(),
+        from_node,
+        to_node,
+        direction,
+        category,
+        name,
+        active_zones: Vec::new(),
+    })
+}
+
+fn parse_active_zone(rest: &str) -> Option<ParsedActiveZone> {
+    // 1204 <kind> <runway1,runway2,...>
+    let mut parts = rest.splitn(2, char::is_whitespace);
+    let kind = parts.next()?.to_string();
+    let runways = parts.next()?.trim().to_string();
+    if kind.is_empty() || runways.is_empty() {
+        return None;
+    }
+    Some(ParsedActiveZone { kind, runways })
+}
+
 fn comm_code_to_kind(code: u16) -> Option<&'static str> {
     match code {
         1050 => Some("ATIS"),   // also AWOS / ASOS — disambiguate via label
@@ -375,6 +495,15 @@ A
 100 61.00 1 0 0.0 1 3 0 10L 37.62875970 -122.39343890 0 250 3 0 0 3 28R 37.61353400 -122.35715510 90 100 3 2 1 3
 1055 128325 NORCAL APP
 1055 134500 NORCAL APP
+1200
+1201 37.634770 -122.394253 both 1
+1201 37.635023 -122.393136 both 2
+1201 37.615613 -122.371783 both 3
+1202 1 2 twoway taxiway_E A
+1202 2 3 twoway taxiway_E B
+1204 departure 10L,28R
+1204 ils 28R
+1202 3 1 oneway taxiway_F Z
 99
 ";
 
@@ -469,6 +598,47 @@ A
         let data = parse_fixture();
         assert!(data.runways.iter().all(|r| r.le_ident != "08"));
         assert!(data.runways.iter().all(|r| r.le_ident != "H1"));
+    }
+
+    #[test]
+    fn parses_taxi_nodes_and_edges() {
+        let data = parse_fixture();
+        let ksfo_nodes: Vec<_> =
+            data.taxi_nodes.iter().filter(|n| n.airport_ident == "KSFO").collect();
+        assert_eq!(ksfo_nodes.len(), 3);
+        assert_eq!(ksfo_nodes[0].node_id, 1);
+        assert!((ksfo_nodes[0].latitude_deg - 37.634770).abs() < 1e-9);
+        assert_eq!(ksfo_nodes[0].usage, "both");
+
+        let ksfo_edges: Vec<_> =
+            data.taxi_edges.iter().filter(|e| e.airport_ident == "KSFO").collect();
+        assert_eq!(ksfo_edges.len(), 3);
+        assert_eq!(ksfo_edges[0].name, "A");
+        assert_eq!(ksfo_edges[0].direction, "twoway");
+        assert_eq!(ksfo_edges[2].name, "Z");
+        assert_eq!(ksfo_edges[2].direction, "oneway");
+    }
+
+    #[test]
+    fn active_zones_attach_to_prior_edge() {
+        let data = parse_fixture();
+        // 1204 rows in the fixture follow the "B" edge (index 1 among KSFO
+        // edges), not "A" or "Z".
+        let edge_b = data
+            .taxi_edges
+            .iter()
+            .find(|e| e.airport_ident == "KSFO" && e.name == "B")
+            .unwrap();
+        assert_eq!(edge_b.active_zones.len(), 2);
+        assert_eq!(edge_b.active_zones[0].kind, "departure");
+        assert_eq!(edge_b.active_zones[0].runways, "10L,28R");
+        assert_eq!(edge_b.active_zones[1].kind, "ils");
+        let edge_a = data
+            .taxi_edges
+            .iter()
+            .find(|e| e.airport_ident == "KSFO" && e.name == "A")
+            .unwrap();
+        assert!(edge_a.active_zones.is_empty());
     }
 
     #[test]

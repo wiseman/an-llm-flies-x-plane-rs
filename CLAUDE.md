@@ -74,10 +74,10 @@ Both backends share `load_default_config_bundle()`, `PilotCore`, `RunwayFrame`, 
 
 Everything inside the pilot reasons in a **runway frame** where `x` points down the runway centerline and the threshold is at the origin. `guidance/runway_geometry.rs::RunwayFrame` converts between this frame and the world frame. Pattern geometry (`guidance/pattern_manager.rs`) is built in runway-frame coords and only converted out when feeding `L1PathFollower`. For live X-Plane, a `GeoReference` (lat/lon anchor) handles the flat-earth geodetic-to-feet conversion.
 
-### Runway / airport / comm data
+### Runway / airport / comm / taxi data
 
 `src/data/apt_dat.rs` streams X-Plane's `Global Scenery/Global Airports/Earth
-nav data/apt.dat` into three Rust structs:
+nav data/apt.dat` into five Rust structs:
 
 - `ParsedAirport` — rows `1`/`16`/`17` plus `1302 icao_code`/`iata_code`/
   `faa_code`/`datum_lat`/`datum_lon`. Airports missing 1302 `datum_*` are
@@ -89,6 +89,20 @@ nav data/apt.dat` into three Rust structs:
   apt.dat doesn't carry per-end elevation.
 - `ParsedComm` — rows `1050..=1056` (ATIS / UNICOM / CD / GND / TWR / APP /
   DEP). Frequency is stored as MHz (6-digit kHz divided by 1000).
+- `ParsedTaxiNode` / `ParsedTaxiEdge` — rows `1201` (nodes) and `1202`
+  (edges), with 1204 active-zone rows stitched onto the preceding edge.
+  8,265 airports globally have a taxi network. Ground-vehicle edges
+  (row 1206) are intentionally ignored — those are the baggage-cart paths.
+
+`src/guidance/taxi_route.rs` loads one airport's graph on demand from the
+DuckDB parquet views and runs a stage-indexed Dijkstra so constraints like
+"take A then D to runway 31" are honoured. Unnamed connector edges before
+the first named taxiway and after the last are allowed (gate lead-ins,
+runway hold-out). `nearest_node` deliberately filters to nodes that are
+incident on at least one 1202 edge — apt.dat shares node ids across the
+aircraft graph and the ground-vehicle graph, and an unfiltered nearest
+lookup would sometimes snap the aircraft to a baggage-cart-only node and
+the planner would declare "no route".
 
 `src/data/parquet.rs::resolve(apt_dat_path)` parses the source, feeds rows
 into an in-memory DuckDB via the `Appender` API, Hilbert-sorts each geometry-
