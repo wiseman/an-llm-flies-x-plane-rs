@@ -257,11 +257,11 @@ pub fn tool_engage_cruise(ctx: &ToolContext, args: &Map<String, Value>) -> Strin
 
 /// Touchdown zone length (feet) used when the runway is installed dynamically
 /// from a query — `RunwayFrame::touchdown_runway_x_ft` halves this and then
-/// clamps to `[500, length/3]` to produce the aim-point. Returning 2000 here
-/// targets the standard 1000 ft aim point past the threshold on any runway
-/// long enough to support it; short strips fall out via the downstream clamp.
+/// clamps to `[500, length/3]` to produce the aim-point. Returning 1200 here
+/// targets an aim point 600 ft past the landing threshold, which leaves room
+/// for the roundout/flare float without overrunning on short strips.
 fn synthesize_touchdown_zone_ft(_length_ft: f64) -> f64 {
-    2000.0
+    1200.0
 }
 
 fn ensure_runway_conn(ctx: &ToolContext) -> Result<()> {

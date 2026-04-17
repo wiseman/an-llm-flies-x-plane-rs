@@ -484,15 +484,15 @@ fn engage_pattern_fly_anchors_at_pavement_end_and_exposes_displacement() {
         pilot.runway_frame.runway.displaced_threshold_ft,
         disp_ft
     );
-    // Aim point = displaced_threshold + 1000 ft: that's where the aircraft
-    // actually wants to touch down on a standard runway with apt.dat
-    // displacement.
+    // Aim point = displaced_threshold + 600 ft: 600 ft past the painted
+    // landing threshold, leaving room for roundout/flare float without
+    // overrunning on short strips.
     let aim = pilot.runway_frame.touchdown_runway_x_ft();
     assert!(
-        (aim - (disp_ft + 1000.0)).abs() < 1.0,
+        (aim - (disp_ft + 600.0)).abs() < 1.0,
         "aim: got {}, want {}",
         aim,
-        disp_ft + 1000.0
+        disp_ft + 600.0
     );
 }
 

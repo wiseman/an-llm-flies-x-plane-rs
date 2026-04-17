@@ -769,7 +769,11 @@ impl PatternFlyProfile {
             self.pattern.final_leg,
             bank_limit.min(8.0),
         );
-        let pitch_cmd = 2.5 + ((self.config.flare.roundout_height_ft - state.alt_agl_ft).max(0.0)) * 0.12;
+        // Lower base pitch + gentler ramp so the plane keeps descending
+        // through the roundout rather than leveling off and floating.
+        // Old form (2.5 + δ·0.12) produced 4.9° at touchdown, which held the
+        // aircraft ~1400 ft down the pavement before wheels touched.
+        let pitch_cmd = 1.5 + ((self.config.flare.roundout_height_ft - state.alt_agl_ft).max(0.0)) * 0.08;
         GuidanceTargets {
             lateral_mode: LateralMode::PathFollow,
             vertical_mode: VerticalMode::PitchHold,
