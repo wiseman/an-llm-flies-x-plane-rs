@@ -88,7 +88,7 @@ struct Cli {
     /// flight-phase transition, profile engage/disengage, or profile
     /// completion (e.g. taxi reaches hold-short) — so this only gates the
     /// fallback "nothing is happening, check in" cadence.
-    #[arg(long, default_value_t = 60.0)]
+    #[arg(long, default_value_t = 30.0)]
     heartbeat_interval: f64,
 
     /// Disable the heartbeat pump entirely.
