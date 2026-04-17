@@ -60,12 +60,12 @@ impl ToolBridge for FakeBridge {
     }
 }
 
-fn make_ctx(bridge: Option<Arc<dyn ToolBridge>>, runway_csv: Option<PathBuf>) -> ToolContext {
+fn make_ctx(bridge: Option<Arc<dyn ToolBridge>>, cache_dir: Option<PathBuf>) -> ToolContext {
     let cfg = load_default_config_bundle();
     let pilot = Arc::new(PLMutex::new(PilotCore::new(cfg.clone())));
     let mut ctx = ToolContext::new(pilot, cfg);
     ctx.bridge = bridge;
-    ctx.runway_csv_path = runway_csv;
+    ctx.apt_dat_cache_dir = cache_dir;
     ctx
 }
 
@@ -77,21 +77,69 @@ fn call(name: &str, args: serde_json::Value) -> serde_json::Value {
     })
 }
 
-const RUNWAY_CSV_HEADER: &str = "id,airport_ref,airport_ident,length_ft,width_ft,surface,lighted,closed,le_ident,le_latitude_deg,le_longitude_deg,le_elevation_ft,le_heading_degT,le_displaced_threshold_ft,he_ident,he_latitude_deg,he_longitude_deg,he_elevation_ft,he_heading_degT,he_displaced_threshold_ft";
+/// Base airports/runways used by every test fixture. Each tuple is:
+///   (airport_ident, elevation_ft, width_m, surface_code,
+///    le_ident, le_lat, le_lon, le_disp_m,
+///    he_ident, he_lat, he_lon, he_disp_m)
+const BASE_RUNWAYS: &[(
+    &str,
+    u32,
+    f64,
+    u8,
+    &str,
+    f64,
+    f64,
+    f64,
+    &str,
+    f64,
+    f64,
+    f64,
+)] = &[
+    ("KSEA", 432, 45.72, 1, "16L", 47.4638, -122.308, 0.0, "34R", 47.4312, -122.308, 0.0),
+    ("KSEA", 432, 45.72, 2, "16C", 47.4638, -122.311, 0.0, "34C", 47.4380, -122.311, 0.0),
+    ("KSEA", 432, 45.72, 2, "16R", 47.4638, -122.318, 0.0, "34L", 47.4405, -122.318, 0.0),
+    ("KBFI",  21, 60.96, 1, "14R", 47.5301, -122.3015, 0.0, "32L", 47.5111, -122.2876, 0.0),
+    ("KJFK",  12, 45.72, 1, "04L", 40.6235,  -73.7944, 0.0, "22R", 40.6432,  -73.7821, 0.0),
+];
 
-fn build_fake_runway_csv(path: &std::path::Path, extra: &[&str]) {
-    let mut rows: Vec<String> = vec![
-        "1,1,KSEA,11900,150,ASP,1,0,16L,47.4638,-122.308,432,180.0,,34R,47.4312,-122.308,347,360.0,".into(),
-        "2,1,KSEA,9426,150,CONC-F,1,0,16C,47.4638,-122.311,430,180.0,,34C,47.438,-122.311,363,360.0,".into(),
-        "3,1,KSEA,9426,150,CON,1,0,16R,47.4638,-122.318,430,180.0,,34L,47.4405,-122.318,363,360.0,".into(),
-        "4,2,KBFI,10007,200,ASP,1,0,14R,47.5301,-122.3015,21,142.0,,32L,47.5111,-122.2876,21,322.0,".into(),
-        "5,3,KJFK,12079,150,ASP,1,0,04L,40.6235,-73.7944,12,40.0,,22R,40.6432,-73.7821,12,220.0,".into(),
-    ];
-    for e in extra {
-        rows.push(e.to_string());
+/// Assemble an apt.dat-style string covering the base runways plus any
+/// additional raw apt.dat snippets the caller wants to stack on. Each extra
+/// snippet must be a full airport block (row 1 followed by row 100s).
+fn synthesize_apt_dat(extra_blocks: &[String]) -> String {
+    let mut out = String::from("A\n1200 test fixture\n\n");
+    let mut last_ident: Option<&str> = None;
+    for (ident, elev, width_m, surf, le_i, le_lat, le_lon, le_d, he_i, he_lat, he_lon, he_d) in
+        BASE_RUNWAYS
+    {
+        if last_ident != Some(*ident) {
+            out.push_str(&format!("1 {} 0 0 {} {} Test Airport\n", elev, ident, ident));
+            last_ident = Some(*ident);
+        }
+        out.push_str(&format!(
+            "100 {width_m:.2} {surf} 0 0.25 0 2 0 \
+             {le_i} {le_lat:.6} {le_lon:.6} {le_d:.2} 0 0 0 0 0 \
+             {he_i} {he_lat:.6} {he_lon:.6} {he_d:.2} 0 0 0 0 0\n"
+        ));
     }
-    let body = format!("{}\n{}\n", RUNWAY_CSV_HEADER, rows.join("\n"));
-    std::fs::write(path, body).unwrap();
+    for block in extra_blocks {
+        out.push_str(block);
+        if !block.ends_with('\n') {
+            out.push('\n');
+        }
+    }
+    out.push_str("99\n");
+    out
+}
+
+/// Build the three apt.dat-derived parquet files into `dir`. Returns `dir`
+/// unchanged for ergonomic chaining at the call site.
+fn build_fake_parquet(dir: &std::path::Path, extra_blocks: &[String]) -> PathBuf {
+    let apt = synthesize_apt_dat(extra_blocks);
+    let parsed = xplane_pilot::data::apt_dat::parse(apt.as_bytes())
+        .expect("apt.dat fixture parses");
+    xplane_pilot::data::parquet::write_cache(&parsed, dir)
+        .expect("parquet cache writes");
+    dir.to_path_buf()
 }
 
 // ---------- basic dispatch ----------
@@ -299,18 +347,17 @@ fn go_around_without_pattern_fly_errors() {
 
 // ---------- runway lookups via sql_query ----------
 
-fn make_ctx_with_csv(csv_path: &std::path::Path) -> (ToolContext, Arc<FakeBridge>) {
+fn make_ctx_with_parquet(cache_dir: &std::path::Path) -> (ToolContext, Arc<FakeBridge>) {
     let bridge = FakeBridge::new(&[], 47.4638, -122.308);
-    let ctx = make_ctx(Some(bridge.clone() as Arc<dyn ToolBridge>), Some(csv_path.to_path_buf()));
+    let ctx = make_ctx(Some(bridge.clone() as Arc<dyn ToolBridge>), Some(cache_dir.to_path_buf()));
     (ctx, bridge)
 }
 
 #[test]
 fn engage_pattern_fly_for_takeoff_roll() {
     let dir = TempDir::new().unwrap();
-    let path = dir.path().join("runways.csv");
-    build_fake_runway_csv(&path, &[]);
-    let (ctx, _bridge) = make_ctx_with_csv(&path);
+    build_fake_parquet(dir.path(), &[]);
+    let (ctx, _bridge) = make_ctx_with_parquet(dir.path());
     let r = dispatch_tool(
         &call(
             "engage_pattern_fly",
@@ -329,26 +376,28 @@ fn engage_pattern_fly_for_takeoff_roll() {
 
 #[test]
 fn engage_pattern_fly_offsets_threshold_by_displaced_threshold() {
-    // Runway 1 pavement end coincides with the georef anchor (47.4638, -122.308),
-    // so `pavement_end_ft` becomes (0, 0) and the resulting runway-frame
-    // threshold should equal the displacement vector along the runway heading.
+    // Runway "09" pavement end coincides with the georef anchor
+    // (47.4638, -122.308) and extends due east, so the pavement_end_ft the
+    // tool computes is (0, 0) and the resulting runway-frame threshold
+    // should be (+disp_ft, 0) — a clean check that the displaced-threshold
+    // offset is being applied along the runway heading.
     let dir = TempDir::new().unwrap();
-    let path = dir.path().join("runways.csv");
-    let disp_ft = 289.0_f64;
-    let heading_deg = 25.0_f64;
+    let disp_ft = 88.0_f64 * 3.280_839_895_013_123;
     let extra = [
-        "99,99,KTEST,4000,75,ASP,1,0,\
-         1,47.4638,-122.308,0,25.0,289,\
-         19,47.4749,-122.3009,0,205.0,0",
+        "1 0 0 0 KTEST KTEST Test Airport\n\
+         100 22.86 1 0 0.25 0 2 0 \
+         09 47.463800 -122.308000 88.00 0 0 0 0 0 \
+         27 47.463800 -122.287000 0.00 0 0 0 0 0\n"
+            .to_string(),
     ];
-    build_fake_runway_csv(&path, &extra);
-    let (ctx, _bridge) = make_ctx_with_csv(&path);
+    build_fake_parquet(dir.path(), &extra);
+    let (ctx, _bridge) = make_ctx_with_parquet(dir.path());
     let r = dispatch_tool(
         &call(
             "engage_pattern_fly",
             json!({
                 "airport_ident": "KTEST",
-                "runway_ident": "1",
+                "runway_ident": "09",
                 "side": "left",
                 "start_phase": "pattern_entry",
             }),
@@ -358,20 +407,13 @@ fn engage_pattern_fly_offsets_threshold_by_displaced_threshold() {
     assert!(!r.contains("error"), "got {}", r);
     let pilot = ctx.pilot.lock();
     let threshold = pilot.runway_frame.runway.threshold_ft;
-    let expected_east = disp_ft * heading_deg.to_radians().sin();
-    let expected_north = disp_ft * heading_deg.to_radians().cos();
     assert!(
-        (threshold.x - expected_east).abs() < 1.0,
+        (threshold.x - disp_ft).abs() < 1.0,
         "east: got {}, want {}",
         threshold.x,
-        expected_east
+        disp_ft
     );
-    assert!(
-        (threshold.y - expected_north).abs() < 1.0,
-        "north: got {}, want {}",
-        threshold.y,
-        expected_north
-    );
+    assert!(threshold.y.abs() < 1.0, "north: got {}, want ~0", threshold.y);
     // Aim point is 1000 ft past threshold on any reasonably long runway.
     assert_eq!(pilot.runway_frame.touchdown_runway_x_ft(), 1000.0);
 }
@@ -379,9 +421,8 @@ fn engage_pattern_fly_offsets_threshold_by_displaced_threshold() {
 #[test]
 fn engage_pattern_fly_unknown_airport_errors() {
     let dir = TempDir::new().unwrap();
-    let path = dir.path().join("runways.csv");
-    build_fake_runway_csv(&path, &[]);
-    let (ctx, _bridge) = make_ctx_with_csv(&path);
+    build_fake_parquet(dir.path(), &[]);
+    let (ctx, _bridge) = make_ctx_with_parquet(dir.path());
     let r = dispatch_tool(
         &call(
             "engage_pattern_fly",
@@ -401,9 +442,8 @@ fn engage_pattern_fly_unknown_airport_errors() {
 #[test]
 fn engage_pattern_fly_invalid_start_phase() {
     let dir = TempDir::new().unwrap();
-    let path = dir.path().join("runways.csv");
-    build_fake_runway_csv(&path, &[]);
-    let (ctx, _bridge) = make_ctx_with_csv(&path);
+    build_fake_parquet(dir.path(), &[]);
+    let (ctx, _bridge) = make_ctx_with_parquet(dir.path());
     let r = dispatch_tool(
         &call(
             "engage_pattern_fly",
@@ -423,9 +463,8 @@ fn engage_pattern_fly_invalid_start_phase() {
 #[test]
 fn join_pattern_without_pattern_fly_errors() {
     let dir = TempDir::new().unwrap();
-    let path = dir.path().join("runways.csv");
-    build_fake_runway_csv(&path, &[]);
-    let (ctx, _bridge) = make_ctx_with_csv(&path);
+    build_fake_parquet(dir.path(), &[]);
+    let (ctx, _bridge) = make_ctx_with_parquet(dir.path());
     let r = dispatch_tool(&call("join_pattern", json!({"runway_id": "30"})), &ctx);
     assert!(r.starts_with("error:"));
     assert!(r.contains("engage_pattern_fly"));
@@ -610,9 +649,8 @@ fn sleep_returns_string() {
 #[test]
 fn sql_select_returns_tab_separated_rows_with_header() {
     let dir = TempDir::new().unwrap();
-    let path = dir.path().join("runways.csv");
-    build_fake_runway_csv(&path, &[]);
-    let (ctx, _) = make_ctx_with_csv(&path);
+    build_fake_parquet(dir.path(), &[]);
+    let (ctx, _) = make_ctx_with_parquet(dir.path());
     let r = dispatch_tool(
         &call(
             "sql_query",
@@ -623,18 +661,20 @@ fn sql_select_returns_tab_separated_rows_with_header() {
     let lines: Vec<&str> = r.lines().collect();
     assert_eq!(lines[0], "airport_ident\tle_ident\tlength_ft");
     assert_eq!(lines.len(), 4);
-    assert_eq!(
-        lines[1].split('\t').collect::<Vec<_>>(),
-        vec!["KSEA", "16L", "11900"]
-    );
+    // length_ft is now derived from endpoint haversine rather than a baked
+    // constant, so match structurally instead of on the exact string.
+    let top: Vec<&str> = lines[1].split('\t').collect();
+    assert_eq!(top[0], "KSEA");
+    assert_eq!(top[1], "16L");
+    let length: f64 = top[2].parse().unwrap();
+    assert!((length - 11_900.0).abs() < 50.0, "length {}", length);
 }
 
 #[test]
 fn sql_empty_result_returns_zero_rows_message() {
     let dir = TempDir::new().unwrap();
-    let path = dir.path().join("runways.csv");
-    build_fake_runway_csv(&path, &[]);
-    let (ctx, _) = make_ctx_with_csv(&path);
+    build_fake_parquet(dir.path(), &[]);
+    let (ctx, _) = make_ctx_with_parquet(dir.path());
     let r = dispatch_tool(
         &call(
             "sql_query",
@@ -648,9 +688,8 @@ fn sql_empty_result_returns_zero_rows_message() {
 #[test]
 fn sql_invalid_returns_error() {
     let dir = TempDir::new().unwrap();
-    let path = dir.path().join("runways.csv");
-    build_fake_runway_csv(&path, &[]);
-    let (ctx, _) = make_ctx_with_csv(&path);
+    build_fake_parquet(dir.path(), &[]);
+    let (ctx, _) = make_ctx_with_parquet(dir.path());
     let r = dispatch_tool(
         &call("sql_query", json!({"query": "SELECT * FROM does_not_exist"})),
         &ctx,
@@ -669,19 +708,20 @@ fn sql_missing_csv_path_returns_error() {
 #[test]
 fn sql_row_cap_truncates_large_results() {
     let dir = TempDir::new().unwrap();
-    let path = dir.path().join("runways.csv");
-    let mut extra = Vec::new();
-    for i in 0..60 {
+    let mut extra: Vec<String> = Vec::new();
+    for i in 0..60u32 {
+        // Give each synthetic airport a distinct lat/lon so the dataset
+        // looks plausible, not that it affects this test.
+        let lat = 40.0 + (i as f64) * 0.001;
         extra.push(format!(
-            "{},{},K{:03},5000,100,ASP,1,0,09,40.0,-100.0,500,90.0,,27,40.0,-100.0,500,270.0,",
-            100 + i,
-            i,
-            i
+            "1 500 0 0 K{i:03} K{i:03} Test\n\
+             100 30.48 1 0 0.25 0 2 0 \
+             09 {lat:.4} -100.0 0 0 0 0 0 0 \
+             27 {lat:.4} -99.99 0 0 0 0 0 0\n"
         ));
     }
-    let extra_refs: Vec<&str> = extra.iter().map(|s| s.as_str()).collect();
-    build_fake_runway_csv(&path, &extra_refs);
-    let (ctx, _) = make_ctx_with_csv(&path);
+    build_fake_parquet(dir.path(), &extra);
+    let (ctx, _) = make_ctx_with_parquet(dir.path());
     let r = dispatch_tool(
         &call("sql_query", json!({"query": "SELECT airport_ident FROM runways"})),
         &ctx,
@@ -696,9 +736,8 @@ fn sql_row_cap_truncates_large_results() {
 #[test]
 fn spatial_function_finds_nearest_runways() {
     let dir = TempDir::new().unwrap();
-    let path = dir.path().join("runways.csv");
-    build_fake_runway_csv(&path, &[]);
-    let (ctx, _) = make_ctx_with_csv(&path);
+    build_fake_parquet(dir.path(), &[]);
+    let (ctx, _) = make_ctx_with_parquet(dir.path());
     let r = dispatch_tool(
         &call(
             "sql_query",
@@ -720,9 +759,8 @@ fn spatial_function_finds_nearest_runways() {
 #[test]
 fn spatial_least_of_both_ends_picks_closer_high_numbered_threshold() {
     let dir = TempDir::new().unwrap();
-    let path = dir.path().join("runways.csv");
-    build_fake_runway_csv(&path, &[]);
-    let (ctx, _) = make_ctx_with_csv(&path);
+    build_fake_parquet(dir.path(), &[]);
+    let (ctx, _) = make_ctx_with_parquet(dir.path());
     let r = dispatch_tool(
         &call(
             "sql_query",

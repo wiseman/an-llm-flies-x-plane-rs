@@ -8,7 +8,7 @@ use chrono::Local;
 use clap::{Parser, ValueEnum};
 
 use xplane_pilot::config::load_default_config_bundle;
-use xplane_pilot::data::apt_dat;
+use xplane_pilot::data::{apt_dat, parquet as data_parquet};
 use xplane_pilot::live_runner::{run_live_xplane, LiveRunConfig};
 use xplane_pilot::sim::{
     logging::write_scenario_log_csv, plotting::write_scenario_plots, scenario::ScenarioRunner,
@@ -66,14 +66,12 @@ struct Cli {
     #[arg(long, default_value = "idle")]
     engage_profile: String,
 
-    /// Path to the runway/airport CSV used by the LLM's sql_query tool. Takes
-    /// precedence over --apt-dat-path when both are given.
-    #[arg(long)]
-    runway_csv_path: Option<PathBuf>,
-
     /// Path to an X-Plane 12 apt.dat (typically under Global Scenery/Global
-    /// Airports/Earth nav data/). When set, or when the default macOS install
-    /// is detected, runway truth is parsed from it into a per-user cached CSV.
+    /// Airports/Earth nav data/). When set — or when the default X-Plane 12
+    /// install is detected — the file is parsed into a per-user zstd parquet
+    /// cache under ~/.cache/sim_pilot/apt-<hash>/, transparently rebuilt
+    /// whenever apt.dat's mtime advances. The cache backs the LLM's
+    /// sql_query tool.
     #[arg(long)]
     apt_dat_path: Option<PathBuf>,
 
@@ -120,32 +118,24 @@ fn resolve_scenario_name(explicit: Option<&str>, wind: Vec2) -> String {
     )
 }
 
-/// Produce the path to a runway CSV the DuckDB view in `llm/tools.rs` can
-/// read. An explicit `--runway-csv-path` wins. Otherwise an explicit or
-/// auto-detected apt.dat is parsed into a cached CSV under
-/// `~/.cache/sim_pilot/` (reused on subsequent runs until apt.dat changes).
-/// Returns `None` when neither source is available — the LLM's runway lookup
-/// tools will then error, same as before this change.
-fn resolve_runway_data_source(
-    runway_csv: Option<PathBuf>,
-    apt_dat: Option<PathBuf>,
-) -> Result<Option<PathBuf>> {
-    if let Some(p) = runway_csv {
-        return Ok(Some(p));
-    }
-    let explicit_apt = apt_dat.is_some();
+/// Resolve (and build-if-needed) the apt.dat-derived parquet cache. An
+/// explicit `--apt-dat-path` pins the source; otherwise we auto-detect the
+/// standard X-Plane 12 install. Returns `None` only when no apt.dat is
+/// locatable — the LLM's runway-lookup tools will then error cleanly.
+fn resolve_apt_dat_cache(apt_dat: Option<PathBuf>) -> Result<Option<PathBuf>> {
+    let explicit = apt_dat.is_some();
     let apt = apt_dat.or_else(apt_dat::default_apt_dat_path);
     let Some(apt) = apt else { return Ok(None) };
     if !apt.exists() {
-        if explicit_apt {
+        if explicit {
             return Err(anyhow!("apt.dat not found at {}", apt.display()));
         }
         return Ok(None);
     }
     println!("apt_dat_path={}", apt.display());
-    let csv = apt_dat::resolve_runways_csv(&apt)
-        .with_context(|| format!("building runway CSV from {}", apt.display()))?;
-    Ok(Some(csv))
+    let cache = data_parquet::resolve(&apt)
+        .with_context(|| format!("building apt.dat parquet cache from {}", apt.display()))?;
+    Ok(Some(cache.dir))
 }
 
 fn resolve_log_file_path(explicit: Option<PathBuf>, disabled: bool) -> Option<PathBuf> {
@@ -202,12 +192,9 @@ fn main() -> Result<()> {
             if let Some(p) = &log_file {
                 println!("log_file={}", p.display());
             }
-            let runway_csv_path = resolve_runway_data_source(
-                args.runway_csv_path,
-                args.apt_dat_path,
-            )?;
-            if let Some(p) = &runway_csv_path {
-                println!("runway_csv_path={}", p.display());
+            let apt_dat_cache_dir = resolve_apt_dat_cache(args.apt_dat_path)?;
+            if let Some(p) = &apt_dat_cache_dir {
+                println!("apt_dat_cache_dir={}", p.display());
             }
             run_live_xplane(
                 config,
@@ -220,7 +207,7 @@ fn main() -> Result<()> {
                     control_hz: args.control_hz,
                     status_interval_s: args.status_interval_s,
                     engage_profile: args.engage_profile,
-                    runway_csv_path,
+                    apt_dat_cache_dir,
                     log_file_path: log_file,
                     heartbeat_interval_s: args.heartbeat_interval,
                     heartbeat_enabled: !args.no_heartbeat,

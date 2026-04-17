@@ -16,8 +16,9 @@ cargo run --release --                     # default: zero-wind pattern → land
 cargo run --release -- --crosswind-kt 10 --log-csv output/flight.csv --plots-dir output/plots
 
 # Live X-Plane run (requires X-Plane 12 with web API on 8086, OPENAI_API_KEY in .env).
-# Runway truth auto-parses from the detected X-Plane 12 apt.dat into a cached
-# CSV under ~/.cache/sim_pilot/; pass --apt-dat-path or --runway-csv-path to override.
+# Runway truth auto-parses from the detected X-Plane 12 apt.dat into zstd
+# GeoParquet under ~/.cache/sim_pilot/apt-<hash>/; pass --apt-dat-path to
+# override the autodetected location.
 cargo run --release -- \
   --backend xplane --interactive-atc \
   --llm-model gpt-5.4-mini-2026-03-17
@@ -73,18 +74,37 @@ Both backends share `load_default_config_bundle()`, `PilotCore`, `RunwayFrame`, 
 
 Everything inside the pilot reasons in a **runway frame** where `x` points down the runway centerline and the threshold is at the origin. `guidance/runway_geometry.rs::RunwayFrame` converts between this frame and the world frame. Pattern geometry (`guidance/pattern_manager.rs`) is built in runway-frame coords and only converted out when feeding `L1PathFollower`. For live X-Plane, a `GeoReference` (lat/lon anchor) handles the flat-earth geodetic-to-feet conversion.
 
-### Runway/airport data
+### Runway / airport / comm data
 
-`src/data/apt_dat.rs` parses X-Plane's `Global Scenery/Global Airports/Earth
-nav data/apt.dat` (rows `1`/`16`/`17` for airports, `100` for land runways,
-`1302` for ICAO/IATA/FAA metadata) into the same column layout the DuckDB view
-in `llm/tools.rs` expects. Runway length and per-end heading are derived from
-the two end coordinates (great-circle distance and initial bearing); per-end
-elevation falls back to the airport header's single elevation field since
-apt.dat doesn't carry per-end values. `resolve_runways_csv` writes a cached
-CSV to `~/.cache/sim_pilot/runways-<hash>.csv` keyed off the apt.dat path and
-mtime; rebuilds are ~1 s in release mode for the 360 MB global file. Tests
-live in-module.
+`src/data/apt_dat.rs` streams X-Plane's `Global Scenery/Global Airports/Earth
+nav data/apt.dat` into three Rust structs:
+
+- `ParsedAirport` — rows `1`/`16`/`17` plus `1302 icao_code`/`iata_code`/
+  `faa_code`/`datum_lat`/`datum_lon`. Airports missing 1302 `datum_*` are
+  backfilled with the centroid of their runway endpoints so every airport
+  has a lat/lon.
+- `ParsedRunway` — row `100`. Per-end heading and runway length are derived
+  from the two endpoint coordinates (initial bearing, haversine). Per-end
+  elevation inherits the airport header's single elevation field since
+  apt.dat doesn't carry per-end elevation.
+- `ParsedComm` — rows `1050..=1056` (ATIS / UNICOM / CD / GND / TWR / APP /
+  DEP). Frequency is stored as MHz (6-digit kHz divided by 1000).
+
+`src/data/parquet.rs::resolve(apt_dat_path)` parses the source, feeds rows
+into an in-memory DuckDB via the `Appender` API, Hilbert-sorts each geometry-
+bearing table, and writes three zstd parquet files to
+`~/.cache/sim_pilot/apt-<hash>/airports.parquet` (plus `runways.parquet`,
+`comms.parquet`). The cache is rebuilt whenever any file is older than
+apt.dat. Full build is ~0.8 s for the 360 MB global source (release); cache
+reopen is <10 ms.
+
+Only scalar columns are stored in parquet (lat/lon doubles, idents, etc.).
+The GEOMETRY columns the LLM queries — `airports.arp`,
+`runways.centerline`/`le_threshold`/`he_threshold` — are added back as
+computed `ST_Point`/`ST_MakeLine` expressions in `tools.rs::open_apt_dat_parquet`'s
+views. This keeps the parquet files portable and avoids a duckdb-rs panic
+on `SELECT *` when GEOMETRY columns come off disk. Tests live in-module
+(apt_dat parser) and alongside (parquet builder).
 
 ### Configuration
 

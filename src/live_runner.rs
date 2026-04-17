@@ -252,7 +252,7 @@ pub struct LiveRunConfig {
     pub control_hz: f64,
     pub status_interval_s: f64,
     pub engage_profile: String,
-    pub runway_csv_path: Option<PathBuf>,
+    pub apt_dat_cache_dir: Option<PathBuf>,
     pub log_file_path: Option<PathBuf>,
     pub heartbeat_interval_s: f64,
     pub heartbeat_enabled: bool,
@@ -336,7 +336,7 @@ pub fn run_live_xplane(base_config: ConfigBundle, runtime: LiveRunConfig) -> Res
         bridge: Some(tool_bridge),
         config: Arc::new(PLMutex::new(live_config.clone())),
         recent_broadcasts: Arc::new(PLMutex::new(Vec::new())),
-        runway_csv_path: runtime.runway_csv_path.clone(),
+        apt_dat_cache_dir: runtime.apt_dat_cache_dir.clone(),
         bus: Some(bus.clone()),
         runway_conn: Arc::new(Mutex::new(None)),
     });

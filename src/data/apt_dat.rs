@@ -1,24 +1,31 @@
-//! apt.dat parser + derived-CSV cache. No Python counterpart.
+//! apt.dat streaming parser. No Python counterpart.
 //!
-//! X-Plane ships runway truth in `Global Scenery/Global Airports/Earth nav
-//! data/apt.dat` (~360 MB, ~31k airports, ~38k runways). This module parses
-//! the subset the pilot cares about — airport headers (rows 1 / 16 / 17),
-//! land runways (row 100), airport metadata (row 1302) — and exports a CSV
-//! whose column names match what `llm/tools.rs` already queries via DuckDB.
+//! X-Plane ships all runway and comm truth in `Global Scenery/Global
+//! Airports/Earth nav data/apt.dat` (~360 MB, ~38k airports, ~38k runways,
+//! ~28k comm frequencies). This module parses the subset the pilot cares
+//! about in one streaming pass:
 //!
-//! apt.dat's row 100 does not store per-end heading, runway length, or per-end
-//! elevation. These are derived from the two end coordinates (great-circle
-//! distance, initial bearing) and the airport elevation from the row-1 header.
+//! - rows 1 / 16 / 17 (airport / seaplane base / heliport header)
+//! - row 100 (land runway)
+//! - row 1302 (airport identification metadata — ICAO / IATA / FAA /
+//!   datum_lat / datum_lon)
+//! - rows 1050..=1056 (comm frequencies: ATIS, UNICOM, CD, GND, TWR, APP, DEP)
+//!
+//! apt.dat's row 100 does not store per-end heading, runway length, or
+//! per-end elevation. These are derived from the two end coordinates
+//! (great-circle distance, initial bearing) and the airport elevation from
+//! the row-1 header. Only ~44% of airports have `datum_lat`/`datum_lon` in
+//! row 1302, so airports missing those are backfilled with the centroid of
+//! their runway endpoints (rounded to the airport centre of mass) so every
+//! airport has a lat/lon downstream.
+//!
 //! Spec: X-Plane apt.dat 1100 / 1200 File Format Specification.
 
-use std::collections::hash_map::DefaultHasher;
-use std::fs::{self, File};
-use std::hash::{Hash, Hasher};
-use std::io::{BufRead, BufReader, Write};
+use std::fs::File;
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result};
 
 const METERS_TO_FEET: f64 = 3.280_839_895_013_123;
 const EARTH_RADIUS_M: f64 = 6_371_008.8;
@@ -31,6 +38,12 @@ pub struct ParsedAirport {
     pub icao_code: Option<String>,
     pub iata_code: Option<String>,
     pub faa_code: Option<String>,
+    /// Airport reference point. Populated from row 1302 `datum_lat`/
+    /// `datum_lon` when present, otherwise backfilled with the centroid of
+    /// the airport's runway endpoints. `None` only for airports with neither
+    /// 1302 metadata nor any land runway.
+    pub latitude_deg: Option<f64>,
+    pub longitude_deg: Option<f64>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -55,9 +68,30 @@ pub struct ParsedRunway {
     pub he_elevation_ft: f64,
 }
 
-pub fn parse<R: BufRead>(reader: R) -> Result<(Vec<ParsedAirport>, Vec<ParsedRunway>)> {
-    let mut airports = Vec::new();
-    let mut runways = Vec::new();
+#[derive(Debug, Clone, PartialEq)]
+pub struct ParsedComm {
+    pub airport_ident: String,
+    /// Raw apt.dat row code (1050..=1056) — retained for callers that want
+    /// exact provenance.
+    pub code: u16,
+    /// Friendly kind derived from `code`: ATIS / UNICOM / CD / GND / TWR /
+    /// APP / DEP.
+    pub kind: &'static str,
+    pub freq_mhz: f64,
+    /// Free-form descriptive label from the apt.dat row (may contain
+    /// spaces), e.g. "NORCAL APP", "AWOS 1".
+    pub label: String,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ParsedAptDat {
+    pub airports: Vec<ParsedAirport>,
+    pub runways: Vec<ParsedRunway>,
+    pub comms: Vec<ParsedComm>,
+}
+
+pub fn parse<R: BufRead>(reader: R) -> Result<ParsedAptDat> {
+    let mut out = ParsedAptDat::default();
     let mut cur: Option<ParsedAirport> = None;
 
     for (i, line) in reader.lines().enumerate() {
@@ -76,14 +110,14 @@ pub fn parse<R: BufRead>(reader: R) -> Result<(Vec<ParsedAirport>, Vec<ParsedRun
         match code {
             "1" | "16" | "17" => {
                 if let Some(a) = cur.take() {
-                    airports.push(a);
+                    out.airports.push(a);
                 }
                 cur = parse_airport_header(rest);
             }
             "100" => {
                 if let Some(a) = cur.as_ref() {
                     if let Some(rw) = parse_runway_100(rest, a) {
-                        runways.push(rw);
+                        out.runways.push(rw);
                     }
                 }
             }
@@ -92,16 +126,24 @@ pub fn parse<R: BufRead>(reader: R) -> Result<(Vec<ParsedAirport>, Vec<ParsedRun
                     apply_1302(rest, a);
                 }
             }
+            "1050" | "1051" | "1052" | "1053" | "1054" | "1055" | "1056" => {
+                if let Some(a) = cur.as_ref() {
+                    if let Some(comm) = parse_comm_row(code, rest, &a.ident) {
+                        out.comms.push(comm);
+                    }
+                }
+            }
             _ => {}
         }
     }
     if let Some(a) = cur.take() {
-        airports.push(a);
+        out.airports.push(a);
     }
-    Ok((airports, runways))
+    backfill_airport_arps(&mut out.airports, &out.runways);
+    Ok(out)
 }
 
-pub fn parse_file(path: &Path) -> Result<(Vec<ParsedAirport>, Vec<ParsedRunway>)> {
+pub fn parse_file(path: &Path) -> Result<ParsedAptDat> {
     let f = File::open(path).with_context(|| format!("opening {}", path.display()))?;
     parse(BufReader::new(f))
 }
@@ -122,6 +164,8 @@ fn parse_airport_header(rest: &str) -> Option<ParsedAirport> {
         icao_code: None,
         iata_code: None,
         faa_code: None,
+        latitude_deg: None,
+        longitude_deg: None,
     })
 }
 
@@ -136,6 +180,8 @@ fn apply_1302(rest: &str, airport: &mut ParsedAirport) {
         "icao_code" => airport.icao_code = Some(value),
         "iata_code" => airport.iata_code = Some(value),
         "faa_code" => airport.faa_code = Some(value),
+        "datum_lat" => airport.latitude_deg = value.parse().ok(),
+        "datum_lon" => airport.longitude_deg = value.parse().ok(),
         _ => {}
     }
 }
@@ -190,6 +236,39 @@ fn parse_runway_100(rest: &str, airport: &ParsedAirport) -> Option<ParsedRunway>
     })
 }
 
+fn parse_comm_row(code: &str, rest: &str, airport_ident: &str) -> Option<ParsedComm> {
+    // Modern apt.dat (1200+) encodes comm frequencies at 8.33 kHz resolution
+    // as a 6-digit integer equal to MHz * 1000 (e.g. "127275" = 127.275 MHz,
+    // "120500" = 120.500 MHz). Label is free-form text (possibly with spaces).
+    let mut parts = rest.splitn(2, char::is_whitespace);
+    let freq_token = parts.next()?;
+    let label = parts.next().unwrap_or("").trim().to_string();
+    let freq_khz: u64 = freq_token.parse().ok()?;
+    let freq_mhz = freq_khz as f64 / 1000.0;
+    let code_u: u16 = code.parse().ok()?;
+    let kind = comm_code_to_kind(code_u)?;
+    Some(ParsedComm {
+        airport_ident: airport_ident.to_string(),
+        code: code_u,
+        kind,
+        freq_mhz,
+        label,
+    })
+}
+
+fn comm_code_to_kind(code: u16) -> Option<&'static str> {
+    match code {
+        1050 => Some("ATIS"),   // also AWOS / ASOS — disambiguate via label
+        1051 => Some("UNICOM"), // CTAF at non-towered fields
+        1052 => Some("CD"),     // Clearance Delivery
+        1053 => Some("GND"),    // Ground
+        1054 => Some("TWR"),    // Tower
+        1055 => Some("APP"),    // Approach
+        1056 => Some("DEP"),    // Departure
+        _ => None,
+    }
+}
+
 fn surface_code_to_str(code: i32) -> &'static str {
     match code {
         1 => "ASP",
@@ -204,6 +283,35 @@ fn surface_code_to_str(code: i32) -> &'static str {
         20..=47 => "ASP",
         50..=57 => "CON",
         _ => "UNK",
+    }
+}
+
+/// Populate `latitude_deg`/`longitude_deg` for airports that came out of
+/// the parser without them (no row 1302 `datum_lat`/`datum_lon`) by taking
+/// the mean of the runway endpoint coordinates at that airport. apt.dat's
+/// row 1302 only covers the ~44% of airports in the gateway — the remainder
+/// are small strips where the centroid of the runway endpoints is a fine
+/// stand-in for the ARP (worst-case offset is a few hundred metres, well
+/// inside the scale at which 'which airport am I closest to' queries care).
+fn backfill_airport_arps(airports: &mut [ParsedAirport], runways: &[ParsedRunway]) {
+    use std::collections::HashMap;
+    let mut sums: HashMap<&str, (f64, f64, usize)> = HashMap::new();
+    for r in runways {
+        let entry = sums.entry(r.airport_ident.as_str()).or_insert((0.0, 0.0, 0));
+        entry.0 += r.le_lat + r.he_lat;
+        entry.1 += r.le_lon + r.he_lon;
+        entry.2 += 2;
+    }
+    for a in airports.iter_mut() {
+        if a.latitude_deg.is_some() && a.longitude_deg.is_some() {
+            continue;
+        }
+        if let Some(&(lat_sum, lon_sum, n)) = sums.get(a.ident.as_str()) {
+            if n > 0 {
+                a.latitude_deg = Some(lat_sum / n as f64);
+                a.longitude_deg = Some(lon_sum / n as f64);
+            }
+        }
     }
 }
 
@@ -225,91 +333,8 @@ fn initial_bearing_deg(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
     x.atan2(y).to_degrees().rem_euclid(360.0)
 }
 
-pub const RUNWAY_CSV_HEADER: &str = "id,airport_ref,airport_ident,length_ft,width_ft,surface,lighted,closed,le_ident,le_latitude_deg,le_longitude_deg,le_elevation_ft,le_heading_degT,le_displaced_threshold_ft,he_ident,he_latitude_deg,he_longitude_deg,he_elevation_ft,he_heading_degT,he_displaced_threshold_ft";
-
-pub fn write_runways_csv<W: Write>(mut writer: W, runways: &[ParsedRunway]) -> Result<()> {
-    writeln!(writer, "{}", RUNWAY_CSV_HEADER)?;
-    for (i, r) in runways.iter().enumerate() {
-        writeln!(
-            writer,
-            "{id},0,{ident},{length:.1},{width:.1},{surface},{lit},{closed},\
-             {le_i},{le_lat:.8},{le_lon:.8},{le_elev:.1},{le_h:.2},{le_d:.2},\
-             {he_i},{he_lat:.8},{he_lon:.8},{he_elev:.1},{he_h:.2},{he_d:.2}",
-            id = i + 1,
-            ident = r.airport_ident,
-            length = r.length_ft,
-            width = r.width_ft,
-            surface = r.surface,
-            lit = r.lighted,
-            closed = r.closed,
-            le_i = r.le_ident,
-            le_lat = r.le_lat,
-            le_lon = r.le_lon,
-            le_elev = r.le_elevation_ft,
-            le_h = r.le_heading_deg,
-            le_d = r.le_displaced_threshold_ft,
-            he_i = r.he_ident,
-            he_lat = r.he_lat,
-            he_lon = r.he_lon,
-            he_elev = r.he_elevation_ft,
-            he_h = r.he_heading_deg,
-            he_d = r.he_displaced_threshold_ft,
-        )?;
-    }
-    Ok(())
-}
-
-fn cache_dir() -> Option<PathBuf> {
-    std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache/sim_pilot"))
-}
-
-fn cached_csv_path_for(apt_dat: &Path) -> Option<PathBuf> {
-    let canon = fs::canonicalize(apt_dat).unwrap_or_else(|_| apt_dat.to_path_buf());
-    let mut hasher = DefaultHasher::new();
-    canon.hash(&mut hasher);
-    let h = hasher.finish();
-    cache_dir().map(|d| d.join(format!("runways-{:016x}.csv", h)))
-}
-
-/// Return a runways CSV derived from `apt_dat`. The first call parses the
-/// 360 MB source and writes a small cached copy; subsequent calls reuse the
-/// cache as long as its mtime is at or after apt.dat's.
-pub fn resolve_runways_csv(apt_dat: &Path) -> Result<PathBuf> {
-    let cache = cached_csv_path_for(apt_dat)
-        .ok_or_else(|| anyhow!("HOME is unset; cannot locate cache directory"))?;
-    if cache_is_fresh(apt_dat, &cache)? {
-        return Ok(cache);
-    }
-    if let Some(parent) = cache.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let (_airports, runways) = parse_file(apt_dat)?;
-    let tmp = cache.with_extension("csv.tmp");
-    {
-        let file =
-            File::create(&tmp).with_context(|| format!("creating {}", tmp.display()))?;
-        write_runways_csv(file, &runways)?;
-    }
-    fs::rename(&tmp, &cache)?;
-    Ok(cache)
-}
-
-fn cache_is_fresh(apt_dat: &Path, cache: &Path) -> Result<bool> {
-    if !cache.exists() {
-        return Ok(false);
-    }
-    let src = fs::metadata(apt_dat)?
-        .modified()
-        .unwrap_or(SystemTime::UNIX_EPOCH);
-    let dst = fs::metadata(cache)?
-        .modified()
-        .unwrap_or(SystemTime::UNIX_EPOCH);
-    Ok(dst >= src)
-}
-
 /// Best-effort autodetect of the default X-Plane 12 apt.dat on the current
-/// host. Returns None if no candidate exists; callers fall back to
-/// --runway-csv-path.
+/// host. Returns None if no candidate exists.
 pub fn default_apt_dat_path() -> Option<PathBuf> {
     let home = std::env::var_os("HOME")?;
     let candidates = [
@@ -334,6 +359,10 @@ A
 1302 city Seattle
 1302 icao_code KSEA
 1302 iata_code SEA
+1302 datum_lat 47.449888889
+1302 datum_lon -122.311777778
+1050 127275 ATIS
+1054 119900 TWR
 100 45.72 1 0 0.25 1 2 0 16L 47.46380000 -122.30800000 0 60 2 1 1 2 34R 47.43130000 -122.30800000 0 60 2 1 1 2
 100 45.72 2 0 0.25 1 2 0 16R 47.46380000 -122.31800000 0 60 2 1 1 2 34L 47.44050000 -122.31800000 0 60 2 1 1 2
 101 49 1 08 35.04420900 -106.59855700 26 35.04420911 -106.59855711
@@ -344,39 +373,69 @@ A
 1     13 0 0 KSFO San Francisco Intl
 1302 icao_code KSFO
 100 61.00 1 0 0.0 1 3 0 10L 37.62875970 -122.39343890 0 250 3 0 0 3 28R 37.61353400 -122.35715510 90 100 3 2 1 3
+1055 128325 NORCAL APP
+1055 134500 NORCAL APP
 99
 ";
 
-    fn parse_fixture() -> (Vec<ParsedAirport>, Vec<ParsedRunway>) {
+    fn parse_fixture() -> ParsedAptDat {
         parse(FIXTURE.as_bytes()).unwrap()
     }
 
     #[test]
     fn parses_three_airports_and_three_runways() {
-        let (airports, runways) = parse_fixture();
-        let idents: Vec<&str> = airports.iter().map(|a| a.ident.as_str()).collect();
+        let data = parse_fixture();
+        let idents: Vec<&str> = data.airports.iter().map(|a| a.ident.as_str()).collect();
         assert_eq!(idents, ["KSEA", "KBFI", "KSFO"]);
         // KBFI only had a helipad (102) — no land runways.
-        let rw_airports: Vec<&str> = runways.iter().map(|r| r.airport_ident.as_str()).collect();
+        let rw_airports: Vec<&str> =
+            data.runways.iter().map(|r| r.airport_ident.as_str()).collect();
         assert_eq!(rw_airports, ["KSEA", "KSEA", "KSFO"]);
     }
 
     #[test]
     fn airport_metadata_captured() {
-        let (airports, _) = parse_fixture();
-        let ksea = &airports[0];
+        let data = parse_fixture();
+        let ksea = &data.airports[0];
         assert_eq!(ksea.icao_code.as_deref(), Some("KSEA"));
         assert_eq!(ksea.iata_code.as_deref(), Some("SEA"));
         assert_eq!(ksea.elevation_ft, 429.0);
         assert_eq!(ksea.name, "Seattle-Tacoma Intl");
-        assert!(airports[1].icao_code.is_none());
+        // Datum comes straight from 1302 when present.
+        assert_eq!(ksea.latitude_deg, Some(47.449888889));
+        assert_eq!(ksea.longitude_deg, Some(-122.311777778));
+        assert!(data.airports[1].icao_code.is_none());
+    }
+
+    #[test]
+    fn airport_without_datum_gets_centroid_fallback() {
+        let data = parse_fixture();
+        // KSFO has no 1302 datum_lat/datum_lon in the fixture; the single
+        // runway's endpoint centroid should fill it in.
+        let ksfo = data.airports.iter().find(|a| a.ident == "KSFO").unwrap();
+        let lat = ksfo.latitude_deg.expect("KSFO lat backfilled");
+        let lon = ksfo.longitude_deg.expect("KSFO lon backfilled");
+        let expected_lat = (37.62875970 + 37.61353400) * 0.5;
+        let expected_lon = (-122.39343890 + -122.35715510) * 0.5;
+        assert!((lat - expected_lat).abs() < 1e-9);
+        assert!((lon - expected_lon).abs() < 1e-9);
+    }
+
+    #[test]
+    fn airport_with_no_runways_and_no_datum_has_no_coords() {
+        let data = parse_fixture();
+        // KBFI in the fixture has only a helipad (row 102), no land runways,
+        // and no 1302 datum. Fallback has nothing to work with.
+        let kbfi = data.airports.iter().find(|a| a.ident == "KBFI").unwrap();
+        assert!(kbfi.latitude_deg.is_none());
+        assert!(kbfi.longitude_deg.is_none());
     }
 
     #[test]
     fn surface_code_mapping() {
-        let (_, runways) = parse_fixture();
-        assert_eq!(runways[0].surface, "ASP");
-        assert_eq!(runways[1].surface, "CON");
+        let data = parse_fixture();
+        assert_eq!(data.runways[0].surface, "ASP");
+        assert_eq!(data.runways[1].surface, "CON");
         assert_eq!(surface_code_to_str(20), "ASP");
         assert_eq!(surface_code_to_str(55), "CON");
         assert_eq!(surface_code_to_str(99), "UNK");
@@ -384,21 +443,14 @@ A
 
     #[test]
     fn derived_heading_and_length_for_ksea_16l() {
-        let (_, runways) = parse_fixture();
-        let r = &runways[0];
+        let data = parse_fixture();
+        let r = &data.runways[0];
         assert_eq!(r.le_ident, "16L");
         assert_eq!(r.he_ident, "34R");
-        // Same longitude, end1 north of end2 → due south.
-        assert!((r.le_heading_deg - 180.0).abs() < 0.01, "le heading was {}", r.le_heading_deg);
-        assert!((r.he_heading_deg - 0.0).abs() < 0.01, "he heading was {}", r.he_heading_deg);
-        // ~2.17 min of latitude at this lat ≈ 11,870 ft.
-        assert!(
-            (r.length_ft - 11_875.0).abs() < 100.0,
-            "length was {}",
-            r.length_ft
-        );
-        // Width 45.72 m = 150 ft.
-        assert!((r.width_ft - 150.0).abs() < 0.5, "width was {}", r.width_ft);
+        assert!((r.le_heading_deg - 180.0).abs() < 0.01);
+        assert!((r.he_heading_deg - 0.0).abs() < 0.01);
+        assert!((r.length_ft - 11_875.0).abs() < 100.0, "length was {}", r.length_ft);
+        assert!((r.width_ft - 150.0).abs() < 0.5);
         assert_eq!(r.lighted, 1);
         assert_eq!(r.closed, 0);
         assert_eq!(r.le_elevation_ft, 429.0);
@@ -406,46 +458,39 @@ A
 
     #[test]
     fn derived_heading_for_ksfo_10l_matches_known() {
-        let (_, runways) = parse_fixture();
-        let r = runways.iter().find(|r| r.le_ident == "10L").unwrap();
-        // KSFO 10L/28R is charted as 117°/297°. Great-circle bearing between
-        // the published threshold coords lands there within ~1°.
-        assert!(
-            (r.le_heading_deg - 117.0).abs() < 1.5,
-            "10L heading was {}",
-            r.le_heading_deg
-        );
+        let data = parse_fixture();
+        let r = data.runways.iter().find(|r| r.le_ident == "10L").unwrap();
+        assert!((r.le_heading_deg - 117.0).abs() < 1.5);
         assert!((r.he_displaced_threshold_ft - 295.0).abs() < 1.0);
     }
 
     #[test]
     fn ignores_water_runways_and_helipads() {
-        let (_, runways) = parse_fixture();
-        // The 101 (water) in KSEA block and 102 (helipad) under KBFI must not
-        // appear as land runways.
-        assert!(runways.iter().all(|r| r.le_ident != "08"));
-        assert!(runways.iter().all(|r| r.le_ident != "H1"));
+        let data = parse_fixture();
+        assert!(data.runways.iter().all(|r| r.le_ident != "08"));
+        assert!(data.runways.iter().all(|r| r.le_ident != "H1"));
     }
 
     #[test]
-    fn csv_emits_expected_header_and_row_count() {
-        let (_, runways) = parse_fixture();
-        let mut buf: Vec<u8> = Vec::new();
-        write_runways_csv(&mut buf, &runways).unwrap();
-        let text = String::from_utf8(buf).unwrap();
-        let mut lines = text.lines();
-        assert_eq!(lines.next().unwrap(), RUNWAY_CSV_HEADER);
-        assert_eq!(lines.count(), runways.len());
-    }
+    fn parses_comm_rows_with_kind_and_mhz() {
+        let data = parse_fixture();
+        let ksea: Vec<_> = data.comms.iter().filter(|c| c.airport_ident == "KSEA").collect();
+        assert_eq!(ksea.len(), 2);
+        let atis = ksea.iter().find(|c| c.code == 1050).unwrap();
+        assert_eq!(atis.kind, "ATIS");
+        assert!((atis.freq_mhz - 127.275).abs() < 1e-9);
+        assert_eq!(atis.label, "ATIS");
+        let twr = ksea.iter().find(|c| c.code == 1054).unwrap();
+        assert_eq!(twr.kind, "TWR");
+        assert!((twr.freq_mhz - 119.900).abs() < 1e-9);
 
-    #[test]
-    fn csv_row_has_correct_column_count() {
-        let (_, runways) = parse_fixture();
-        let mut buf: Vec<u8> = Vec::new();
-        write_runways_csv(&mut buf, &runways).unwrap();
-        let text = String::from_utf8(buf).unwrap();
-        for line in text.lines() {
-            assert_eq!(line.matches(',').count(), 19, "row={}", line);
-        }
+        // Multi-word label preserved.
+        let ksfo_app: Vec<_> = data
+            .comms
+            .iter()
+            .filter(|c| c.airport_ident == "KSFO" && c.code == 1055)
+            .collect();
+        assert_eq!(ksfo_app.len(), 2);
+        assert!(ksfo_app.iter().all(|c| c.label == "NORCAL APP"));
     }
 }

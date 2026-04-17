@@ -7,7 +7,7 @@
 //! spatial extension loaded so the agent can do real geospatial lookups.
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use anyhow::{anyhow, Result};
@@ -20,6 +20,7 @@ use crate::core::mission_manager::{PilotCore, StatusSnapshot};
 use crate::core::profiles::{
     AltitudeHoldProfile, HeadingHoldProfile, PatternFlyProfile, SpeedHoldProfile, TakeoffProfile,
 };
+use crate::data::parquet::{AIRPORTS_FILE, COMMS_FILE, RUNWAYS_FILE};
 use crate::guidance::runway_geometry::RunwayFrame;
 use crate::sim::datarefs::{
     COM1_FREQUENCY_HZ_833, COM2_FREQUENCY_HZ_833, FLAP_HANDLE_REQUEST_RATIO, LATITUDE_DEG,
@@ -44,7 +45,10 @@ pub struct ToolContext {
     pub bridge: Option<Arc<dyn ToolBridge>>,
     pub config: Arc<PLMutex<ConfigBundle>>,
     pub recent_broadcasts: Arc<PLMutex<Vec<String>>>,
-    pub runway_csv_path: Option<PathBuf>,
+    /// Directory holding the three apt.dat-derived parquet files
+    /// (airports / runways / comms). Populated on startup by
+    /// `data::parquet::resolve`; `None` only when no apt.dat was locatable.
+    pub apt_dat_cache_dir: Option<PathBuf>,
     pub bus: Option<SimBus>,
     pub runway_conn: Arc<Mutex<Option<duckdb::Connection>>>,
 }
@@ -59,7 +63,7 @@ impl ToolContext {
             bridge: None,
             config: Arc::new(PLMutex::new(config)),
             recent_broadcasts: Arc::new(PLMutex::new(Vec::new())),
-            runway_csv_path: None,
+            apt_dat_cache_dir: None,
             bus: None,
             runway_conn: Arc::new(Mutex::new(None)),
         }
@@ -257,31 +261,68 @@ fn synthesize_touchdown_zone_ft(_length_ft: f64) -> f64 {
 }
 
 fn ensure_runway_conn(ctx: &ToolContext) -> Result<()> {
-    let Some(path) = &ctx.runway_csv_path else {
-        return Err(anyhow!("runway CSV path is not configured (pass --runway-csv-path)"));
+    let Some(dir) = &ctx.apt_dat_cache_dir else {
+        return Err(anyhow!(
+            "apt.dat parquet cache is not configured (set --apt-dat-path or place apt.dat at the standard X-Plane 12 location)"
+        ));
     };
-    if !path.exists() {
-        return Err(anyhow!("runway CSV not found at {}", path.display()));
+    let airports = dir.join(AIRPORTS_FILE);
+    let runways = dir.join(RUNWAYS_FILE);
+    let comms = dir.join(COMMS_FILE);
+    for p in [&airports, &runways, &comms] {
+        if !p.exists() {
+            return Err(anyhow!("parquet file missing at {}", p.display()));
+        }
     }
     let mut guard = ctx.runway_conn.lock().unwrap();
     if guard.is_none() {
-        *guard = Some(open_runway_duckdb(path)?);
+        *guard = Some(open_apt_dat_parquet(&airports, &runways, &comms)?);
     }
     Ok(())
 }
 
-fn open_runway_duckdb(csv_path: &Path) -> Result<duckdb::Connection> {
+fn open_apt_dat_parquet(
+    airports: &std::path::Path,
+    runways: &std::path::Path,
+    comms: &std::path::Path,
+) -> Result<duckdb::Connection> {
     let conn = duckdb::Connection::open_in_memory()?;
-    // Spatial extension is best-effort (may not be bundled on every platform).
-    let _ = conn.execute_batch("INSTALL spatial; LOAD spatial;");
-    conn.execute(
-        &format!(
-            "CREATE TABLE _runways_data AS SELECT * FROM read_csv_auto('{}', header=true, sample_size=-1)",
-            csv_path.display()
-        ),
-        [],
-    )?;
-    conn.execute("CREATE VIEW runways AS SELECT * FROM _runways_data", [])?;
+    // Spatial extension is required — the parquet files carry GEOMETRY
+    // columns (WKB) that only decode when spatial is loaded.
+    conn.execute_batch("INSTALL spatial; LOAD spatial;")?;
+    // Computed GEOMETRY columns live in the view, not in the parquet — the
+    // current duckdb-rs + DuckDB spatial pairing panics on `SELECT *` when a
+    // GEOMETRY column comes off disk. Running ST_Point at view time avoids
+    // that, costs nothing perf-wise (38k rows), and keeps the schema the
+    // LLM queries (`arp`, `centerline`, `le_threshold`, `he_threshold`).
+    conn.execute_batch(&format!(
+        "CREATE VIEW airports AS
+           SELECT ident, name, elevation_ft, icao_code, iata_code, faa_code,
+                  latitude_deg, longitude_deg,
+                  CASE WHEN latitude_deg IS NULL OR longitude_deg IS NULL
+                       THEN NULL
+                       ELSE ST_Point(longitude_deg, latitude_deg)
+                  END AS arp
+           FROM read_parquet('{airports}');
+         CREATE VIEW runways AS
+           SELECT id, airport_ident, length_ft, width_ft, surface, lighted, closed,
+                  le_ident, le_latitude_deg, le_longitude_deg, le_elevation_ft,
+                  le_heading_degT, le_displaced_threshold_ft,
+                  he_ident, he_latitude_deg, he_longitude_deg, he_elevation_ft,
+                  he_heading_degT, he_displaced_threshold_ft,
+                  ST_MakeLine(
+                      ST_Point(le_longitude_deg, le_latitude_deg),
+                      ST_Point(he_longitude_deg, he_latitude_deg)
+                  ) AS centerline,
+                  ST_Point(le_longitude_deg, le_latitude_deg) AS le_threshold,
+                  ST_Point(he_longitude_deg, he_latitude_deg) AS he_threshold
+           FROM read_parquet('{runways}');
+         CREATE VIEW comms AS
+           SELECT * FROM read_parquet('{comms}');",
+        airports = airports.display(),
+        runways = runways.display(),
+        comms = comms.display(),
+    ))?;
     Ok(conn)
 }
 
@@ -750,14 +791,11 @@ pub fn tool_sql_query(ctx: &ToolContext, args: &Map<String, Value>) -> String {
         Ok(s) => s.to_string(),
         Err(e) => return format!("error: {}", e),
     };
-    let Some(path) = &ctx.runway_csv_path else {
-        return "error: runway CSV path is not configured (pass --runway-csv-path)".to_string();
-    };
-    if !path.exists() {
-        return format!("error: runway CSV not found at {}", path.display());
+    if ctx.apt_dat_cache_dir.is_none() {
+        return "error: apt.dat parquet cache is not configured (set --apt-dat-path or place apt.dat at the standard X-Plane 12 location)".to_string();
     }
     if let Err(e) = ensure_runway_conn(ctx) {
-        return format!("error: could not open runway CSV: {}", e);
+        return format!("error: could not open apt.dat parquet cache: {}", e);
     }
     let guard = ctx.runway_conn.lock().unwrap();
     let conn = guard.as_ref().unwrap();
@@ -1078,40 +1116,63 @@ pub fn tool_schemas() -> Vec<Value> {
 }
 
 // Derived from sim_pilot/llm/tools.py::SQL_QUERY_DESCRIPTION. Rust-side
-// additions (not in the Python version):
+// departures from the Python version:
+//   * Source is X-Plane's apt.dat parsed into three zstd GeoParquet tables
+//     (airports, runways, comms) instead of the ourairports CSV. Endpoints
+//     are 8-decimal; headings and lengths are derived from endpoint geodesy.
 //   * "ALWAYS prefix spatial functions with ST_" — the LLM was observed
 //     emitting bare POINT(...) which fails on DuckDB.
-//   * the ST_Distance_Sphere-only-accepts-POINT warning + the crosstrack /
-//     along-track example below — the LLM tried to pass a LINESTRING to
-//     ST_Distance_Sphere when asked for off-centerline offset.
-const SQL_QUERY_DESCRIPTION: &str = "Run an arbitrary read-only SQL query against the runway/airport database. This is \
-the AUTHORITATIVE source for runway and airport facts — never guess a runway \
-identifier, airport code, course, length, or elevation; query for it. The backend \
-is DuckDB with the spatial extension loaded, so you have full ST_* geospatial \
-functions available. Results are tab-separated with a header row, truncated to 50 \
-rows.
+//   * ST_Distance_Sphere-only-accepts-POINT warning + crosstrack /
+//     along-track example — the LLM tried to pass a LINESTRING and fail.
+const SQL_QUERY_DESCRIPTION: &str = "Run an arbitrary read-only SQL query against the runway/airport/comms \
+database (derived from X-Plane's apt.dat). This is the AUTHORITATIVE source \
+for runway and airport facts — never guess a runway identifier, airport \
+code, course, length, elevation, or ATC frequency; query for it. The \
+backend is DuckDB with the spatial extension loaded, so you have full ST_* \
+geospatial functions available. Results are tab-separated with a header \
+row, truncated to 50 rows.
 
-View: runways (read-only; one row per physical runway, worldwide)
+View: airports (one row per airport / seaplane base / heliport, worldwide)
+  ident VARCHAR                -- airport identifier as published in apt.dat, e.g. 'KSEA', 'EGLL'
+  name VARCHAR
+  elevation_ft DOUBLE
+  icao_code VARCHAR            -- may be NULL for non-ICAO airports
+  iata_code VARCHAR            -- may be NULL
+  faa_code VARCHAR             -- may be NULL (US airports only)
+  latitude_deg DOUBLE          -- airport reference point (ARP); falls back to runway centroid
+  longitude_deg DOUBLE
+  arp GEOMETRY                 -- POINT(longitude, latitude), NULL when no coords available
+
+View: runways (one row per physical land runway)
   id BIGINT
-  airport_ref BIGINT
-  airport_ident VARCHAR        -- airport ICAO code, e.g. 'KSEA', 'EGLL'
-  length_ft BIGINT
-  width_ft BIGINT
-  surface VARCHAR              -- e.g. 'ASP', 'CONC', 'CON', 'GRVL', 'TURF', 'ASPH-G'
-  lighted BIGINT               -- 0 or 1
-  closed BIGINT                -- 0 or 1
-  le_ident VARCHAR             -- low-numbered-end runway identifier, e.g. '16L'
-  le_latitude_deg DOUBLE       -- threshold latitude at the low end
+  airport_ident VARCHAR        -- joins to airports.ident
+  length_ft DOUBLE             -- great-circle distance between the two runway ends
+  width_ft DOUBLE
+  surface VARCHAR              -- 'ASP', 'CON', 'TRF', 'DIRT', 'GRV', 'WATER', 'SNOW', 'TRANS', 'LAKE', 'UNK'
+  lighted TINYINT              -- 0 or 1
+  closed TINYINT               -- 0 or 1 (always 0 — apt.dat does not encode a closed flag at runway level)
+  le_ident VARCHAR             -- low-numbered-end identifier, e.g. '16L'
+  le_latitude_deg DOUBLE       -- pavement-end latitude at the low end (the displaced threshold is inside)
   le_longitude_deg DOUBLE
-  le_elevation_ft BIGINT
-  le_heading_degT DOUBLE       -- runway course (true heading) from low-end threshold
-  le_displaced_threshold_ft BIGINT
+  le_elevation_ft DOUBLE       -- inherited from airport elevation (apt.dat has no per-end elevation)
+  le_heading_degT DOUBLE       -- initial bearing from le threshold toward he
+  le_displaced_threshold_ft DOUBLE -- offset inside the runway to the landing threshold
   he_ident VARCHAR             -- high-numbered-end identifier, e.g. '34R'
   he_latitude_deg DOUBLE
   he_longitude_deg DOUBLE
-  he_elevation_ft BIGINT
+  he_elevation_ft DOUBLE
   he_heading_degT DOUBLE
-  he_displaced_threshold_ft BIGINT
+  he_displaced_threshold_ft DOUBLE
+  centerline GEOMETRY          -- LINESTRING from le threshold to he threshold
+  le_threshold GEOMETRY        -- POINT(le_longitude_deg, le_latitude_deg)
+  he_threshold GEOMETRY        -- POINT(he_longitude_deg, he_latitude_deg)
+
+View: comms (one row per ATC frequency entry)
+  airport_ident VARCHAR        -- joins to airports.ident
+  code SMALLINT                -- raw apt.dat row code (1050..=1056)
+  kind VARCHAR                 -- 'ATIS' | 'UNICOM' | 'CD' | 'GND' | 'TWR' | 'APP' | 'DEP'
+  freq_mhz DOUBLE              -- e.g. 118.200, 127.275
+  label VARCHAR                -- free-form label ('TWR', 'NORCAL APP', 'AWOS 1', ...)
 
 Spatial functions (DuckDB spatial extension): ST_Point(lon, lat) — note that
 LONGITUDE comes first — plus ST_Distance_Sphere(p1, p2) which returns meters
@@ -1202,6 +1263,20 @@ Common queries:
     FROM runways
     WHERE airport_ident = 'KEMT' AND le_ident = '1'
   );
+
+  -- ATC frequencies at an airport
+  SELECT kind, freq_mhz, label
+  FROM comms
+  WHERE airport_ident = 'KSFO'
+  ORDER BY code;
+
+  -- Nearest airport by ARP to a point (fast with the Hilbert-sorted parquet)
+  SELECT ident, name,
+         ST_Distance_Sphere(arp, ST_Point(<lon>, <lat>)) / 1852.0 AS dist_nm
+  FROM airports
+  WHERE arp IS NOT NULL
+  ORDER BY dist_nm
+  LIMIT 5;
 ";
 
 // keep fs import alive for future disk-based config overrides

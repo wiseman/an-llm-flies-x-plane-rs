@@ -68,7 +68,8 @@ cargo build --release
 
 # Connect to a live X-Plane 12 instance with the interactive TUI. The standard
 # X-Plane 12 install is auto-detected on macOS, and apt.dat is parsed into a
-# per-user CSV cache on first run (rebuilds whenever apt.dat changes).
+# per-user zstd parquet cache on first run — rebuilt whenever apt.dat changes,
+# <10 ms to open on subsequent runs.
 ./target/release/sim-pilot --backend xplane --interactive-atc
 
 # Point at a specific apt.dat (e.g. non-standard install location).
@@ -89,7 +90,7 @@ The live backend requires:
 
 - **X-Plane 12.1.1+** with the web API enabled on port 8086 (Settings > Data Output > Web Server)
 - **An OpenAI API key** for the LLM worker that interprets ATC/operator messages
-- **Runway data** — the preferred source is X-Plane's own `apt.dat` (under `Global Scenery/Global Airports/Earth nav data/`). The pilot auto-detects the standard macOS install and parses it into a cached CSV under `~/.cache/sim_pilot/` on first run (~1 s in release mode for the 360 MB global file; cache is rebuilt whenever `apt.dat` is updated). Override with `--apt-dat-path` if your install is in a non-standard location. apt.dat stores every runway endpoint at 8-decimal (≈1 mm) precision and covers ~31k airports / ~38k runways worldwide. As a fallback, `--runway-csv-path` accepts a hand-curated CSV in the [ourairports](https://ourairports.com/data/) schema (e.g. the one the Python project ships at `../xplane-pilot/data/runways.csv`) — useful only if `apt.dat` is unavailable or you want to test against a snapshot, since the ourairports data is rounded to 3 decimals (≈30 m) and has blank coordinates for many small fields
+- **Airport / runway / comm data** comes from X-Plane's own `apt.dat` (under `Global Scenery/Global Airports/Earth nav data/`). The pilot auto-detects the standard macOS install and builds a per-user **zstd GeoParquet cache** under `~/.cache/sim_pilot/apt-<hash>/` on first run — airports (~0.5 MB), runways (~0.9 MB), and comms (~0.4 MB). Full build takes ~0.8 s for the 360 MB source; the cache opens in <10 ms on every subsequent run and is rebuilt whenever apt.dat's mtime advances. Override with `--apt-dat-path` if your install is in a non-standard location. apt.dat stores every runway endpoint at 8-decimal (≈1 mm) precision and covers ~38k airports / ~38k runways / ~28k ATC frequencies worldwide.
 
 Create a `.env` file in the directory you run from (it is gitignored):
 
@@ -122,17 +123,21 @@ differences worth calling out:
   iTerm2 with CSI u enabled); elsewhere there is a ~180 ms release tail.
   Disable with `--no-voice`. The Python version did batch Whisper via
   `sim_pilot/speech.py`.
-- **Runway/airport truth comes from X-Plane's `apt.dat`**, not from the
-  ourairports CSV the Python project uses. Endpoints are 8-decimal (vs. the
-  CSV's 3), per-runway heading and length are derived from the endpoint
-  geodesy (vs. stored-and-often-rounded in the CSV), and every runway has
-  non-null coordinates. The CSV path is still accepted as a fallback.
+- **Runway / airport / comm truth comes from X-Plane's `apt.dat`**, not from
+  the ourairports CSV the Python project uses. The file is streamed into
+  three zstd GeoParquet tables (airports / runways / comms) under
+  `~/.cache/sim_pilot/apt-<hash>/` and queried via DuckDB at runtime; the
+  LLM's `sql_query` tool sees `airports`, `runways`, and `comms` views with
+  both scalar columns and computed GEOMETRY columns (ARP point, runway
+  centerline, per-end thresholds). Endpoint precision goes from 3 decimals
+  (ourairports) to 8 (apt.dat), and every runway has non-null coordinates.
 - **Extensions to the `sql_query` tool description** — additions over the
-  Python version: "ALWAYS prefix spatial functions with ST_", a warning that
-  `ST_Distance_Sphere` only accepts `POINT`s (it errors on a `LINESTRING`),
-  and a worked crosstrack / along-track example for off-centerline offset.
-  Each was added after observing the LLM stumble on the corresponding query
-  against DuckDB. Flagged in the source.
+  Python version: the three-table schema including `airport_comms`, "ALWAYS
+  prefix spatial functions with ST_", a warning that `ST_Distance_Sphere`
+  only accepts `POINT`s (it errors on a `LINESTRING`), and a worked
+  crosstrack / along-track example for off-centerline offset. Each was
+  added after observing the LLM stumble on the corresponding query against
+  DuckDB. Flagged in the source.
 
 Behavior of the deterministic pilot is anchored by the integration test
 `tests/test_scenario.rs::nominal_mission_completes_takeoff_to_rollout`, which
