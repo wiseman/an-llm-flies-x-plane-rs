@@ -474,7 +474,7 @@ pub fn run_tui(
                     Constraint::Length(12), // status
                     Constraint::Min(3),     // log (scrolling)
                     Constraint::Length(8),  // radio
-                    Constraint::Length(3),  // input
+                    Constraint::Length(5),  // input (3 content lines + borders)
                 ])
                 .split(area);
 
@@ -535,7 +535,8 @@ pub fn run_tui(
                 }
             }
             let input_paragraph = Paragraph::new(Line::from(spans))
-                .block(Block::default().borders(Borders::ALL).title(input_title));
+                .block(Block::default().borders(Borders::ALL).title(input_title))
+                .wrap(Wrap { trim: false });
             f.render_widget(input_paragraph, chunks[3]);
         })?;
     };

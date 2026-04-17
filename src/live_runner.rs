@@ -59,6 +59,7 @@ struct HeartbeatState {
 pub struct HeartbeatPump {
     pub pilot: Arc<parking_lot::Mutex<PilotCore>>,
     pub bus: Option<SimBus>,
+    pub bridge: Option<Arc<dyn crate::llm::tools::ToolBridge>>,
     pub input_queue: Sender<IncomingMessage>,
     pub heartbeat_interval_s: f64,
     pub poll_interval_s: f64,
@@ -79,6 +80,7 @@ impl HeartbeatPump {
         Self {
             pilot,
             bus,
+            bridge: None,
             input_queue,
             heartbeat_interval_s,
             poll_interval_s: 0.5,
@@ -92,6 +94,11 @@ impl HeartbeatPump {
                 last_seen_completed: None,
             }),
         }
+    }
+
+    pub fn with_bridge(mut self, bridge: Arc<dyn crate::llm::tools::ToolBridge>) -> Self {
+        self.bridge = Some(bridge);
+        self
     }
 
     pub fn record_user_input(&self) {
@@ -146,7 +153,10 @@ impl HeartbeatPump {
                     snapshot.go_around_reason.as_deref(),
                 );
                 st.last_heartbeat_s = now;
-                let status = crate::llm::tools::build_status_payload(Some(&snapshot), None);
+                let status = crate::llm::tools::build_status_payload(
+                    Some(&snapshot),
+                    self.bridge.as_deref(),
+                );
                 let text = format!("{} | status={}", reason, serde_json::to_string(&status).unwrap());
                 let _ = self.input_queue.send(IncomingMessage::heartbeat(text));
             }
@@ -384,13 +394,16 @@ pub fn run_live_xplane(base_config: ConfigBundle, runtime: LiveRunConfig) -> Res
 
     let heartbeat_pump = if runtime.heartbeat_enabled {
         let clock: Arc<dyn Clock> = Arc::new(RealClock);
-        let pump = Arc::new(HeartbeatPump::new(
-            pilot_arc.clone(),
-            Some(bus.clone()),
-            input_tx.clone(),
-            runtime.heartbeat_interval_s,
-            clock,
-        ));
+        let pump = Arc::new(
+            HeartbeatPump::new(
+                pilot_arc.clone(),
+                Some(bus.clone()),
+                input_tx.clone(),
+                runtime.heartbeat_interval_s,
+                clock,
+            )
+            .with_bridge(bridge.clone() as Arc<dyn ToolBridge>),
+        );
         bus.push_log(format!(
             "heartbeat pump started interval={:.0}s",
             runtime.heartbeat_interval_s
