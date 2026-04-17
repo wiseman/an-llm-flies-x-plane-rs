@@ -994,7 +994,7 @@ pub fn tool_engage_taxi(ctx: &ToolContext, args: &Map<String, Value>) -> String 
     if let Err(e) = ensure_runway_conn(ctx) {
         return format!("error: {}", e);
     }
-    let plan = {
+    let (plan, face_toward_latlon) = {
         let guard = ctx.runway_conn.lock().unwrap();
         let conn = guard.as_ref().unwrap();
         let graph = match taxi_route::load_graph(conn, &airport) {
@@ -1020,7 +1020,8 @@ pub fn tool_engage_taxi(ctx: &ToolContext, args: &Map<String, Value>) -> String 
             Ok(d) => d,
             Err(e) => return format!("error: {}", e),
         };
-        match taxi_route::plan(
+        let face = dest.face_toward_latlon;
+        let plan = match taxi_route::plan(
             &graph,
             start_node,
             dest.node,
@@ -1029,13 +1030,35 @@ pub fn tool_engage_taxi(ctx: &ToolContext, args: &Map<String, Value>) -> String 
         ) {
             Ok(p) => p,
             Err(e) => return format!("error: {}", e),
-        }
+        };
+        (plan, face)
     };
 
     let georef = bridge.georef();
     let aircraft_pos_ft = geodetic_offset_ft(start_lat, start_lon, georef);
-    let (legs_ft, names, pullout_ft) =
+    let (mut legs_ft, mut names, pullout_ft) =
         build_taxi_legs_with_pullout(aircraft_pos_ft, &plan.legs, georef);
+    // Face-runway orientation leg: once we reach the hold-short node the
+    // taxi sequencer still has us pointed down the last leg (typically
+    // parallel to the runway along taxiway A). Append a short segment
+    // that starts at the hold-short and points at the runway pavement
+    // just beyond, so the final stop-ramp pivots the nose 60–90° to
+    // face the runway. 40 ft is short enough that the aircraft doesn't
+    // roll materially past the painted hold-short line, but long enough
+    // for the stop-ramp to bleed speed cleanly through the pivot.
+    let mut face_leg_appended = false;
+    if let (Some((flat, flon)), Some(last)) = (face_toward_latlon, legs_ft.last().copied()) {
+        let runway_point_ft = geodetic_offset_ft(flat, flon, georef);
+        let to_runway = runway_point_ft - last.end_ft;
+        let d = to_runway.length();
+        if d > 1.0 {
+            let unit = to_runway * (1.0 / d);
+            let face_end = last.end_ft + unit * 40.0;
+            legs_ft.push(StraightLeg { start_ft: last.end_ft, end_ft: face_end });
+            names.push("(face runway)".to_string());
+            face_leg_appended = true;
+        }
+    }
     let leg_count = legs_ft.len();
     let profile = Box::new(TaxiProfile::new(legs_ft, names));
     let displaced = ctx.pilot.lock().engage_profile(profile);
@@ -1046,6 +1069,9 @@ pub fn tool_engage_taxi(ctx: &ToolContext, args: &Map<String, Value>) -> String 
     );
     if let Some(d) = pullout_ft {
         summary.push_str(&format!(" (pullout: {:.0} ft from start)", d));
+    }
+    if face_leg_appended {
+        summary.push_str(" +face-runway");
     }
     if !plan.taxiway_sequence.is_empty() {
         summary.push_str(&format!(" via {}", plan.taxiway_sequence.join(" -> ")));

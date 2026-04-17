@@ -182,10 +182,18 @@ pub fn nearest_node(graph: &TaxiGraph, lat: f64, lon: f64) -> Result<i64> {
 /// 1202 edge whose 1204 active-zone list names the target runway —
 /// crossing those is what would put the aircraft onto the runway. For a
 /// coord / node destination, the set is empty.
+///
+/// `face_toward_latlon`, when set, names a world point just inside the
+/// active zone (the node on the other side of the forbidden edge leaving
+/// the hold-short node). Callers that actually execute the taxi can use
+/// it to append a short orientation leg so the aircraft ends up *facing*
+/// the runway at the hold-short line instead of parked parallel to it
+/// along the taxiway.
 #[derive(Debug, Clone, Default)]
 pub struct DestinationResolution {
     pub node: i64,
     pub forbidden_edges: HashSet<usize>,
+    pub face_toward_latlon: Option<(f64, f64)>,
 }
 
 pub fn resolve_destination(
@@ -197,7 +205,11 @@ pub fn resolve_destination(
     match *dest {
         TaxiDestination::NodeId(id) => {
             if graph.nodes.contains_key(&id) {
-                Ok(DestinationResolution { node: id, forbidden_edges: HashSet::new() })
+                Ok(DestinationResolution {
+                    node: id,
+                    forbidden_edges: HashSet::new(),
+                    face_toward_latlon: None,
+                })
             } else {
                 Err(anyhow!("node {} not in taxi graph for {}", id, airport_ident))
             }
@@ -205,6 +217,7 @@ pub fn resolve_destination(
         TaxiDestination::Coord(lat, lon) => Ok(DestinationResolution {
             node: nearest_node(graph, lat, lon)?,
             forbidden_edges: HashSet::new(),
+            face_toward_latlon: None,
         }),
         TaxiDestination::Runway(runway_ident) => resolve_runway_hold_short(
             conn,
@@ -281,6 +294,7 @@ fn resolve_runway_hold_short(
         return Ok(DestinationResolution {
             node: nearest_node(graph, lat, lon)?,
             forbidden_edges,
+            face_toward_latlon: None,
         });
     }
 
@@ -323,9 +337,29 @@ fn resolve_runway_hold_short(
                 airport_ident
             )
         })?;
+    // Pick the forbidden edge incident on the chosen hold-short node and
+    // grab its far endpoint's lat/lon. That's the direction the aircraft
+    // wants to face when parked at the hold-short — pointing at the
+    // runway, ready for "line up and wait" or a takeoff clearance.
+    let face_toward_latlon = forbidden_edges
+        .iter()
+        .find_map(|&i| {
+            let e = &graph.edges[i];
+            let other = if e.from_node == best.0 {
+                Some(e.to_node)
+            } else if e.to_node == best.0 {
+                Some(e.from_node)
+            } else {
+                None
+            }?;
+            let n = graph.nodes.get(&other)?;
+            Some((n.latitude_deg, n.longitude_deg))
+        });
+
     Ok(DestinationResolution {
         node: best.0,
         forbidden_edges,
+        face_toward_latlon,
     })
 }
 
