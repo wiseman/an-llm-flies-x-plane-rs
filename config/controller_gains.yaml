@@ -3,8 +3,8 @@ bank:
   kd: 0.03
   ki: 0.01
 pitch:
-  kp: 0.10
-  kd: 0.04
+  kp: 0.18
+  kd: 0.06
   ki: 0.01
 tecs:
   kp_total: 0.003

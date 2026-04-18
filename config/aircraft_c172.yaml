@@ -7,8 +7,8 @@ cruise_speed_kt: 95
 descent_speed_kt: 85
 downwind_speed_kt: 80
 base_speed_kt: 70
-final_speed_kt: 65
-vapp_kt: 65
+final_speed_kt: 62
+vapp_kt: 62
 vref_kt: 61
 vso_landing_kt: 48
 pattern:
