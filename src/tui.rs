@@ -265,6 +265,12 @@ pub fn run_tui(
 
     let mut input_buffer = String::new();
     let mut log_detail = true;
+    // None = follow live tail (default). Some(offset) = paused at that
+    // absolute scroll offset. Absolute rather than relative-to-bottom so
+    // new log lines arriving while scrolled don't move the viewport.
+    let mut log_scroll: Option<u16> = None;
+    let mut last_log_pin: u16 = 0;
+    let mut last_log_page: u16 = 10;
     let frame_interval = Duration::from_millis(100);
     let mut ptt_tracker = PttKeyTracker::default();
 
@@ -363,6 +369,22 @@ pub fn run_tui(
                     continue;
                 }
                 match k.code {
+                    KeyCode::PageUp => {
+                        let current = log_scroll.unwrap_or(last_log_pin);
+                        log_scroll = Some(current.saturating_sub(last_log_page));
+                        continue;
+                    }
+                    KeyCode::PageDown => {
+                        if let Some(v) = log_scroll {
+                            let next = v.saturating_add(last_log_page);
+                            log_scroll = if next >= last_log_pin { None } else { Some(next) };
+                        }
+                        continue;
+                    }
+                    KeyCode::End => {
+                        log_scroll = None;
+                        continue;
+                    }
                     KeyCode::Enter => {
                         // If PTT is mid-session, stop it so the final
                         // transcript lands before we submit.
@@ -489,12 +511,29 @@ pub fn run_tui(
             // and spill below the pane border. Using `line_count(inner_width)`
             // gives us the true rendered row count so we can skip the right
             // amount from the top.
-            let log_title = if log_detail { " LOG " } else { " LOG (compact) " };
+            let log_pin = pin_to_bottom(&log_lines, chunks[1]);
+            let inner_height = chunks[1].height.saturating_sub(2);
+            last_log_pin = log_pin;
+            last_log_page = inner_height.max(3).saturating_sub(1);
+            let (log_offset, scroll_indicator) = match log_scroll {
+                Some(v) => {
+                    let clamped = v.min(log_pin);
+                    let up = log_pin.saturating_sub(clamped);
+                    (clamped, if up > 0 { format!(" [↑{}]", up) } else { String::new() })
+                }
+                None => (log_pin, String::new()),
+            };
+            let base_title = if log_detail { " LOG " } else { " LOG (compact) " };
+            let log_title = if scroll_indicator.is_empty() {
+                base_title.to_string()
+            } else {
+                format!("{}{} ", base_title.trim_end(), scroll_indicator)
+            };
             let log_paragraph = Paragraph::new(log_lines.clone())
                 .block(Block::default().borders(Borders::ALL).title(log_title))
                 .wrap(Wrap { trim: false });
             f.render_widget(
-                log_paragraph.scroll((pin_to_bottom(&log_lines, chunks[1]), 0)),
+                log_paragraph.scroll((log_offset, 0)),
                 chunks[1],
             );
 
@@ -507,7 +546,7 @@ pub fn run_tui(
             );
 
             let input_title =
-                " INPUT — space/tab hold to talk · enter to send · ctrl-t log detail · ctrl-c to exit ";
+                " INPUT — space/tab hold to talk · enter to send · ctrl-t log detail · pgup/pgdn/end scroll log · ctrl-c to exit ";
             let ptt_snap: Option<PttSnapshot> = ptt.as_ref().map(|p| p.snapshot());
             let mut spans: Vec<Span> = vec![
                 Span::styled("> ", Style::default().fg(Color::Cyan)),
