@@ -1149,7 +1149,7 @@ fn phase_style(phase: &str) -> Style {
             Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
         }
         "go_around" => Style::default().fg(Color::LightRed).add_modifier(Modifier::BOLD),
-        _ => Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD),
+        _ => Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
     }
 }
 
