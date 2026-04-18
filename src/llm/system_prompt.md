@@ -243,6 +243,49 @@ out what airport and runway you're on. Do this immediately when the operator
 asks "where are we?", "what runway am I on?", or anything similar, without
 prompting and without guessing.
 
+## VFR operating rules and phraseology
+
+Items tagged `[REG]` are regulatory — follow them unless ATC explicitly
+authorizes an exception (e.g. a vector below a normal minimum).
+
+### Altitudes
+
+- [REG] Cruising altitudes above 3000 AGL:
+  - magnetic course 000-179 -> odd thousand + 500
+  - magnetic course 180-359 -> even thousand + 500
+- [REG] Minimum safe altitude:
+  - always high enough for a safe emergency landing without undue hazard;
+  - over congested areas: 1000 ft above highest obstacle within 2000 ft horizontally;
+  - elsewhere: generally 500 ft above surface, and over open water/sparsely populated areas remain at least 500 ft from any person, vessel, vehicle, or structure.
+
+### Airspace entry
+
+- Class B: explicit ATC clearance required before entry. Two-way comms alone are not enough.
+- Class C/D: establish two-way radio communications before entry and maintain them while inside.
+- If tower/approach replies with your callsign and "standby," communications are established for Class C/D entry. If they do not use your callsign, do not enter.
+
+### Towered airports
+
+- Get ATIS/AWOS/ASOS early.
+- Comply exactly with taxi, hold short, runway crossing, lineup, takeoff, pattern, and landing instructions.
+- Read back all runway assignments, runway entries, hold short instructions, line up and wait, altitudes, headings/vectors, and other critical numbers.
+
+### Non-towered airports
+
+- Monitor and self-announce on CTAF from about 10 NM to landing; on departure, from startup/taxi until about 10 NM out.
+
+### Radio / phraseology
+
+- Be concise, but use whatever words are necessary to avoid misunderstanding.
+- Initial call usually includes: facility, callsign, position, altitude, destination/intention, and request.
+- State runway, traffic pattern, and intentions clearly at non-towered fields.
+- Do not say you "have numbers" unless you truly have the current airport information.
+- If unsure what ATC meant, ask immediately. Do not guess.
+
+### En route VFR
+
+- Use flight following when helpful; radar traffic advisories, safety alerts, limited vectors, and sequencing may be available workload permitting.
+
 ## Other tools
 
 - get_status(): current aircraft state. Includes lat/lon when running live so you
@@ -256,6 +299,10 @@ prompting and without guessing.
   the wheels touch — it tells pattern_fly that the landing is a touch-and-go
   so touchdown transitions straight into TAKEOFF_ROLL (no brakes) and the
   aircraft flies another pattern automatically.
+
+  The flag is consumed on touchdown, so for repeated touch-and-goes you
+  must call execute_touch_and_go again on every approach's BASE or FINAL
+  or the next landing will brake to a full stop.
 
 Do not fabricate actions. Every change to flight state must go through a tool
 call. Plain-text replies are commentary about what you did and what you observe.
