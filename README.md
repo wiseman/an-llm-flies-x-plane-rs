@@ -1,146 +1,60 @@
-# xplane-pilot (Rust)
+# An LLM Flies X-Plane
 
-A Rust port of [xplane-pilot](../xplane-pilot/) — an LLM-driven autopilot for
-X-Plane 12 that flies a deterministic traffic pattern while an LLM handles ATC
-communication, mission decisions, and high-level pilot intent.
+Rust port of `xplane-pilot`: an LLM-driven pilot for X-Plane 12 that handles radio work, taxi and pattern decisions, and high-level mission intent while a deterministic flight-control stack flies the airplane.
 
-<a href="https://www.youtube.com/watch?v=5Z6APyCtDTM">
-  <img src="https://img.youtube.com/vi/5Z6APyCtDTM/maxresdefault.jpg" width="600" alt="Demo video">
-</a>
+## Concept
 
-## Design
+The model never writes elevator, aileron, rudder, or throttle directly. A 10 Hz deterministic control loop owns the actuators at all times. The LLM reads operator and ATC messages, reasons about the current situation, and calls tools that engage or reconfigure guidance profiles such as heading hold, cruise, takeoff, pattern flying, taxi, or line-up-and-wait.
 
-The flight control loop is deterministic and runs at 10 Hz — the LLM never
-touches elevator, aileron, rudder, or throttle directly. Instead, the LLM
-interprets operator and ATC messages into high-level actions (take off, fly a
-heading, enter the pattern at a specific runway, extend downwind, go around,
-execute a touch-and-go) by calling tools that mutate the pilot core's profile
-stack. Composable guidance profiles own axes (lateral, vertical, speed) and
-are merged each tick into a single set of actuator commands. A
-`PatternFlyProfile` wraps the full phase machine (TAKEOFF_ROLL through
-TAXI_CLEAR, plus GO_AROUND) and handles the entire traffic pattern
-autonomously once engaged. Single-axis profiles (`HeadingHoldProfile`,
-`AltitudeHoldProfile`, `SpeedHoldProfile`) can be composed for cross-country
-cruise legs. The X-Plane bridge communicates via the built-in web API on port
-8086 (REST for setup, WebSocket for real-time dataref reads and writes).
+Those profiles own flight-control axes and are merged into a single command set every tick. `engage_cruise` installs the three single-axis holds atomically; `engage_takeoff` and `engage_pattern_fly` own all three axes for runway and traffic-pattern work; `engage_taxi` and `engage_line_up` use the same deterministic ground controllers to drive the airplane across the airport surface and onto the runway centerline.
 
-## Tools
+The live backend talks to X-Plane through the built-in web API and uses X-Plane's own `apt.dat` as the source of truth. That data is parsed into DuckDB-backed parquet views for airports, runways, comms, taxi nodes, taxi edges, and optional airspaces, so the LLM can query real airport geometry instead of guessing runway numbers, frequencies, or taxi routes.
 
-| Tool | Description |
-|------|-------------|
-| `get_status` | JSON snapshot of aircraft state, phase, and active profiles |
-| `sleep` | End the LLM's turn; control loop keeps flying active profiles |
-| `engage_heading_hold` | Lateral heading hold (optional forced turn direction) |
-| `engage_altitude_hold` | Vertical altitude hold via TECS (Total Energy Control System) |
-| `engage_speed_hold` | Airspeed target hold |
-| `engage_cruise` | Atomic combo: heading + altitude + speed hold in one call |
-| `engage_pattern_fly` | Full deterministic pattern pilot anchored at a specific runway |
-| `engage_takeoff` | Takeoff sequence: full power, rotate at Vr, climb at Vy |
-| `takeoff_checklist` | Pre-takeoff readiness check (parking brake, flaps, gear, etc.) |
-| `disengage_profile` | Remove a named profile; idle profiles fill orphaned axes |
-| `list_profiles` | List currently active profile names |
-| `extend_downwind` | Push the base-turn point further out on the downwind leg |
-| `turn_base_now` | Force an immediate base turn (rebuilds base leg at current position) |
-| `go_around` | Command an immediate go-around |
-| `execute_touch_and_go` | Arm a touch-and-go: next touchdown skips braking and re-takes off |
-| `cleared_to_land` | Record a landing clearance |
-| `join_pattern` | Acknowledge a pattern-join instruction |
-| `tune_radio` | Set a COM radio frequency |
-| `broadcast_on_radio` | Transmit a message on a COM radio |
-| `set_parking_brake` | Engage or release the parking brake |
-| `set_flaps` | Set the flap handle position (0/10/20/30) |
-| `sql_query` | Read-only SQL against the worldwide runway/airport database (DuckDB) |
-| `plan_taxi_route` | Plan a taxi route via named taxiways to a runway (apt.dat taxi network). Planning only; does not engage the autopilot |
+## Tool Catalog
 
-## Running
+### State And Profile Control
 
-Requires a recent stable Rust toolchain (`cargo` via [rustup](https://rustup.rs)).
+| Tool | What it does |
+| --- | --- |
+| `get_status` | Returns a JSON snapshot of aircraft state, phase, active profiles, and live position when available. |
+| `sleep` | Ends the current LLM turn while the deterministic pilot keeps flying the active profiles. |
+| `engage_heading_hold` | Takes ownership of the lateral axis and turns to a target heading, optionally forcing left or right. |
+| `engage_altitude_hold` | Takes ownership of the vertical axis and holds a target altitude with TECS. |
+| `engage_speed_hold` | Takes ownership of the speed axis and holds a target IAS. |
+| `engage_cruise` | Atomically installs heading, altitude, and speed hold together. |
+| `disengage_profile` | Removes a named profile and lets uncovered axes fall back to idle profiles. |
+| `list_profiles` | Lists the currently active profile names. |
 
-```bash
-# Build.
-cargo build --release
+### Takeoff, Pattern, And Landing
 
-# Run the offline deterministic simulator (no X-Plane needed).
-./target/release/sim-pilot
+| Tool | What it does |
+| --- | --- |
+| `engage_takeoff` | Verifies runway alignment and starts the deterministic takeoff roll, rotation, and climb. |
+| `takeoff_checklist` | Reports takeoff readiness, including parking brake, flaps, and other live-state checks. |
+| `engage_pattern_fly` | Anchors the mission pilot to a real runway and flies a full traffic pattern from a chosen phase. |
+| `extend_downwind` | Pushes the base-turn point farther out while `pattern_fly` is active. |
+| `turn_base_now` | Forces an immediate base turn from downwind. |
+| `go_around` | Commands an immediate go-around during pattern flying. |
+| `execute_touch_and_go` | Arms the next landing to skip rollout braking and transition straight back to takeoff. |
+| `cleared_to_land` | Records a landing clearance for the active pattern. |
+| `join_pattern` | Acknowledges a pattern-entry instruction while `pattern_fly` is active. |
 
-# Run with a crosswind and write CSV + SVG plots.
-./target/release/sim-pilot --crosswind-kt 10 \
-  --log-csv output/flight.csv --plots-dir output/plots
+### Ground, Radio, And Airport Data
 
-# Connect to a live X-Plane 12 instance with the interactive TUI. The standard
-# X-Plane 12 install is auto-detected on macOS, and apt.dat is parsed into a
-# per-user zstd parquet cache on first run — rebuilt whenever apt.dat changes,
-# <10 ms to open on subsequent runs.
-./target/release/sim-pilot --backend xplane --interactive-atc
+| Tool | What it does |
+| --- | --- |
+| `tune_radio` | Tunes `com1` or `com2` to a frequency in MHz. |
+| `broadcast_on_radio` | Sends an actual radio transmission; plain text alone does not transmit to ATC. |
+| `set_parking_brake` | Engages or releases the parking brake. |
+| `set_flaps` | Sets flap handle position to `0`, `10`, `20`, or `30` degrees. |
+| `engage_line_up` | Crosses the hold short, enters the runway, aligns to runway heading, and stops in line-up position. |
+| `engage_taxi` | Plans and then flies a taxi route to a runway hold-short point with deterministic ground steering. |
+| `plan_taxi_route` | Plans a taxi route only, including legs, taxiway sequence, distance, and runway conflict zones. |
+| `sql_query` | Runs read-only SQL against the apt.dat-derived DuckDB views for airports, runways, comms, taxi network, and optional airspaces. |
 
-# Point at a specific apt.dat (e.g. non-standard install location).
-./target/release/sim-pilot --backend xplane --interactive-atc \
-  --apt-dat-path "/path/to/X-Plane 12/Global Scenery/Global Airports/Earth nav data/apt.dat"
+### Placeholder Schemas
 
-# Send an initial instruction to the LLM at startup.
-./target/release/sim-pilot --backend xplane --interactive-atc \
-  --atc-message "take off, fly one lap in the pattern, then land"
-
-# Run tests.
-cargo test
-```
-
-## Configuration
-
-The live backend requires:
-
-- **X-Plane 12.1.1+** with the web API enabled on port 8086 (Settings > Data Output > Web Server)
-- **An OpenAI API key** for the LLM worker that interprets ATC/operator messages
-- **Airport / runway / comm data** comes from X-Plane's own `apt.dat` (under `Global Scenery/Global Airports/Earth nav data/`). The pilot auto-detects the standard macOS install and builds a per-user **zstd GeoParquet cache** under `~/.cache/sim_pilot/apt-<hash>/` on first run — airports (~0.5 MB), runways (~0.9 MB), and comms (~0.4 MB). Full build takes ~0.8 s for the 360 MB source; the cache opens in <10 ms on every subsequent run and is rebuilt whenever apt.dat's mtime advances. Override with `--apt-dat-path` if your install is in a non-standard location. apt.dat stores every runway endpoint at 8-decimal (≈1 mm) precision and covers ~38k airports / ~38k runways / ~28k ATC frequencies worldwide.
-
-Create a `.env` file in the directory you run from (it is gitignored):
-
-```
-OPENAI_API_KEY=sk-...
-```
-
-Or export the variable directly:
-
-```bash
-export OPENAI_API_KEY=sk-...
-```
-
-The offline deterministic simulator (`--backend simple`, the default) does not
-require an API key or X-Plane.
-
-## Differences from the Python project
-
-This port keeps feature parity with the Python version for the flight control
-loop, LLM tool surface, and deterministic scenario runner. A couple of
-differences worth calling out:
-
-- **Streaming push-to-talk instead of batch Whisper.** Hold **space** in the
-  interactive TUI to dictate operator input; hold **tab** to dictate ATC
-  input (the result is prefixed with `[atc] ` before submission). Partial
-  transcripts stream into the input line via the OpenAI Realtime API
-  (`gpt-4o-mini-transcribe`); release the key to finalize, then press Enter
-  to send. Requires a working microphone and `OPENAI_API_KEY`. Release feel
-  is best on Kitty-keyboard-capable terminals (Ghostty, WezTerm, kitty,
-  iTerm2 with CSI u enabled); elsewhere there is a ~180 ms release tail.
-  Disable with `--no-voice`. The Python version did batch Whisper via
-  `sim_pilot/speech.py`.
-- **Runway / airport / comm truth comes from X-Plane's `apt.dat`**, not from
-  the ourairports CSV the Python project uses. The file is streamed into
-  three zstd GeoParquet tables (airports / runways / comms) under
-  `~/.cache/sim_pilot/apt-<hash>/` and queried via DuckDB at runtime; the
-  LLM's `sql_query` tool sees `airports`, `runways`, and `comms` views with
-  both scalar columns and computed GEOMETRY columns (ARP point, runway
-  centerline, per-end thresholds). Endpoint precision goes from 3 decimals
-  (ourairports) to 8 (apt.dat), and every runway has non-null coordinates.
-- **Extensions to the `sql_query` tool description** — additions over the
-  Python version: the three-table schema including `airport_comms`, "ALWAYS
-  prefix spatial functions with ST_", a warning that `ST_Distance_Sphere`
-  only accepts `POINT`s (it errors on a `LINESTRING`), and a worked
-  crosstrack / along-track example for off-centerline offset. Each was
-  added after observing the LLM stumble on the corresponding query against
-  DuckDB. Flagged in the source.
-
-Behavior of the deterministic pilot is anchored by the integration test
-`tests/test_scenario.rs::nominal_mission_completes_takeoff_to_rollout`, which
-matches the Python baseline touchdown position, centerline, sink rate, and
-max final bank.
+| Tool | Status |
+| --- | --- |
+| `engage_approach` | Exposed in the schema but currently returns `not yet implemented`. |
+| `engage_route_follow` | Exposed in the schema but currently returns `not yet implemented`. |
