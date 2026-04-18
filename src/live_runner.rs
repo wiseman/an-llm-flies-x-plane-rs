@@ -303,6 +303,13 @@ pub struct LiveRunConfig {
     pub engage_profile: String,
     pub apt_dat_cache_dir: Option<PathBuf>,
     pub log_file_path: Option<PathBuf>,
+    /// CSV + KML target paths for the flight-track recorder. `None`
+    /// disables the recorder. CSV is streamed once per second; KML is
+    /// emitted on clean shutdown.
+    pub track_paths: Option<(PathBuf, PathBuf)>,
+    /// Session name used in the KML Document/name element. Lines up with
+    /// the timestamp in the log/csv/kml filenames.
+    pub session_stem: String,
     pub heartbeat_interval_s: f64,
     pub heartbeat_enabled: bool,
     pub voice_enabled: bool,
@@ -453,6 +460,21 @@ pub fn run_live_xplane(base_config: ConfigBundle, runtime: LiveRunConfig) -> Res
         None
     };
 
+    let track_recorder: Option<Arc<PLMutex<crate::track::TrackRecorder>>> =
+        match &runtime.track_paths {
+            Some((csv, _kml)) => match crate::track::TrackRecorder::new(csv) {
+                Ok(r) => {
+                    bus.push_log(format!("track_csv={} (1 Hz)", csv.display()));
+                    Some(Arc::new(PLMutex::new(r)))
+                }
+                Err(e) => {
+                    bus.push_log(format!("track recorder disabled: {e}"));
+                    None
+                }
+            },
+            None => None,
+        };
+
     let control_stop = Arc::new(AtomicBool::new(false));
 
     if runtime.interactive {
@@ -462,6 +484,7 @@ pub fn run_live_xplane(base_config: ConfigBundle, runtime: LiveRunConfig) -> Res
         let runtime_for_loop = runtime.clone();
         let stop_for_loop = control_stop.clone();
         let pump_for_loop = heartbeat_pump.clone();
+        let track_for_loop = track_recorder.clone();
         let control_thread = thread::Builder::new().name("control-loop".into()).spawn(move || {
             run_control_loop(
                 bridge_for_loop,
@@ -470,6 +493,7 @@ pub fn run_live_xplane(base_config: ConfigBundle, runtime: LiveRunConfig) -> Res
                 runtime_for_loop,
                 stop_for_loop,
                 pump_for_loop,
+                track_for_loop,
             );
         })?;
         let ptt = if runtime.voice_enabled {
@@ -507,6 +531,7 @@ pub fn run_live_xplane(base_config: ConfigBundle, runtime: LiveRunConfig) -> Res
         llm_stop.store(true, Ordering::Release);
         let _ = control_thread.join();
         let _ = llm_thread.join();
+        finalize_track(&track_recorder, &runtime, &bus);
         bridge.close();
         bus.close();
         tui_result?;
@@ -518,13 +543,39 @@ pub fn run_live_xplane(base_config: ConfigBundle, runtime: LiveRunConfig) -> Res
             runtime.clone(),
             control_stop.clone(),
             heartbeat_pump.clone(),
+            track_recorder.clone(),
         );
         llm_stop.store(true, Ordering::Release);
         let _ = llm_thread.join();
+        finalize_track(&track_recorder, &runtime, &bus);
         bridge.close();
         bus.close();
     }
     Ok(())
+}
+
+/// Flush the in-memory point buffer to KML and log the outcome. Called
+/// from both the interactive and headless shutdown paths. Best-effort:
+/// failures are logged but not propagated, since the CSV is the durable
+/// artifact.
+fn finalize_track(
+    recorder: &Option<Arc<PLMutex<crate::track::TrackRecorder>>>,
+    runtime: &LiveRunConfig,
+    bus: &SimBus,
+) {
+    let Some(rec) = recorder else { return };
+    let Some((_, kml_path)) = &runtime.track_paths else {
+        return;
+    };
+    let guard = rec.lock();
+    match guard.write_kml(kml_path, &runtime.session_stem) {
+        Ok(_) => bus.push_log(format!(
+            "track_kml={} ({} points)",
+            kml_path.display(),
+            guard.len()
+        )),
+        Err(e) => bus.push_log(format!("track_kml write failed: {e}")),
+    }
 }
 
 fn run_control_loop(
@@ -534,10 +585,13 @@ fn run_control_loop(
     runtime: LiveRunConfig,
     stop: Arc<AtomicBool>,
     heartbeat_pump: Option<Arc<HeartbeatPump>>,
+    track_recorder: Option<Arc<PLMutex<crate::track::TrackRecorder>>>,
 ) {
     let mut last_state_time_s: Option<f64> = None;
     let target_period = Duration::from_secs_f64(1.0 / runtime.control_hz.max(1.0));
     let mut next_status_s = Instant::now() + Duration::from_secs_f64(runtime.status_interval_s);
+    let track_period = Duration::from_secs(1);
+    let mut next_track_s = Instant::now();
     while !stop.load(Ordering::Acquire) {
         let loop_start = Instant::now();
         let raw_state = match bridge.read_state() {
@@ -567,10 +621,59 @@ fn run_control_loop(
             bus.push_status(format_snapshot_display(snap.as_ref()));
             next_status_s = Instant::now() + Duration::from_secs_f64(runtime.status_interval_s);
         }
+        if let Some(recorder) = track_recorder.as_ref() {
+            if Instant::now() >= next_track_s {
+                sample_track(recorder, &bridge, &pilot, &bus);
+                next_track_s = Instant::now() + track_period;
+            }
+        }
         let elapsed = loop_start.elapsed();
         if elapsed < target_period {
             thread::sleep(target_period - elapsed);
         }
+    }
+}
+
+/// Pull a single position fix from the bridge + pilot snapshot and hand
+/// it to the track recorder. Runs on the control-loop cadence, throttled
+/// by the caller to ~1 Hz. Bridge lookup misses (pre-dataref resolution,
+/// or just before the first update arrives) silently skip the sample —
+/// the recorder will catch the next tick.
+fn sample_track(
+    recorder: &Arc<PLMutex<crate::track::TrackRecorder>>,
+    bridge: &Arc<XPlaneWebBridge>,
+    pilot: &Arc<PLMutex<PilotCore>>,
+    bus: &SimBus,
+) {
+    let tool_bridge: &dyn crate::llm::tools::ToolBridge = bridge.as_ref();
+    let lat = tool_bridge.get_dataref_value(crate::sim::datarefs::LATITUDE_DEG.name);
+    let lon = tool_bridge.get_dataref_value(crate::sim::datarefs::LONGITUDE_DEG.name);
+    let (Some(lat), Some(lon)) = (lat, lon) else {
+        return;
+    };
+    let snap = pilot.lock().latest_snapshot.clone();
+    let Some(snap) = snap else { return };
+    let state = &snap.state;
+    let pt = crate::track::TrackPoint {
+        wall_time: chrono::Utc::now(),
+        t_sim: state.t_sim,
+        lat_deg: lat,
+        lon_deg: lon,
+        alt_msl_ft: state.alt_msl_ft,
+        alt_agl_ft: state.alt_agl_ft,
+        heading_deg: state.heading_deg,
+        track_deg: state.track_deg,
+        ias_kt: state.ias_kt,
+        gs_kt: state.gs_kt,
+        vs_fpm: state.vs_fpm,
+        phase: snap
+            .phase
+            .map(|p| p.value().to_string())
+            .unwrap_or_else(|| "none".to_string()),
+        on_ground: state.on_ground,
+    };
+    if let Err(e) = recorder.lock().record(pt) {
+        bus.push_log(format!("[track] write error: {e}"));
     }
 }
 

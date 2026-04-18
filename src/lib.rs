@@ -7,6 +7,7 @@ pub mod guidance;
 pub mod live_runner;
 pub mod llm;
 pub mod sim;
+pub mod track;
 pub mod transcribe;
 pub mod tui;
 pub mod types;

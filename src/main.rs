@@ -92,6 +92,12 @@ struct Cli {
     #[arg(long)]
     no_log_file: bool,
 
+    /// Disable the default flight-track recorder (output/sim_pilot-<ts>.csv
+    /// streamed once per second, and output/sim_pilot-<ts>.kml written on
+    /// clean shutdown).
+    #[arg(long)]
+    no_track: bool,
+
     /// Idle-period before the heartbeat pump wakes the LLM (seconds). The
     /// pump also wakes immediately when automation state changes — a
     /// flight-phase transition, profile engage/disengage, or profile
@@ -171,15 +177,33 @@ fn resolve_apt_dat_cache(
     Ok(Some(cache.dir))
 }
 
-fn resolve_log_file_path(explicit: Option<PathBuf>, disabled: bool) -> Option<PathBuf> {
+fn default_session_stem() -> String {
+    format!("sim_pilot-{}", Local::now().format("%Y%m%d-%H%M%S"))
+}
+
+fn resolve_log_file_path(
+    explicit: Option<PathBuf>,
+    disabled: bool,
+    stem: &str,
+) -> Option<PathBuf> {
     if disabled {
         return None;
     }
     if let Some(p) = explicit {
         return Some(p);
     }
-    let ts = Local::now().format("%Y%m%d-%H%M%S");
-    Some(PathBuf::from("output").join(format!("sim_pilot-{}.log", ts)))
+    Some(PathBuf::from("output").join(format!("{}.log", stem)))
+}
+
+fn resolve_track_paths(disabled: bool, stem: &str) -> Option<(PathBuf, PathBuf)> {
+    if disabled {
+        return None;
+    }
+    let dir = PathBuf::from("output");
+    Some((
+        dir.join(format!("{}.csv", stem)),
+        dir.join(format!("{}.kml", stem)),
+    ))
 }
 
 fn load_dotenv(path: &Path) {
@@ -217,13 +241,20 @@ fn main() -> Result<()> {
                     "Live X-Plane runs do not yet support --log-csv or --plots-dir."
                 ));
             }
-            let log_file = resolve_log_file_path(args.log_file, args.no_log_file);
+            let session_stem = default_session_stem();
+            let log_file =
+                resolve_log_file_path(args.log_file, args.no_log_file, &session_stem);
+            let track_paths = resolve_track_paths(args.no_track, &session_stem);
             println!("backend=xplane");
             println!("xplane_host={}", args.xplane_host);
             println!("xplane_port={}", args.xplane_port);
             println!("llm_model={}", args.llm_model);
             if let Some(p) = &log_file {
                 println!("log_file={}", p.display());
+            }
+            if let Some((csv, kml)) = &track_paths {
+                println!("track_csv={}", csv.display());
+                println!("track_kml={}", kml.display());
             }
             let apt_dat_cache_dir =
                 resolve_apt_dat_cache(args.apt_dat_path, args.airspace_txt_path)?;
@@ -243,6 +274,8 @@ fn main() -> Result<()> {
                     engage_profile: args.engage_profile,
                     apt_dat_cache_dir,
                     log_file_path: log_file,
+                    track_paths,
+                    session_stem,
                     heartbeat_interval_s: args.heartbeat_interval,
                     heartbeat_enabled: !args.no_heartbeat,
                     voice_enabled: !args.no_voice,
