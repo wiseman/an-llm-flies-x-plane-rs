@@ -73,6 +73,9 @@ Keys:
 | Hold Space           | Push-to-talk as operator. Releasing finalizes the transcription.                                        |
 | Hold Tab             | Push-to-talk as ATC (auto-prefixed `[atc]`).                                                            |
 | Ctrl-T               | Toggle log-pane detail (compact vs full).                                                               |
+| Left / Right         | Move the input cursor one character.                                                                    |
+| Ctrl-A / Ctrl-E      | Smart home / end in the input pane. Repeated presses walk across wrapped visual rows.                   |
+| Ctrl-K               | Kill from the cursor to the end of the current visual row.                                              |
 | PgUp / PgDn / End    | Scroll the log pane. Home view auto-pins to the tail.                                                   |
 | Ctrl-C, Ctrl-D, Esc  | Exit cleanly (flushes the flight-track KML).                                                            |
 

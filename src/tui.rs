@@ -269,6 +269,10 @@ pub fn run_tui(
     let mut terminal = Terminal::new(backend)?;
 
     let mut input_buffer = String::new();
+    // Char offset into `input_buffer` where the next character will be
+    // inserted. All editing ops (insert, backspace, arrow keys, C-a/e/k)
+    // work relative to this point.
+    let mut input_cursor: usize = 0;
     let mut log_detail = true;
     // None = follow live tail (default). Some(offset) = paused at that
     // absolute scroll offset. Absolute rather than relative-to-bottom so
@@ -276,6 +280,9 @@ pub fn run_tui(
     let mut log_scroll: Option<u16> = None;
     let mut last_log_pin: u16 = 0;
     let mut last_log_page: u16 = 10;
+    // Content width of the input pane from the most recent draw. Used by
+    // C-a / C-e / C-k to compute which wrap segment the cursor is on.
+    let mut last_input_width: u16 = 0;
     let frame_interval = Duration::from_millis(100);
     let mut ptt_tracker = PttKeyTracker::default();
 
@@ -289,6 +296,7 @@ pub fn run_tui(
                     input_buffer.push(' ');
                 }
                 input_buffer.push_str(final_text.trim());
+                input_cursor = input_buffer.chars().count();
             }
         }
 
@@ -328,6 +336,27 @@ pub fn run_tui(
                             log_detail = !log_detail;
                             continue;
                         }
+                        KeyCode::Char('a') => {
+                            input_cursor =
+                                smart_home(input_cursor, last_input_width);
+                            continue;
+                        }
+                        KeyCode::Char('e') => {
+                            input_cursor = smart_end(
+                                input_cursor,
+                                &input_buffer,
+                                last_input_width,
+                            );
+                            continue;
+                        }
+                        KeyCode::Char('k') => {
+                            kill_to_row_end(
+                                &mut input_buffer,
+                                input_cursor,
+                                last_input_width,
+                            );
+                            continue;
+                        }
                         _ => {}
                     }
                 }
@@ -344,6 +373,7 @@ pub fn run_tui(
                         &k.code,
                         &mut ptt_tracker,
                         &mut input_buffer,
+                        &mut input_cursor,
                         ptt.as_deref(),
                     );
                     let now_recording = ptt_tracker
@@ -430,16 +460,35 @@ pub fn run_tui(
                             }
                         }
                         input_buffer.clear();
+                        input_cursor = 0;
                     }
                     KeyCode::Esc => {
                         break_outer(&stop_event);
                         break;
                     }
+                    KeyCode::Left => {
+                        if input_cursor > 0 {
+                            input_cursor -= 1;
+                        }
+                    }
+                    KeyCode::Right => {
+                        let total = input_buffer.chars().count();
+                        if input_cursor < total {
+                            input_cursor += 1;
+                        }
+                    }
                     KeyCode::Backspace => {
-                        input_buffer.pop();
+                        if input_cursor > 0 {
+                            let byte_idx =
+                                char_byte_index(&input_buffer, input_cursor - 1);
+                            input_buffer.remove(byte_idx);
+                            input_cursor -= 1;
+                        }
                     }
                     KeyCode::Char(c) => {
-                        input_buffer.push(c);
+                        let byte_idx = char_byte_index(&input_buffer, input_cursor);
+                        input_buffer.insert(byte_idx, c);
+                        input_cursor += 1;
                     }
                     _ => {}
                 }
@@ -551,7 +600,7 @@ pub fn run_tui(
             );
 
             let input_title =
-                " INPUT — space/tab hold to talk · enter to send · ctrl-t log detail · pgup/pgdn/end scroll log · ctrl-c to exit ";
+                " INPUT — space/tab hold to talk · enter to send · c-a/e/k edit · ctrl-t log detail · pgup/pgdn/end scroll log · ctrl-c to exit ";
             let ptt_snap: Option<PttSnapshot> = ptt.as_ref().map(|p| p.snapshot());
             let mut spans: Vec<Span> = vec![
                 Span::styled("> ", Style::default().fg(Color::Cyan)),
@@ -590,19 +639,21 @@ pub fn run_tui(
                 .wrap(Wrap { trim: false });
             f.render_widget(input_paragraph, chunks[3]);
 
+            let pane = chunks[3];
+            let content_width = pane.width.saturating_sub(2).max(1);
+            let content_height = pane.height.saturating_sub(2).max(1);
+            last_input_width = content_width;
             if !recording {
-                // Park the terminal cursor right after the user's typed
-                // text (before any dimmed PTT partial preview). Prompt
-                // "> " is two columns; input_buffer is ASCII in practice
-                // so char count is the visible width. Wrap into
-                // subsequent content rows if the line overflows; clamp
-                // to the last content row so we never escape the pane.
-                // Skipped during PTT recording so the animated amp-glyph
-                // is the sole visual "cursor".
-                let pane = chunks[3];
-                let content_width = pane.width.saturating_sub(2).max(1);
-                let content_height = pane.height.saturating_sub(2).max(1);
-                let consumed = 2u16.saturating_add(input_buffer.chars().count() as u16);
+                // Park the terminal cursor at `input_cursor` (not the end
+                // of the buffer) so emacs-style editing (C-a / C-e / C-k
+                // / Left / Right) shows visibly. Prompt "> " is two
+                // columns; input_buffer is ASCII in practice so char
+                // count is the visible width. Wrap into subsequent
+                // content rows if the line overflows; clamp to the last
+                // content row so we never escape the pane. Skipped
+                // during PTT recording so the animated amp-glyph is the
+                // sole visual "cursor".
+                let consumed = 2u16.saturating_add(input_cursor as u16);
                 let row = (consumed / content_width).min(content_height.saturating_sub(1));
                 let col = consumed % content_width;
                 f.set_cursor_position((pane.x + 1 + col, pane.y + 1 + row));
@@ -724,6 +775,7 @@ fn handle_ptt_key<P: PttControl + ?Sized>(
     code: &KeyCode,
     tracker: &mut PttKeyTracker,
     input_buffer: &mut String,
+    input_cursor: &mut usize,
     ptt: Option<&P>,
 ) {
     let key = match PttKey::from_code(code) {
@@ -744,12 +796,16 @@ fn handle_ptt_key<P: PttControl + ?Sized>(
     };
     match effective {
         KeyEventKind::Press => {
-            // Insert the char immediately; we'll strip it on first Repeat
-            // if it turns out this was a PTT hold.
-            match key {
-                PttKey::Space => input_buffer.push(' '),
-                PttKey::Tab => input_buffer.push('\t'),
-            }
+            // Insert the char at the cursor (not at end); we'll strip it
+            // on first Repeat if it turns out to be a PTT hold. For a
+            // bare tap the char stays where the user expected it.
+            let ch = match key {
+                PttKey::Space => ' ',
+                PttKey::Tab => '\t',
+            };
+            let byte_idx = char_byte_index(input_buffer, *input_cursor);
+            input_buffer.insert(byte_idx, ch);
+            *input_cursor += 1;
             tracker.pending = Some(PendingPtt {
                 key,
                 recording: false,
@@ -762,14 +818,22 @@ fn handle_ptt_key<P: PttControl + ?Sized>(
                 Some(p) if p.key == key && !p.recording
             );
             if should_start {
-                // Strip the stray character that was inserted on Press.
-                if matches!(input_buffer.chars().last(), Some(' ') | Some('\t')) {
-                    input_buffer.pop();
+                // Strip the stray character inserted on Press (at
+                // cursor-1, since Press advanced the cursor past it).
+                if *input_cursor > 0 {
+                    let prev_byte = char_byte_index(input_buffer, *input_cursor - 1);
+                    if matches!(input_buffer[prev_byte..].chars().next(), Some(' ') | Some('\t')) {
+                        input_buffer.remove(prev_byte);
+                        *input_cursor -= 1;
+                    }
                 }
                 if !key.prefix().is_empty() {
-                    // Surface the [atc] prefix in the visible buffer so
-                    // the user can see what source the final will use.
-                    input_buffer.push_str(key.prefix());
+                    // The [atc] prefix only parses correctly at the start
+                    // of the submitted line, so insert it at the head of
+                    // the buffer rather than at the cursor. Any in-progress
+                    // typed text is preserved after it.
+                    input_buffer.insert_str(0, key.prefix());
+                    *input_cursor += key.prefix().chars().count();
                 }
                 if let Some(p) = ptt {
                     p.start(
@@ -805,6 +869,84 @@ fn handle_ptt_key<P: PttControl + ?Sized>(
 
 fn break_outer(stop: &AtomicBool) {
     stop.store(true, Ordering::Release);
+}
+
+/// Convert a char index into a byte index inside `s`. Clamps to `s.len()`
+/// when the char index is beyond the end.
+fn char_byte_index(s: &str, char_idx: usize) -> usize {
+    s.char_indices().nth(char_idx).map(|(i, _)| i).unwrap_or(s.len())
+}
+
+/// The "> " prompt that precedes the input buffer in the INPUT pane. Every
+/// editing helper needs to account for it since it shifts everything on
+/// the first visual row two columns to the right.
+const PROMPT_COLS: usize = 2;
+
+/// Return the visual wrap row that `cursor` (a char index) is on given
+/// `width` content columns. Treats the buffer as single-width chars.
+fn cursor_row(cursor: usize, width: u16) -> (usize, usize) {
+    let w = (width as usize).max(1);
+    let disp_col = PROMPT_COLS + cursor;
+    (disp_col / w, w)
+}
+
+/// Char index of the first buffer char on visual row `row`, accounting
+/// for the prompt columns consumed on row 0.
+fn row_start_char(row: usize, width: u16) -> usize {
+    let w = (width as usize).max(1);
+    if row == 0 { 0 } else { row * w - PROMPT_COLS }
+}
+
+/// Char index one past the last char on visual row `row`, clamped to the
+/// total char count of the buffer.
+fn row_end_char(row: usize, width: u16, total: usize) -> usize {
+    let w = (width as usize).max(1);
+    ((row + 1) * w)
+        .checked_sub(PROMPT_COLS)
+        .unwrap_or(0)
+        .min(total)
+}
+
+/// C-a: "smart home". Move the cursor to the start of the current visual
+/// row; if already at the start of a row, jump up to the start of the
+/// previous row. Bottoms out at char 0. Mirrors the behavior Claude Code
+/// uses in its prompt input.
+fn smart_home(cursor: usize, width: u16) -> usize {
+    let (row, _) = cursor_row(cursor, width);
+    let row_start = row_start_char(row, width);
+    if cursor == row_start {
+        if row == 0 { 0 } else { row_start_char(row - 1, width) }
+    } else {
+        row_start
+    }
+}
+
+/// C-e: "smart end". Move the cursor to the end of the current visual
+/// row; if already at the end of a row with more content below, jump to
+/// the end of the next row. Saturates at the buffer's last char.
+fn smart_end(cursor: usize, buffer: &str, width: u16) -> usize {
+    let total = buffer.chars().count();
+    let (row, _) = cursor_row(cursor, width);
+    let row_end = row_end_char(row, width, total);
+    if cursor == row_end && row_end < total {
+        row_end_char(row + 1, width, total)
+    } else {
+        row_end
+    }
+}
+
+/// C-k: kill from the cursor to the end of the current visual row. Mutates
+/// `buffer` in place; the cursor position is unchanged (it still points at
+/// what used to be `cursor` — the first char after the killed range).
+fn kill_to_row_end(buffer: &mut String, cursor: usize, width: u16) {
+    let total = buffer.chars().count();
+    let (row, _) = cursor_row(cursor, width);
+    let row_end = row_end_char(row, width, total);
+    if cursor < row_end {
+        let start_byte = char_byte_index(buffer, cursor);
+        let end_byte = char_byte_index(buffer, row_end);
+        buffer.drain(start_byte..end_byte);
+    }
 }
 
 fn is_verbose_line(line: &str) -> bool {
@@ -1186,6 +1328,93 @@ mod tests {
         assert_eq!(wrap_degrees_180(190.0), -170.0);
     }
 
+    // ---- Emacs-style input editing ----------------------------------
+    //
+    // With content_width = 40 and a 2-col "> " prompt:
+    //   row 0 covers buffer chars  0..38
+    //   row 1 covers buffer chars 38..78
+    //   row 2 covers buffer chars 78..118
+
+    #[test]
+    fn smart_home_single_row_goes_to_start() {
+        assert_eq!(smart_home(15, 40), 0);
+    }
+
+    #[test]
+    fn smart_home_at_start_of_row_walks_up() {
+        // Cursor at start of row 2 (char 78) → start of row 1 (char 38).
+        assert_eq!(smart_home(78, 40), 38);
+        // Cursor at start of row 1 (char 38) → char 0.
+        assert_eq!(smart_home(38, 40), 0);
+        // Already at char 0 → no-op.
+        assert_eq!(smart_home(0, 40), 0);
+    }
+
+    #[test]
+    fn smart_home_mid_row_goes_to_row_start() {
+        // Cursor at char 50 is on row 1 (covers 38..78). Start of row 1 = 38.
+        assert_eq!(smart_home(50, 40), 38);
+    }
+
+    #[test]
+    fn smart_end_to_row_end() {
+        let buf: String = "x".repeat(100);
+        // Cursor at char 5 on row 0; end of row 0 = 38.
+        assert_eq!(smart_end(5, &buf, 40), 38);
+    }
+
+    #[test]
+    fn smart_end_at_row_end_walks_down() {
+        let buf: String = "x".repeat(100);
+        // Cursor at char 38 (end of row 0); next press goes to end of row 1 = 78.
+        assert_eq!(smart_end(38, &buf, 40), 78);
+        // Cursor at char 78 (end of row 1); next press goes to char 100 (buffer end).
+        assert_eq!(smart_end(78, &buf, 40), 100);
+        // Cursor at char 100 (end of buffer); no-op.
+        assert_eq!(smart_end(100, &buf, 40), 100);
+    }
+
+    #[test]
+    fn smart_end_clamps_to_buffer_length() {
+        let buf = "hello".to_string();
+        assert_eq!(smart_end(2, &buf, 40), 5);
+    }
+
+    #[test]
+    fn kill_to_row_end_truncates_within_row() {
+        let mut buf: String = "x".repeat(100);
+        // Cursor at char 20 on row 0 (covers 0..38). Kill → buffer[0..20] +
+        // buffer[38..100], which still leaves 82 chars.
+        kill_to_row_end(&mut buf, 20, 40);
+        assert_eq!(buf.len(), 82);
+    }
+
+    #[test]
+    fn kill_to_row_end_at_buffer_end_is_noop() {
+        let mut buf: String = "x".repeat(100);
+        // Cursor past the end of a 100-char buffer — nothing to kill.
+        kill_to_row_end(&mut buf, 100, 40);
+        assert_eq!(buf.len(), 100);
+    }
+
+    #[test]
+    fn kill_to_row_end_at_row_start_kills_whole_row() {
+        let mut buf: String = "x".repeat(100);
+        // Cursor at char 38 is the start of row 1 (emacs semantics: a
+        // position at a row transition belongs to the following row).
+        // C-k from here kills row 1's content: chars 38..78 = 40 chars.
+        kill_to_row_end(&mut buf, 38, 40);
+        assert_eq!(buf.len(), 60);
+    }
+
+    #[test]
+    fn kill_to_row_end_on_short_buffer_clamps() {
+        let mut buf = "hello world".to_string();
+        // Cursor at char 5; end of row 0 would be char 38, clamped to 11.
+        kill_to_row_end(&mut buf, 5, 40);
+        assert_eq!(buf, "hello");
+    }
+
     // ---- PTT key tracker tests ---------------------------------------
 
     use std::cell::RefCell;
@@ -1215,51 +1444,94 @@ mod tests {
         code: KeyCode,
         tracker: &mut PttKeyTracker,
         buffer: &mut String,
+        cursor: &mut usize,
         ptt: &FakePtt,
     ) {
-        handle_ptt_key(&kind, &code, tracker, buffer, Some(ptt));
+        handle_ptt_key(&kind, &code, tracker, buffer, cursor, Some(ptt));
     }
 
     #[test]
     fn single_space_press_inserts_char_no_ptt_start() {
         let mut tracker = PttKeyTracker::default();
         let mut buf = String::new();
+        let mut cursor = 0;
         let ptt = FakePtt::default();
         dispatch(
             KeyEventKind::Press,
             KeyCode::Char(' '),
             &mut tracker,
             &mut buf,
+            &mut cursor,
             &ptt,
         );
         assert_eq!(buf, " ");
+        assert_eq!(cursor, 1);
         assert!(ptt.calls.borrow().is_empty());
         assert!(tracker.pending.is_some());
+    }
+
+    #[test]
+    fn space_tap_mid_buffer_inserts_at_cursor_not_at_end() {
+        // Regression: tapping space with the cursor mid-buffer used to
+        // append the space to the end of the buffer and snap the cursor
+        // to the end. Now it should insert at the cursor and advance.
+        let mut tracker = PttKeyTracker::default();
+        let mut buf = String::from("helloworld");
+        let mut cursor = 5; // between "hello" and "world"
+        let ptt = FakePtt::default();
+        dispatch(
+            KeyEventKind::Press,
+            KeyCode::Char(' '),
+            &mut tracker,
+            &mut buf,
+            &mut cursor,
+            &ptt,
+        );
+        assert_eq!(buf, "hello world");
+        assert_eq!(cursor, 6);
+        // Release without a repeat — the space stays where the user put it.
+        dispatch(
+            KeyEventKind::Release,
+            KeyCode::Char(' '),
+            &mut tracker,
+            &mut buf,
+            &mut cursor,
+            &ptt,
+        );
+        assert_eq!(buf, "hello world");
+        assert_eq!(cursor, 6);
+        assert!(ptt.calls.borrow().is_empty());
+        assert!(tracker.pending.is_none());
     }
 
     #[test]
     fn space_press_plus_repeat_starts_ptt_and_strips_stray_char() {
         let mut tracker = PttKeyTracker::default();
         let mut buf = String::from("hello ");
+        let mut cursor = buf.chars().count();
         let ptt = FakePtt::default();
         dispatch(
             KeyEventKind::Press,
             KeyCode::Char(' '),
             &mut tracker,
             &mut buf,
+            &mut cursor,
             &ptt,
         );
         // After Press: "hello  " (the just-typed space).
         assert_eq!(buf, "hello  ");
+        assert_eq!(cursor, 7);
         dispatch(
             KeyEventKind::Repeat,
             KeyCode::Char(' '),
             &mut tracker,
             &mut buf,
+            &mut cursor,
             &ptt,
         );
         // Stray trailing space stripped; no prefix for operator mode.
         assert_eq!(buf, "hello ");
+        assert_eq!(cursor, 6);
         assert_eq!(*ptt.calls.borrow(), vec!["start:|prompt=conv".to_string()]);
         assert!(tracker.pending.as_ref().unwrap().recording);
     }
@@ -1268,24 +1540,30 @@ mod tests {
     fn tab_press_plus_repeat_starts_ptt_with_atc_prefix() {
         let mut tracker = PttKeyTracker::default();
         let mut buf = String::new();
+        let mut cursor = 0;
         let ptt = FakePtt::default();
         dispatch(
             KeyEventKind::Press,
             KeyCode::Tab,
             &mut tracker,
             &mut buf,
+            &mut cursor,
             &ptt,
         );
         assert_eq!(buf, "\t");
+        assert_eq!(cursor, 1);
         dispatch(
             KeyEventKind::Repeat,
             KeyCode::Tab,
             &mut tracker,
             &mut buf,
+            &mut cursor,
             &ptt,
         );
-        // Stray tab stripped, [atc] prefix inserted.
+        // Stray tab stripped, [atc] prefix prepended at buffer start
+        // (not at cursor) so parse_input_source sees it.
         assert_eq!(buf, "[atc] ");
+        assert_eq!(cursor, 6);
         assert_eq!(*ptt.calls.borrow(), vec!["start:[atc] |prompt=atc".to_string()]);
     }
 
@@ -1293,6 +1571,7 @@ mod tests {
     fn release_event_stops_ptt_only_when_recording() {
         let mut tracker = PttKeyTracker::default();
         let mut buf = String::new();
+        let mut cursor = 0;
         let ptt = FakePtt::default();
         // Press only (no repeat) → tap state, not recording.
         dispatch(
@@ -1300,6 +1579,7 @@ mod tests {
             KeyCode::Char(' '),
             &mut tracker,
             &mut buf,
+            &mut cursor,
             &ptt,
         );
         dispatch(
@@ -1307,6 +1587,7 @@ mod tests {
             KeyCode::Char(' '),
             &mut tracker,
             &mut buf,
+            &mut cursor,
             &ptt,
         );
         // Release after a tap should NOT fire stop (would be a no-op PTT).
@@ -1315,6 +1596,7 @@ mod tests {
 
         // Now simulate press + repeat (recording) + release.
         let mut buf2 = String::new();
+        let mut cursor2 = 0;
         let mut tracker2 = PttKeyTracker::default();
         let ptt2 = FakePtt::default();
         dispatch(
@@ -1322,6 +1604,7 @@ mod tests {
             KeyCode::Char(' '),
             &mut tracker2,
             &mut buf2,
+            &mut cursor2,
             &ptt2,
         );
         dispatch(
@@ -1329,6 +1612,7 @@ mod tests {
             KeyCode::Char(' '),
             &mut tracker2,
             &mut buf2,
+            &mut cursor2,
             &ptt2,
         );
         dispatch(
@@ -1336,6 +1620,7 @@ mod tests {
             KeyCode::Char(' '),
             &mut tracker2,
             &mut buf2,
+            &mut cursor2,
             &ptt2,
         );
         assert_eq!(
@@ -1351,26 +1636,31 @@ mod tests {
         // auto-repeat arrives as more `Press` events, not `Repeat`.
         let mut tracker = PttKeyTracker::default();
         let mut buf = String::new();
+        let mut cursor = 0;
         let ptt = FakePtt::default();
         dispatch(
             KeyEventKind::Press,
             KeyCode::Char(' '),
             &mut tracker,
             &mut buf,
+            &mut cursor,
             &ptt,
         );
         // First press inserts the space and marks pending.
         assert_eq!(buf, " ");
+        assert_eq!(cursor, 1);
         dispatch(
             KeyEventKind::Press, // not Repeat!
             KeyCode::Char(' '),
             &mut tracker,
             &mut buf,
+            &mut cursor,
             &ptt,
         );
         // The second Press is treated as a synthetic Repeat, stripping
         // the stray space and starting PTT.
         assert_eq!(buf, "");
+        assert_eq!(cursor, 0);
         assert_eq!(*ptt.calls.borrow(), vec!["start:|prompt=conv".to_string()]);
         assert!(tracker.pending.as_ref().unwrap().recording);
     }
@@ -1388,12 +1678,14 @@ mod tests {
             last_seen: Instant::now(),
         });
         let mut buf = String::new();
+        let mut cursor = 0;
         let ptt = FakePtt::default();
         dispatch(
             KeyEventKind::Release,
             KeyCode::Char(' '),
             &mut tracker,
             &mut buf,
+            &mut cursor,
             &ptt,
         );
         assert!(ptt.calls.borrow().is_empty());
