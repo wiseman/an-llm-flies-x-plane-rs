@@ -17,6 +17,6 @@ pattern:
   abeam_window_ft: 750
   default_extension_ft: 0
 flare:
-  roundout_height_ft: 20
+  roundout_height_ft: 10
   flare_start_ft: 10
   max_flare_pitch_deg: 9

@@ -50,6 +50,13 @@ pub const PARKING_BRAKE_RATIO: DatarefSpec = DatarefSpec::new("sim/cockpit2/cont
 pub const OVERRIDE_JOYSTICK_HEADING: DatarefSpec =
     DatarefSpec::new("sim/operation/override/override_joystick_heading");
 
+/// Required override for writes to left_brake_ratio / right_brake_ratio to
+/// take full effect. Without it X-Plane blends our writes with the pilot's
+/// (un-pressed) toe-brake joystick input, capping effective deceleration at
+/// ~15% of max-brake authority. Observed in live KWHP landings.
+pub const OVERRIDE_TOE_BRAKES: DatarefSpec =
+    DatarefSpec::new("sim/operation/override/override_toe_brakes");
+
 pub const COM1_FREQUENCY_HZ_833: DatarefSpec =
     DatarefSpec::new("sim/cockpit2/radios/actuators/com1_frequency_hz_833");
 pub const COM2_FREQUENCY_HZ_833: DatarefSpec =
@@ -88,6 +95,7 @@ pub const COMMAND_DATAREFS: &[DatarefSpec] = &[
     LEFT_BRAKE_RATIO,
     RIGHT_BRAKE_RATIO,
     OVERRIDE_JOYSTICK_HEADING,
+    OVERRIDE_TOE_BRAKES,
 ];
 
 pub const BOOTSTRAP_DATAREFS: &[DatarefSpec] = &[

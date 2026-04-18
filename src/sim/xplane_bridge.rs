@@ -21,7 +21,7 @@ use crate::sim::datarefs::{
     DatarefSpec, BOOTSTRAP_DATAREFS, COMMAND_DATAREFS, ELEVATION_M, FLAP_HANDLE_DEPLOY_RATIO,
     FLAP_HANDLE_REQUEST_RATIO, GEAR_HANDLE_DOWN, HEADING_DEG, IAS_KT, LATITUDE_DEG,
     LEFT_BRAKE_RATIO, LOCAL_VX_M_S, LOCAL_VZ_M_S, LONGITUDE_DEG, ON_GROUND_0,
-    OVERRIDE_JOYSTICK_HEADING, PITCH_DEG, P_DEG_S, Q_DEG_S, RIGHT_BRAKE_RATIO, ROLL_DEG, R_DEG_S,
+    OVERRIDE_JOYSTICK_HEADING, OVERRIDE_TOE_BRAKES, PITCH_DEG, P_DEG_S, Q_DEG_S, RIGHT_BRAKE_RATIO, ROLL_DEG, R_DEG_S,
     SIM_TIME_S, STATE_DATAREFS, THROTTLE_ALL, VS_FPM, YOKE_HEADING_RATIO, YOKE_PITCH_RATIO,
     YOKE_ROLL_RATIO, Y_AGL_M,
 };
@@ -272,12 +272,18 @@ impl XPlaneWebBridge {
         };
         bridge.subscribe_state()?;
         bridge.wait_for_initial_snapshot(timeout_secs)?;
-        let override_id = bridge.command_ids.lock().unwrap()[OVERRIDE_JOYSTICK_HEADING.name];
+        let (heading_id, toe_brakes_id) = {
+            let ids = bridge.command_ids.lock().unwrap();
+            (ids[OVERRIDE_JOYSTICK_HEADING.name], ids[OVERRIDE_TOE_BRAKES.name])
+        };
         bridge.send_message(json!({
             "req_id": bridge.next_req_id(),
             "type": "dataref_set_values",
             "params": {
-                "datarefs": [ { "id": override_id, "value": 1 } ]
+                "datarefs": [
+                    { "id": heading_id, "value": 1 },
+                    { "id": toe_brakes_id, "value": 1 },
+                ]
             }
         }))?;
         Ok(bridge)
@@ -539,12 +545,18 @@ impl XPlaneWebBridge {
     }
 
     pub fn close(&self) {
-        let override_id = self.command_ids.lock().unwrap()[OVERRIDE_JOYSTICK_HEADING.name];
+        let (heading_id, toe_brakes_id) = {
+            let ids = self.command_ids.lock().unwrap();
+            (ids[OVERRIDE_JOYSTICK_HEADING.name], ids[OVERRIDE_TOE_BRAKES.name])
+        };
         let _ = self.send_message(json!({
             "req_id": self.next_req_id(),
             "type": "dataref_set_values",
             "params": {
-                "datarefs": [ { "id": override_id, "value": 0 } ]
+                "datarefs": [
+                    { "id": heading_id, "value": 0 },
+                    { "id": toe_brakes_id, "value": 0 },
+                ]
             }
         }));
         let _ = self.ws.lock().unwrap().close(None);

@@ -65,8 +65,15 @@ impl TECSLite {
         }
 
         let energy_balance = balance_alt_w * altitude_error_ft - balance_spd_w * speed_error_kt;
+        // VS damping is counterproductive on a nominal glidepath (final
+        // wants a steady non-zero descent rate). Zero it out for Final so
+        // it doesn't oppose the commanded descent.
+        let kd_effective = match phase {
+            FlightPhase::Final => 0.0,
+            _ => self.gains.kd_balance,
+        };
         let pitch_cmd = pitch_trim + self.gains.kp_balance * energy_balance
-            + self.gains.kd_balance * (-vs_fpm);
+            + kd_effective * (-vs_fpm);
 
         (clamp(pitch_cmd, min_pitch, max_pitch), throttle_cmd)
     }
@@ -100,7 +107,7 @@ impl TECSLite {
         // meaningful weight (0.05) instead of being drowned out by the
         // speed term.
         match phase {
-            FlightPhase::Final => (0.004, 10.0, 3.5, 12.0, -10.0, 10.0),
+            FlightPhase::Final => (0.004, 10.0, 6.0, 12.0, -10.0, 10.0),
             FlightPhase::Base => (0.008, 8.5, 2.5, 14.0, -8.0, 10.0),
             FlightPhase::Descent => (0.009, 8.0, 1.0, 14.0, -6.0, 10.0),
             _ => (0.05, 8.0, 1.0, 15.0, -4.0, 12.0),
