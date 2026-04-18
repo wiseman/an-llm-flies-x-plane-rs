@@ -137,7 +137,7 @@ fn build_fake_parquet(dir: &std::path::Path, extra_blocks: &[String]) -> PathBuf
     let apt = synthesize_apt_dat(extra_blocks);
     let parsed = xplane_pilot::data::apt_dat::parse(apt.as_bytes())
         .expect("apt.dat fixture parses");
-    xplane_pilot::data::parquet::write_cache(&parsed, dir)
+    xplane_pilot::data::parquet::write_cache(&parsed, &[], dir)
         .expect("parquet cache writes");
     dir.to_path_buf()
 }

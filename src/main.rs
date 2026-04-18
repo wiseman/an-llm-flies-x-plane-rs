@@ -75,6 +75,15 @@ struct Cli {
     #[arg(long)]
     apt_dat_path: Option<PathBuf>,
 
+    /// Path to an X-Plane 12 airspace.txt (typically under Resources/default
+    /// data/airspaces/). When set — or when the default X-Plane 12 install
+    /// is detected — the file is parsed into an `airspaces.parquet` inside
+    /// the same apt.dat cache directory. Feeds the heartbeat's
+    /// inside/over/under/through airspace awareness. Class Q (danger) is
+    /// filtered out at parse time.
+    #[arg(long)]
+    airspace_txt_path: Option<PathBuf>,
+
     /// Path to a transcript log file. Defaults to output/sim_pilot-YYYYMMDD-HHMMSS.log.
     #[arg(long)]
     log_file: Option<PathBuf>,
@@ -124,20 +133,40 @@ fn resolve_scenario_name(explicit: Option<&str>, wind: Vec2) -> String {
 
 /// Resolve (and build-if-needed) the apt.dat-derived parquet cache. An
 /// explicit `--apt-dat-path` pins the source; otherwise we auto-detect the
-/// standard X-Plane 12 install. Returns `None` only when no apt.dat is
-/// locatable — the LLM's runway-lookup tools will then error cleanly.
-fn resolve_apt_dat_cache(apt_dat: Option<PathBuf>) -> Result<Option<PathBuf>> {
-    let explicit = apt_dat.is_some();
+/// standard X-Plane 12 install. The airspace.txt path is handled the same
+/// way — when present (explicit flag or autodetected), its airspaces are
+/// baked into `airspaces.parquet` in the same cache directory. Returns
+/// `None` only when no apt.dat is locatable — the LLM's runway-lookup
+/// tools will then error cleanly.
+fn resolve_apt_dat_cache(
+    apt_dat: Option<PathBuf>,
+    airspace_txt: Option<PathBuf>,
+) -> Result<Option<PathBuf>> {
+    let explicit_apt = apt_dat.is_some();
     let apt = apt_dat.or_else(apt_dat::default_apt_dat_path);
     let Some(apt) = apt else { return Ok(None) };
     if !apt.exists() {
-        if explicit {
+        if explicit_apt {
             return Err(anyhow!("apt.dat not found at {}", apt.display()));
         }
         return Ok(None);
     }
     println!("apt_dat_path={}", apt.display());
-    let cache = data_parquet::resolve(&apt)
+
+    let explicit_airspace = airspace_txt.is_some();
+    let airspace = airspace_txt.or_else(xplane_pilot::data::airspace::default_airspace_txt_path);
+    let airspace = match airspace {
+        Some(p) if p.exists() => Some(p),
+        Some(p) if explicit_airspace => {
+            return Err(anyhow!("airspace.txt not found at {}", p.display()));
+        }
+        _ => None,
+    };
+    if let Some(p) = &airspace {
+        println!("airspace_txt_path={}", p.display());
+    }
+
+    let cache = data_parquet::resolve(&apt, airspace.as_deref())
         .with_context(|| format!("building apt.dat parquet cache from {}", apt.display()))?;
     Ok(Some(cache.dir))
 }
@@ -196,7 +225,8 @@ fn main() -> Result<()> {
             if let Some(p) = &log_file {
                 println!("log_file={}", p.display());
             }
-            let apt_dat_cache_dir = resolve_apt_dat_cache(args.apt_dat_path)?;
+            let apt_dat_cache_dir =
+                resolve_apt_dat_cache(args.apt_dat_path, args.airspace_txt_path)?;
             if let Some(p) = &apt_dat_cache_dir {
                 println!("apt_dat_cache_dir={}", p.display());
             }

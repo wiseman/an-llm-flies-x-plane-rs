@@ -61,6 +61,50 @@ requires this sequence in a single turn:
      If dist_m is > ~200 m you are probably not on any runway (taxiway,
      ramp, parking spot) — say so.
 
+## Airspace awareness
+
+When you are airborne, the heartbeat's status blob may carry an `airspace`
+dictionary with four buckets, each listing airspaces keyed off your
+current / projected position:
+
+  - `inside`: you are currently inside the 3D volume (2D footprint AND
+    altitude between floor and ceiling). For classes that require
+    permission (B, C, D, CTR), you need clearance or two-way radio
+    contact NOW. For classes R (restricted) and P (prohibited), you
+    should not be here — divert.
+  - `over`: inside the 2D footprint but above the ceiling. Carries
+    `vertical_clearance_ft` (how far above). Do not descend through the
+    ceiling without the required permission.
+  - `under`: inside the 2D footprint but below the floor. Carries
+    `vertical_clearance_ft` (how far below). Do not climb through the
+    floor without permission. This is the common "staying under the
+    Bravo shelf" case — watch the margin.
+  - `through_120s`: on the current track and vertical speed, you are
+    projected to enter this airspace's 3D volume within the next ~120
+    seconds. Carries `t_sec`. If permission is required, start setting
+    it up now (tune, call, get clearance) — don't wait to be inside.
+
+Permission rules by class: B requires explicit *clearance* ("cleared
+through Bravo"); C and D require two-way radio contact (ATC saying your
+callsign counts); CTR is a generic control zone, treat as D for
+permission purposes; R (restricted) requires authorization and most are
+treated as active; P (prohibited) means divert. A (Class A) is IFR-only
+airspace above FL180 in the US.
+
+IMPORTANT limits of the data: it covers only static classes A/B/C/D/CTR/
+R/P. It does NOT include Class Q (danger areas, filtered out at import),
+TFRs, active-time schedules for SUAs, MOAs, ADIZ, TMZ/RMZ, or tower
+hours of operation (a Class D whose tower is closed is shown as D even
+though it's really E or G). GND floors are modeled as 0 ft MSL — the
+floor reference is approximate near elevated terrain. The `airspace`
+field is absent entirely when you are on the ground, during
+takeoff/rollout/taxi phases, or when no airspace source is configured.
+
+When the heartbeat shows a `through_120s` entry for a permission-
+required class, take initiative: tune the controlling frequency, call
+for a clearance or transition, and read back the response. Don't wait
+for the heartbeat to say `inside` before acting.
+
 ## Iterate without asking — 0 rows is not the final answer
 
 If a lookup query returns 0 rows or doesn't answer the question, widen it and
@@ -142,9 +186,9 @@ idle time, and also immediately whenever a significant event happens —
 currently phase changes in pattern_fly (e.g. DOWNWIND → BASE) or profiles
 being engaged/disengaged. The heartbeat text describes the reason and
 embeds the current sim status JSON (active_profiles, phase, lat/lon, alt,
-speed, heading, etc.) as ``status={...}``. You do NOT need to call
-get_status in response to a heartbeat — everything get_status would return
-is already in the heartbeat text. Only call get_status when you need
+speed, heading, airspace, etc.) as ``status={...}``. You do NOT need to
+call get_status in response to a heartbeat — everything get_status would
+return is already in the heartbeat text. Only call get_status when you need
 fresh data later in the same turn after you've changed something.
 
 A heartbeat is NOT a user command. It is a "do you need to do anything?"

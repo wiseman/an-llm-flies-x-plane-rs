@@ -27,15 +27,16 @@ use std::time::SystemTime;
 use anyhow::{anyhow, Context, Result};
 use duckdb::{params, Connection};
 
-use crate::data::apt_dat;
+use crate::data::{airspace, apt_dat};
 
-/// Names of the three parquet files inside a cache directory. Exposed so
+/// Names of the parquet files inside a cache directory. Exposed so
 /// `llm/tools.rs` can create views without hardcoding strings.
 pub const AIRPORTS_FILE: &str = "airports.parquet";
 pub const RUNWAYS_FILE: &str = "runways.parquet";
 pub const COMMS_FILE: &str = "comms.parquet";
 pub const TAXI_NODES_FILE: &str = "taxi_nodes.parquet";
 pub const TAXI_EDGES_FILE: &str = "taxi_edges.parquet";
+pub const AIRSPACES_FILE: &str = "airspaces.parquet";
 
 pub struct AptDatCache {
     pub dir: PathBuf,
@@ -57,7 +58,10 @@ impl AptDatCache {
     pub fn taxi_edges(&self) -> PathBuf {
         self.dir.join(TAXI_EDGES_FILE)
     }
-    pub fn all_files(&self) -> [PathBuf; 5] {
+    pub fn airspaces(&self) -> PathBuf {
+        self.dir.join(AIRSPACES_FILE)
+    }
+    pub fn apt_dat_files(&self) -> [PathBuf; 5] {
         [
             self.airports(),
             self.runways(),
@@ -66,25 +70,33 @@ impl AptDatCache {
             self.taxi_edges(),
         ]
     }
-    pub fn all_files_exist(&self) -> bool {
-        self.all_files().iter().all(|p| p.exists())
+    pub fn apt_dat_files_exist(&self) -> bool {
+        self.apt_dat_files().iter().all(|p| p.exists())
     }
 }
 
-/// Return a cache for `apt_dat`, rebuilding it if missing or older than the
-/// source. This is the single entry point callers outside this module
+/// Return a cache for `apt_dat`, rebuilding it if missing or older than
+/// any source file. If `airspace_txt` is `Some`, its rows are parsed into
+/// `airspaces.parquet` alongside the apt.dat outputs and its mtime is
+/// included in the freshness check; otherwise `airspaces.parquet` is not
+/// produced. This is the single entry point callers outside this module
 /// should use.
-pub fn resolve(apt_dat: &Path) -> Result<AptDatCache> {
+pub fn resolve(apt_dat: &Path, airspace_txt: Option<&Path>) -> Result<AptDatCache> {
     if !apt_dat.exists() {
         return Err(anyhow!("apt.dat not found at {}", apt_dat.display()));
     }
+    if let Some(p) = airspace_txt {
+        if !p.exists() {
+            return Err(anyhow!("airspace.txt not found at {}", p.display()));
+        }
+    }
     let cache = cache_for(apt_dat)?;
-    if cache_is_fresh(apt_dat, &cache)? {
+    if cache_is_fresh(apt_dat, airspace_txt, &cache)? {
         return Ok(cache);
     }
     fs::create_dir_all(&cache.dir)
         .with_context(|| format!("creating {}", cache.dir.display()))?;
-    build(apt_dat, &cache)
+    build(apt_dat, airspace_txt, &cache)
         .with_context(|| format!("building apt.dat parquet cache at {}", cache.dir.display()))?;
     Ok(cache)
 }
@@ -102,39 +114,74 @@ fn cache_for(apt_dat: &Path) -> Result<AptDatCache> {
     Ok(AptDatCache { dir })
 }
 
-fn cache_is_fresh(apt_dat: &Path, cache: &AptDatCache) -> Result<bool> {
-    if !cache.all_files_exist() {
+fn cache_is_fresh(
+    apt_dat: &Path,
+    airspace_txt: Option<&Path>,
+    cache: &AptDatCache,
+) -> Result<bool> {
+    if !cache.apt_dat_files_exist() {
         return Ok(false);
     }
-    let src = fs::metadata(apt_dat)?
-        .modified()
+    if airspace_txt.is_some() && !cache.airspaces().exists() {
+        return Ok(false);
+    }
+    let mut sources = vec![apt_dat];
+    if let Some(a) = airspace_txt {
+        sources.push(a);
+    }
+    let src_latest = sources
+        .iter()
+        .map(|p| {
+            fs::metadata(p)
+                .and_then(|m| m.modified())
+                .unwrap_or(SystemTime::UNIX_EPOCH)
+        })
+        .max()
         .unwrap_or(SystemTime::UNIX_EPOCH);
-    for f in cache.all_files() {
-        let dst = fs::metadata(&f)?.modified().unwrap_or(SystemTime::UNIX_EPOCH);
-        if dst < src {
+    let mut outs = cache.apt_dat_files().to_vec();
+    if airspace_txt.is_some() {
+        outs.push(cache.airspaces());
+    }
+    for f in &outs {
+        let dst = fs::metadata(f)?.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+        if dst < src_latest {
             return Ok(false);
         }
     }
     Ok(true)
 }
 
-fn build(apt_dat: &Path, cache: &AptDatCache) -> Result<()> {
+fn build(apt_dat: &Path, airspace_txt: Option<&Path>, cache: &AptDatCache) -> Result<()> {
     let parsed = apt_dat::parse_file(apt_dat)?;
-    write_parquets(&parsed, cache)
+    let airspaces = match airspace_txt {
+        Some(p) => airspace::parse_file(p)?,
+        None => Vec::new(),
+    };
+    write_parquets(&parsed, &airspaces, airspace_txt.is_some(), cache)
 }
 
 /// Public entry point for tests: feed the builder a pre-parsed apt.dat dump
 /// and write parquet into an arbitrary directory. Used by
 /// `tests/test_tool_dispatch.rs` to stand up a fixture without depending on
-/// the filesystem layout or `HOME`.
-pub fn write_cache(parsed: &apt_dat::ParsedAptDat, dir: &Path) -> Result<AptDatCache> {
+/// the filesystem layout or `HOME`. Airspaces are optional — pass `&[]` to
+/// skip the airspace parquet.
+pub fn write_cache(
+    parsed: &apt_dat::ParsedAptDat,
+    airspaces: &[airspace::ParsedAirspace],
+    dir: &Path,
+) -> Result<AptDatCache> {
     fs::create_dir_all(dir)?;
     let cache = AptDatCache { dir: dir.to_path_buf() };
-    write_parquets(parsed, &cache)?;
+    write_parquets(parsed, airspaces, !airspaces.is_empty(), &cache)?;
     Ok(cache)
 }
 
-fn write_parquets(parsed: &apt_dat::ParsedAptDat, cache: &AptDatCache) -> Result<()> {
+fn write_parquets(
+    parsed: &apt_dat::ParsedAptDat,
+    airspaces: &[airspace::ParsedAirspace],
+    write_airspaces: bool,
+    cache: &AptDatCache,
+) -> Result<()> {
     let conn = Connection::open_in_memory()?;
     conn.execute_batch("INSTALL spatial; LOAD spatial;")?;
     create_airport_table(&conn, &parsed.airports)?;
@@ -147,6 +194,10 @@ fn write_parquets(parsed: &apt_dat::ParsedAptDat, cache: &AptDatCache) -> Result
     copy_to_parquet(&conn, "comms", &cache.comms())?;
     copy_to_parquet(&conn, "taxi_nodes", &cache.taxi_nodes())?;
     copy_to_parquet(&conn, "taxi_edges", &cache.taxi_edges())?;
+    if write_airspaces {
+        create_airspace_table(&conn, airspaces)?;
+        copy_to_parquet(&conn, "airspaces", &cache.airspaces())?;
+    }
     Ok(())
 }
 
@@ -343,6 +394,85 @@ fn create_taxi_edge_table(conn: &Connection, edges: &[apt_dat::ParsedTaxiEdge]) 
     Ok(())
 }
 
+fn create_airspace_table(
+    conn: &Connection,
+    airspaces: &[airspace::ParsedAirspace],
+) -> Result<()> {
+    // Polygon stored as WKT text — no GEOMETRY columns on disk (keeps parquet
+    // portable and sidesteps the duckdb-rs panic on round-tripped GEOMETRY).
+    // The view in llm/tools.rs rebuilds the geometry via ST_GeomFromText.
+    // bbox columns are stored as scalars for predicate pushdown before the
+    // spatial contains check.
+    conn.execute_batch(
+        "CREATE TABLE airspaces_raw (
+            id BIGINT,
+            class VARCHAR,
+            name VARCHAR,
+            floor_ft_msl DOUBLE,
+            ceiling_ft_msl DOUBLE,
+            floor_is_gnd BOOLEAN,
+            ceiling_is_gnd BOOLEAN,
+            min_lat DOUBLE,
+            max_lat DOUBLE,
+            min_lon DOUBLE,
+            max_lon DOUBLE,
+            polygon_wkt VARCHAR
+        );",
+    )?;
+    {
+        let mut app = conn.appender("airspaces_raw")?;
+        for (i, a) in airspaces.iter().enumerate() {
+            let id = (i + 1) as i64;
+            let wkt = polygon_wkt(&a.vertices);
+            app.append_row(params![
+                id,
+                a.class,
+                a.name,
+                a.floor_ft_msl,
+                a.ceiling_ft_msl,
+                a.floor_is_gnd,
+                a.ceiling_is_gnd,
+                a.min_lat,
+                a.max_lat,
+                a.min_lon,
+                a.max_lon,
+                wkt,
+            ])?;
+        }
+        app.flush()?;
+    }
+    conn.execute_batch(
+        "CREATE TABLE airspaces AS
+         SELECT id, class, name, floor_ft_msl, ceiling_ft_msl,
+                floor_is_gnd, ceiling_is_gnd,
+                min_lat, max_lat, min_lon, max_lon, polygon_wkt
+         FROM airspaces_raw
+         ORDER BY ST_Hilbert(
+                      ST_Point(
+                          (min_lon + max_lon) * 0.5,
+                          (min_lat + max_lat) * 0.5
+                      ),
+                      ST_Extent(ST_MakeEnvelope(-180, -90, 180, 90))
+                  );",
+    )?;
+    Ok(())
+}
+
+fn polygon_wkt(vertices: &[(f64, f64)]) -> String {
+    let mut s = String::with_capacity(vertices.len() * 32);
+    s.push_str("POLYGON ((");
+    for (i, (lat, lon)) in vertices.iter().enumerate() {
+        if i > 0 {
+            s.push_str(", ");
+        }
+        // WKT order is (lon lat). Use a fixed-precision format so the file
+        // is reproducible.
+        s.push_str(&format!("{:.7} {:.7}", lon, lat));
+    }
+    s.push_str("))");
+    s
+}
+
 fn create_comm_table(conn: &Connection, comms: &[apt_dat::ParsedComm]) -> Result<()> {
     conn.execute_batch(
         "CREATE TABLE comms (
@@ -391,16 +521,102 @@ mod tests {
     fn build_fixture_cache() -> (tempfile::TempDir, AptDatCache) {
         let dir = tempfile::tempdir().unwrap();
         let parsed = parse(FIXTURE.as_bytes()).unwrap();
-        let cache = write_cache(&parsed, dir.path()).unwrap();
+        let cache = write_cache(&parsed, &[], dir.path()).unwrap();
         (dir, cache)
     }
 
     #[test]
     fn parquet_cache_has_all_files() {
         let (_tmp, cache) = build_fixture_cache();
-        for f in cache.all_files() {
+        for f in cache.apt_dat_files() {
             assert!(f.exists(), "missing {}", f.display());
         }
+        // airspace parquet is opt-in; the default fixture passes none, so
+        // that file should be absent.
+        assert!(!cache.airspaces().exists());
+    }
+
+    #[test]
+    #[ignore = "requires the real X-Plane 12 install; run with `cargo test -- --ignored`"]
+    fn resolve_builds_full_cache_against_real_xplane_install() {
+        let apt = crate::data::apt_dat::default_apt_dat_path()
+            .expect("X-Plane 12 install detected");
+        let airspace = crate::data::airspace::default_airspace_txt_path()
+            .expect("airspace.txt present next to apt.dat");
+        let cache = resolve(&apt, Some(airspace.as_path())).unwrap();
+        for f in cache.apt_dat_files() {
+            assert!(f.exists(), "missing {}", f.display());
+        }
+        assert!(cache.airspaces().exists(), "airspaces parquet not built");
+        // Sanity-check airspace row count lands in the expected ballpark
+        // (19,382 after dropping Q at parse time on the shipped apt.dat).
+        let conn = Connection::open_in_memory().unwrap();
+        let n: i64 = conn
+            .query_row(
+                &format!(
+                    "SELECT COUNT(*) FROM read_parquet('{}')",
+                    cache.airspaces().display()
+                ),
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(n > 10_000, "airspace count suspiciously low: {}", n);
+    }
+
+    #[test]
+    fn airspaces_parquet_round_trips() {
+        use crate::data::airspace;
+        let dir = tempfile::tempdir().unwrap();
+        let parsed = parse(FIXTURE.as_bytes()).unwrap();
+        let airspace_fixture = "\
+AC B
+AN SAN FRANCISCO
+AL 1500 MSL
+AH 10000 MSL
+DP 37:30:00 N 122:30:00 W
+DP 37:50:00 N 122:30:00 W
+DP 37:50:00 N 122:10:00 W
+DP 37:30:00 N 122:10:00 W
+";
+        let airspaces = airspace::parse(airspace_fixture.as_bytes()).unwrap();
+        let cache = write_cache(&parsed, &airspaces, dir.path()).unwrap();
+        assert!(cache.airspaces().exists());
+
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("INSTALL spatial; LOAD spatial;").unwrap();
+        let (class, name, floor, ceiling): (String, String, f64, f64) = conn
+            .query_row(
+                &format!(
+                    "SELECT class, name, floor_ft_msl, ceiling_ft_msl \
+                     FROM read_parquet('{}')",
+                    cache.airspaces().display()
+                ),
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(class, "B");
+        assert_eq!(name, "SAN FRANCISCO");
+        assert_eq!(floor, 1500.0);
+        assert_eq!(ceiling, 10000.0);
+
+        // WKT polygon should decode back to a 5-vertex closed ring (4 input
+        // + 1 closure) whose bbox matches the airspace bbox columns.
+        let (poly_wkt, n_points): (String, i64) = conn
+            .query_row(
+                &format!(
+                    "SELECT polygon_wkt, \
+                            ST_NPoints(ST_GeomFromText(polygon_wkt)) \
+                     FROM read_parquet('{}')",
+                    cache.airspaces().display()
+                ),
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert!(poly_wkt.starts_with("POLYGON"));
+        assert_eq!(n_points, 5);
     }
 
     #[test]

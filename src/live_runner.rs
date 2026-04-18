@@ -60,6 +60,7 @@ pub struct HeartbeatPump {
     pub pilot: Arc<parking_lot::Mutex<PilotCore>>,
     pub bus: Option<SimBus>,
     pub bridge: Option<Arc<dyn crate::llm::tools::ToolBridge>>,
+    pub airspace: Option<crate::data::airspace_query::AirspaceSource>,
     pub input_queue: Sender<IncomingMessage>,
     pub heartbeat_interval_s: f64,
     pub poll_interval_s: f64,
@@ -81,6 +82,7 @@ impl HeartbeatPump {
             pilot,
             bus,
             bridge: None,
+            airspace: None,
             input_queue,
             heartbeat_interval_s,
             poll_interval_s: 0.5,
@@ -98,6 +100,14 @@ impl HeartbeatPump {
 
     pub fn with_bridge(mut self, bridge: Arc<dyn crate::llm::tools::ToolBridge>) -> Self {
         self.bridge = Some(bridge);
+        self
+    }
+
+    pub fn with_airspace(
+        mut self,
+        src: crate::data::airspace_query::AirspaceSource,
+    ) -> Self {
+        self.airspace = Some(src);
         self
     }
 
@@ -156,6 +166,7 @@ impl HeartbeatPump {
                 let status = crate::llm::tools::build_status_payload(
                     Some(&snapshot),
                     self.bridge.as_deref(),
+                    self.airspace.as_ref(),
                 );
                 let text = format!("{} | status={}", reason, serde_json::to_string(&status).unwrap());
                 let _ = self.input_queue.send(IncomingMessage::heartbeat(text));
@@ -169,7 +180,16 @@ impl HeartbeatPump {
         let last_input = st.last_user_input_s.max(st.last_heartbeat_s);
         if now - last_input >= self.heartbeat_interval_s {
             st.last_heartbeat_s = now;
-            let status = crate::llm::tools::build_status_payload(Some(&snapshot), None);
+            // Periodic check-in now threads the bridge through so the
+            // airspace section stays populated on the "nothing happened
+            // in heartbeat_interval" path — that's exactly when the LLM
+            // most benefits from proactive airspace awareness on a long
+            // stable leg.
+            let status = crate::llm::tools::build_status_payload(
+                Some(&snapshot),
+                self.bridge.as_deref(),
+                self.airspace.as_ref(),
+            );
             let text = format!(
                 "periodic check-in | status={}",
                 serde_json::to_string(&status).unwrap()
@@ -360,6 +380,24 @@ pub fn run_live_xplane(base_config: ConfigBundle, runtime: LiveRunConfig) -> Res
 
     let llm_client = Arc::new(ResponsesClient::new(runtime.llm_model.clone()));
     let cache_stats = llm_client.cache_stats.clone();
+    // One DuckDB connection slot, shared between the LLM's tool handlers
+    // (via ToolContext.runway_conn) and the heartbeat airspace query. Both
+    // serialize on the mutex — DuckDB connections aren't safe for
+    // concurrent use across threads.
+    let shared_duck_conn: Arc<Mutex<Option<duckdb::Connection>>> = Arc::new(Mutex::new(None));
+    let airspace_source = runtime.apt_dat_cache_dir.as_ref().and_then(|dir| {
+        if dir.join(crate::data::parquet::AIRSPACES_FILE).exists() {
+            Some(crate::data::airspace_query::AirspaceSource {
+                conn: shared_duck_conn.clone(),
+                cache_dir: dir.clone(),
+            })
+        } else {
+            None
+        }
+    });
+    if airspace_source.is_some() {
+        bus.push_log("airspace awareness enabled".to_string());
+    }
     let tool_ctx = Arc::new(ToolContext {
         pilot: pilot_arc.clone(),
         bridge: Some(tool_bridge),
@@ -367,7 +405,7 @@ pub fn run_live_xplane(base_config: ConfigBundle, runtime: LiveRunConfig) -> Res
         recent_broadcasts: Arc::new(PLMutex::new(Vec::new())),
         apt_dat_cache_dir: runtime.apt_dat_cache_dir.clone(),
         bus: Some(bus.clone()),
-        runway_conn: Arc::new(Mutex::new(None)),
+        runway_conn: shared_duck_conn.clone(),
     });
 
     let llm_stop = Arc::new(AtomicBool::new(false));
@@ -394,16 +432,18 @@ pub fn run_live_xplane(base_config: ConfigBundle, runtime: LiveRunConfig) -> Res
 
     let heartbeat_pump = if runtime.heartbeat_enabled {
         let clock: Arc<dyn Clock> = Arc::new(RealClock);
-        let pump = Arc::new(
-            HeartbeatPump::new(
-                pilot_arc.clone(),
-                Some(bus.clone()),
-                input_tx.clone(),
-                runtime.heartbeat_interval_s,
-                clock,
-            )
-            .with_bridge(bridge.clone() as Arc<dyn ToolBridge>),
-        );
+        let mut pump_builder = HeartbeatPump::new(
+            pilot_arc.clone(),
+            Some(bus.clone()),
+            input_tx.clone(),
+            runtime.heartbeat_interval_s,
+            clock,
+        )
+        .with_bridge(bridge.clone() as Arc<dyn ToolBridge>);
+        if let Some(src) = &airspace_source {
+            pump_builder = pump_builder.with_airspace(src.clone());
+        }
+        let pump = Arc::new(pump_builder);
         bus.push_log(format!(
             "heartbeat pump started interval={:.0}s",
             runtime.heartbeat_interval_s

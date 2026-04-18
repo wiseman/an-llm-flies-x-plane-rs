@@ -21,8 +21,9 @@ use crate::core::profiles::{
     AltitudeHoldProfile, HeadingHoldProfile, PatternFlyProfile, SpeedHoldProfile, TakeoffProfile,
     TaxiProfile,
 };
+use crate::data::airspace_query::{self, AircraftSnapshot, AirspaceSource};
 use crate::data::parquet::{
-    AIRPORTS_FILE, COMMS_FILE, RUNWAYS_FILE, TAXI_EDGES_FILE, TAXI_NODES_FILE,
+    AIRPORTS_FILE, AIRSPACES_FILE, COMMS_FILE, RUNWAYS_FILE, TAXI_EDGES_FILE, TAXI_NODES_FILE,
 };
 use crate::guidance::runway_geometry::RunwayFrame;
 use crate::guidance::taxi_route::{self, TaxiDestination};
@@ -97,7 +98,11 @@ fn pilot_reference_label(ctx: &ToolContext) -> String {
     parts.join(" ")
 }
 
-pub fn build_status_payload(snapshot: Option<&StatusSnapshot>, bridge: Option<&dyn ToolBridge>) -> Value {
+pub fn build_status_payload(
+    snapshot: Option<&StatusSnapshot>,
+    bridge: Option<&dyn ToolBridge>,
+    airspace: Option<&AirspaceSource>,
+) -> Value {
     let Some(snapshot) = snapshot else {
         return json!({ "status": "uninitialized" });
     };
@@ -109,7 +114,7 @@ pub fn build_status_payload(snapshot: Option<&StatusSnapshot>, bridge: Option<&d
         ),
         None => (None, None),
     };
-    json!({
+    let mut obj = json!({
         "t_sim": round_f64(state.t_sim, 2),
         "active_profiles": snapshot.active_profiles.clone(),
         "phase": snapshot.phase.map(|p| p.value().to_string()),
@@ -128,7 +133,70 @@ pub fn build_status_payload(snapshot: Option<&StatusSnapshot>, bridge: Option<&d
         "throttle_pos": round_f64(state.throttle_pos, 2),
         "flap_index": state.flap_index,
         "gear_down": state.gear_down,
-    })
+    });
+
+    // Airspace awareness is gated on (a) a live lat/lon (otherwise there's
+    // no global position to query against) and (b) being airborne — on the
+    // ground or during takeoff-roll / rollout / taxi the airspace lines
+    // would be pure noise.
+    if let (Some(src), Some(lat), Some(lon)) = (airspace, lat_deg, lon_deg) {
+        if airspace_emission_enabled(state.on_ground, snapshot.phase) {
+            if let Some(v) = query_airspace_value(
+                src,
+                AircraftSnapshot {
+                    lat_deg: lat,
+                    lon_deg: lon,
+                    alt_msl_ft: state.alt_msl_ft,
+                    track_deg: state.track_deg,
+                    gs_kt: state.gs_kt,
+                    vs_fpm: state.vs_fpm,
+                },
+            ) {
+                if !v.is_null() {
+                    obj.as_object_mut()
+                        .unwrap()
+                        .insert("airspace".into(), v);
+                }
+            }
+        }
+    }
+    obj
+}
+
+fn airspace_emission_enabled(on_ground: bool, phase: Option<FlightPhase>) -> bool {
+    if on_ground {
+        return false;
+    }
+    match phase {
+        Some(FlightPhase::Preflight)
+        | Some(FlightPhase::TakeoffRoll)
+        | Some(FlightPhase::Rollout)
+        | Some(FlightPhase::TaxiClear) => false,
+        _ => true,
+    }
+}
+
+/// Open (or reuse) the airspace DuckDB connection, run the query, and
+/// format the result. Returns `Value::Null` when the query has nothing to
+/// report or the connection can't be opened (missing parquet, etc.) so
+/// the caller can omit the `"airspace"` key.
+fn query_airspace_value(src: &AirspaceSource, snap: AircraftSnapshot) -> Option<Value> {
+    let mut guard = src.conn.lock().ok()?;
+    if guard.is_none() {
+        let airports = src.cache_dir.join(AIRPORTS_FILE);
+        let runways = src.cache_dir.join(RUNWAYS_FILE);
+        let comms = src.cache_dir.join(COMMS_FILE);
+        if !airports.exists() || !runways.exists() || !comms.exists() {
+            return None;
+        }
+        match open_apt_dat_parquet(&airports, &runways, &comms) {
+            Ok(c) => *guard = Some(c),
+            Err(_) => return None,
+        }
+    }
+    let conn = guard.as_ref().unwrap();
+    let states = airspace_query::query_airspace_states(conn, snap).ok()?;
+    Some(airspace_query::format_states_json(&states))
 }
 
 fn round_f64(v: f64, places: u32) -> f64 {
@@ -147,7 +215,28 @@ pub fn tool_get_status(ctx: &ToolContext, _args: &Map<String, Value>) -> String 
     let snap = pilot.latest_snapshot.clone();
     drop(pilot);
     let bridge_ref: Option<&dyn ToolBridge> = ctx.bridge.as_deref();
-    serde_json::to_string(&build_status_payload(snap.as_ref(), bridge_ref)).unwrap()
+    let airspace = airspace_source(ctx);
+    serde_json::to_string(&build_status_payload(
+        snap.as_ref(),
+        bridge_ref,
+        airspace.as_ref(),
+    ))
+    .unwrap()
+}
+
+/// Derive an `AirspaceSource` from a `ToolContext`, sharing its
+/// `runway_conn` so the heartbeat and the LLM's tool calls reuse a single
+/// DuckDB connection (DuckDB connections are not safe for concurrent use
+/// across threads anyway, so sharing via mutex is correct).
+pub fn airspace_source(ctx: &ToolContext) -> Option<AirspaceSource> {
+    let dir = ctx.apt_dat_cache_dir.as_ref()?;
+    if !dir.join(AIRSPACES_FILE).exists() {
+        return None;
+    }
+    Some(AirspaceSource {
+        conn: ctx.runway_conn.clone(),
+        cache_dir: dir.clone(),
+    })
 }
 
 pub fn tool_sleep(_ctx: &ToolContext, _args: &Map<String, Value>) -> String {
@@ -287,7 +376,7 @@ fn ensure_runway_conn(ctx: &ToolContext) -> Result<()> {
     Ok(())
 }
 
-fn open_apt_dat_parquet(
+pub fn open_apt_dat_parquet(
     airports: &std::path::Path,
     runways: &std::path::Path,
     comms: &std::path::Path,
@@ -342,6 +431,21 @@ fn open_apt_dat_parquet(
         taxi_nodes = dir_join(airports, TAXI_NODES_FILE).display(),
         taxi_edges = dir_join(airports, TAXI_EDGES_FILE).display(),
     ))?;
+    // The airspaces parquet is opt-in (built only when airspace.txt was
+    // located). The view is registered only when the file is present so
+    // that cache directories built before airspace support still work.
+    let airspaces = dir_join(airports, AIRSPACES_FILE);
+    if airspaces.exists() {
+        conn.execute_batch(&format!(
+            "CREATE VIEW airspaces AS
+               SELECT id, class, name, floor_ft_msl, ceiling_ft_msl,
+                      floor_is_gnd, ceiling_is_gnd,
+                      min_lat, max_lat, min_lon, max_lon, polygon_wkt,
+                      ST_GeomFromText(polygon_wkt) AS footprint
+               FROM read_parquet('{airspaces}');",
+            airspaces = airspaces.display(),
+        ))?;
+    }
     Ok(conn)
 }
 
