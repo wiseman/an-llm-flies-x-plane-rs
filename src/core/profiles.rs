@@ -535,7 +535,12 @@ impl PatternFlyProfile {
                 target_heading_deg: Some(self.runway_frame.runway.course_deg),
                 target_pitch_deg: Some(0.0),
                 throttle_limit: Some((0.0, 0.0)),
-                brakes: 1.0,
+                // Back off from 1.0 -- live runs showed tire smoke
+                // (skid) at full stick, which gives less deceleration
+                // than threshold braking AND makes visual/noise cues
+                // bad. 0.75 stays above the locked-tire regime while
+                // still getting ~0.25 g of deceleration.
+                brakes: 0.75,
                 ..Default::default()
             },
             _ => GuidanceTargets {

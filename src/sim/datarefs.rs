@@ -83,6 +83,8 @@ pub const STATE_DATAREFS: &[DatarefSpec] = &[
     SIM_TIME_S,
     ON_GROUND_0,
     PARKING_BRAKE_RATIO,
+    COM1_FREQUENCY_HZ_833,
+    COM2_FREQUENCY_HZ_833,
 ];
 
 pub const COMMAND_DATAREFS: &[DatarefSpec] = &[
