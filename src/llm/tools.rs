@@ -107,12 +107,14 @@ pub fn build_status_payload(
         return json!({ "status": "uninitialized" });
     };
     let state = &snapshot.state;
-    let (lat_deg, lon_deg) = match bridge {
+    let (lat_deg, lon_deg, has_crashed) = match bridge {
         Some(b) => (
             b.get_dataref_value(LATITUDE_DEG.name),
             b.get_dataref_value(LONGITUDE_DEG.name),
+            b.get_dataref_value(crate::sim::datarefs::HAS_CRASHED.name)
+                .map(|v| v >= 0.5),
         ),
-        None => (None, None),
+        None => (None, None, None),
     };
     let mut obj = json!({
         "t_sim": round_f64(state.t_sim, 2),
@@ -134,6 +136,11 @@ pub fn build_status_payload(
         "flap_index": state.flap_index,
         "gear_down": state.gear_down,
     });
+    if let Some(crashed) = has_crashed {
+        obj.as_object_mut()
+            .unwrap()
+            .insert("has_crashed".into(), Value::Bool(crashed));
+    }
 
     // Airspace awareness is gated on (a) a live lat/lon (otherwise there's
     // no global position to query against) and (b) being airborne — on the

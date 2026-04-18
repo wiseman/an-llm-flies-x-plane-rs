@@ -36,6 +36,7 @@ pub const GEAR_HANDLE_DOWN: DatarefSpec = DatarefSpec::new("sim/cockpit2/control
 pub const Y_AGL_M: DatarefSpec = DatarefSpec::new("sim/flightmodel/position/y_agl");
 pub const SIM_TIME_S: DatarefSpec = DatarefSpec::new("sim/time/total_running_time_sec");
 pub const ON_GROUND_0: DatarefSpec = DatarefSpec::at("sim/flightmodel2/gear/on_ground", 0);
+pub const HAS_CRASHED: DatarefSpec = DatarefSpec::new("sim/flightmodel2/misc/has_crashed");
 
 pub const YOKE_PITCH_RATIO: DatarefSpec = DatarefSpec::new("sim/joystick/yoke_pitch_ratio");
 pub const YOKE_ROLL_RATIO: DatarefSpec = DatarefSpec::new("sim/joystick/yoke_roll_ratio");
@@ -82,6 +83,7 @@ pub const STATE_DATAREFS: &[DatarefSpec] = &[
     Y_AGL_M,
     SIM_TIME_S,
     ON_GROUND_0,
+    HAS_CRASHED,
     PARKING_BRAKE_RATIO,
     COM1_FREQUENCY_HZ_833,
     COM2_FREQUENCY_HZ_833,

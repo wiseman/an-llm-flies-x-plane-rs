@@ -54,6 +54,7 @@ struct HeartbeatState {
     last_seen_phase: Option<FlightPhase>,
     last_seen_profiles: Option<Vec<String>>,
     last_seen_completed: Option<Vec<String>>,
+    last_seen_has_crashed: Option<bool>,
 }
 
 pub struct HeartbeatPump {
@@ -94,6 +95,7 @@ impl HeartbeatPump {
                 last_seen_phase: None,
                 last_seen_profiles: None,
                 last_seen_completed: None,
+                last_seen_has_crashed: None,
             }),
         }
     }
@@ -123,12 +125,18 @@ impl HeartbeatPump {
         let current_phase = snapshot.phase;
         let current_profiles: Vec<String> = snapshot.active_profiles.clone();
         let current_completed: Vec<String> = snapshot.completed_profiles.clone();
+        let current_has_crashed = self
+            .bridge
+            .as_deref()
+            .and_then(|b| b.get_dataref_value(crate::sim::datarefs::HAS_CRASHED.name))
+            .map(|v| v >= 0.5);
 
         let mut st = self.state.lock().unwrap();
         if st.last_seen_profiles.is_none() {
             st.last_seen_phase = current_phase;
             st.last_seen_profiles = Some(current_profiles);
             st.last_seen_completed = Some(current_completed);
+            st.last_seen_has_crashed = current_has_crashed;
             return;
         }
         let phase_changed = st.last_seen_phase != current_phase;
@@ -142,8 +150,12 @@ impl HeartbeatPump {
             .cloned()
             .collect();
         let completions_changed = !new_completions.is_empty();
+        let crash_edge = matches!(
+            (st.last_seen_has_crashed, current_has_crashed),
+            (Some(false), Some(true)) | (None, Some(true))
+        );
 
-        if phase_changed || profiles_changed || completions_changed {
+        if phase_changed || profiles_changed || completions_changed || crash_edge {
             if phase_changed
                 && current_phase == Some(FlightPhase::GoAround)
                 && st.last_seen_phase != Some(FlightPhase::GoAround)
@@ -153,8 +165,15 @@ impl HeartbeatPump {
                     bus.push_log(format!("[safety] go_around triggered: {}", reason));
                 }
             }
-            if now - st.last_heartbeat_s >= self.min_interval_s {
-                let reason = describe_change(
+            if crash_edge {
+                if let Some(bus) = &self.bus {
+                    bus.push_log("[safety] has_crashed -> 1 (X-Plane reports aircraft crashed)".to_string());
+                }
+            }
+            // Crashes bypass the min-interval throttle — we always want the
+            // LLM to hear about a crash the moment it happens.
+            if crash_edge || now - st.last_heartbeat_s >= self.min_interval_s {
+                let mut reason = describe_change(
                     st.last_seen_phase,
                     current_phase,
                     st.last_seen_profiles.as_deref().unwrap_or(&[]),
@@ -162,6 +181,13 @@ impl HeartbeatPump {
                     &new_completions,
                     snapshot.go_around_reason.as_deref(),
                 );
+                if crash_edge {
+                    if reason == "state changed" {
+                        reason = "aircraft crashed".to_string();
+                    } else {
+                        reason = format!("aircraft crashed; {}", reason);
+                    }
+                }
                 st.last_heartbeat_s = now;
                 let status = crate::llm::tools::build_status_payload(
                     Some(&snapshot),
@@ -174,6 +200,7 @@ impl HeartbeatPump {
             st.last_seen_phase = current_phase;
             st.last_seen_profiles = Some(current_profiles);
             st.last_seen_completed = Some(current_completed);
+            st.last_seen_has_crashed = current_has_crashed;
             return;
         }
 
