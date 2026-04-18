@@ -212,6 +212,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use crossbeam_channel::Sender;
+use crossterm::cursor::SetCursorStyle;
 use crossterm::event::{
     self, Event, KeyCode, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags,
     PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
@@ -251,6 +252,10 @@ pub fn run_tui(
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
+    // Steady (non-blinking) block cursor in the input pane. Best-effort —
+    // older terminals that don't understand DECSCUSR will just ignore the
+    // CSI. Restored to the user's default shape on exit.
+    let _ = execute!(stdout, SetCursorStyle::SteadyBlock);
     // Request press/repeat/release events on terminals that implement the
     // Kitty keyboard protocol (Ghostty, WezTerm, kitty, iTerm2 w/ CSI u).
     // `execute!` writes the CSI and returns Ok; we detect actual support by
@@ -552,6 +557,10 @@ pub fn run_tui(
                 Span::styled("> ", Style::default().fg(Color::Cyan)),
                 Span::raw(input_buffer.clone()),
             ];
+            let recording = matches!(
+                ptt_snap.as_ref().map(|s| &s.mode),
+                Some(PttMode::Recording)
+            );
             if let Some(snap) = &ptt_snap {
                 if snap.mode != PttMode::Idle && !snap.partial.is_empty() {
                     // Show prefix + partial dimmed while streaming.
@@ -565,8 +574,11 @@ pub fn run_tui(
                         Style::default().add_modifier(Modifier::DIM),
                     ));
                 }
-                if snap.mode == PttMode::Recording {
-                    spans.push(Span::raw(" "));
+                if recording {
+                    // Amp glyph lives at the end of the line and acts as
+                    // the cursor during PTT — no separator space, and the
+                    // terminal cursor is suppressed below so this is the
+                    // only thing the eye lands on.
                     spans.push(Span::styled(
                         amp_glyph(snap.amp).to_string(),
                         Style::default().fg(Color::LightGreen),
@@ -577,12 +589,31 @@ pub fn run_tui(
                 .block(Block::default().borders(Borders::ALL).title(input_title))
                 .wrap(Wrap { trim: false });
             f.render_widget(input_paragraph, chunks[3]);
+
+            if !recording {
+                // Park the terminal cursor right after the user's typed
+                // text (before any dimmed PTT partial preview). Prompt
+                // "> " is two columns; input_buffer is ASCII in practice
+                // so char count is the visible width. Wrap into
+                // subsequent content rows if the line overflows; clamp
+                // to the last content row so we never escape the pane.
+                // Skipped during PTT recording so the animated amp-glyph
+                // is the sole visual "cursor".
+                let pane = chunks[3];
+                let content_width = pane.width.saturating_sub(2).max(1);
+                let content_height = pane.height.saturating_sub(2).max(1);
+                let consumed = 2u16.saturating_add(input_buffer.chars().count() as u16);
+                let row = (consumed / content_width).min(content_height.saturating_sub(1));
+                let col = consumed % content_width;
+                f.set_cursor_position((pane.x + 1 + col, pane.y + 1 + row));
+            }
         })?;
     };
 
     if kitty_push_ok {
         let _ = execute!(terminal.backend_mut(), PopKeyboardEnhancementFlags);
     }
+    let _ = execute!(terminal.backend_mut(), SetCursorStyle::DefaultUserShape);
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     terminal.show_cursor()?;
