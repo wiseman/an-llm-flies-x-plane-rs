@@ -13,6 +13,7 @@ use serde_json::{json, Value};
 pub struct CacheSnapshot {
     pub total_input_tokens: u64,
     pub total_cached_tokens: u64,
+    pub total_output_tokens: u64,
     pub total_requests: u64,
 }
 
@@ -22,10 +23,11 @@ pub struct CacheStats {
 }
 
 impl CacheStats {
-    pub fn record(&self, input_tokens: u64, cached_tokens: u64) {
+    pub fn record(&self, input_tokens: u64, cached_tokens: u64, output_tokens: u64) {
         let mut g = self.inner.lock().unwrap();
         g.total_input_tokens += input_tokens;
         g.total_cached_tokens += cached_tokens;
+        g.total_output_tokens += output_tokens;
         g.total_requests += 1;
     }
     pub fn snapshot(&self) -> CacheSnapshot {
@@ -49,6 +51,13 @@ pub trait ResponsesBackend: Send + Sync {
         tools: &[Value],
         timeout_secs: u64,
     ) -> Result<Value>;
+
+    /// Cumulative token counters across every call on this backend. Used by
+    /// the conversation loop to log session totals after each API call.
+    /// Default: empty (for test stubs that don't care).
+    fn cache_snapshot(&self) -> CacheSnapshot {
+        CacheSnapshot::default()
+    }
 }
 
 pub struct ResponsesClient {
@@ -104,9 +113,14 @@ impl ResponsesBackend for ResponsesClient {
                 .and_then(|d| d.get("cached_tokens"))
                 .and_then(|v| v.as_u64())
                 .unwrap_or(0);
-            self.cache_stats.record(input_tokens, cached_tokens);
+            let output_tokens = usage.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+            self.cache_stats.record(input_tokens, cached_tokens, output_tokens);
         }
         Ok(result)
+    }
+
+    fn cache_snapshot(&self) -> CacheSnapshot {
+        self.cache_stats.snapshot()
     }
 }
 

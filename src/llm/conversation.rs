@@ -225,6 +225,7 @@ fn handle_message(
         let remaining = deadline.saturating_duration_since(Instant::now()).as_secs();
         let timeout = per_request_timeout_s.min(remaining.max(1));
         let response = client.create_response(&input, &tool_schemas(), timeout)?;
+        log_usage(&response, client, bus);
         let Some(output_items) = response.get("output").and_then(|v| v.as_array()).cloned() else {
             emit_log(bus, &format!("[llm-worker] unexpected output shape: {}", response));
             return Ok(());
@@ -276,6 +277,29 @@ fn emit_radio(bus: Option<&SimBus>, text: &str) {
         Some(b) => b.push_radio(text),
         None => println!("{}", text),
     }
+}
+
+/// Pull `usage` from the Responses-API payload and push one log line with
+/// the per-call input/cached/output counts plus the session-cumulative totals
+/// from the backend's `cache_snapshot()`. Silent if the response has no
+/// `usage` (older model versions, stubbed test clients).
+fn log_usage(response: &Value, client: &dyn ResponsesBackend, bus: Option<&SimBus>) {
+    let Some(usage) = response.get("usage") else { return };
+    let input = usage.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+    let cached = usage
+        .get("input_tokens_details")
+        .and_then(|d| d.get("cached_tokens"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let output = usage.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+    let s = client.cache_snapshot();
+    emit_log(
+        bus,
+        &format!(
+            "[llm-worker] tokens in={} (cached={}) out={} | session in={} out={} calls={}",
+            input, cached, output, s.total_input_tokens, s.total_output_tokens, s.total_requests,
+        ),
+    );
 }
 
 fn emit_assistant_text(output_items: &[Value], bus: Option<&SimBus>) {

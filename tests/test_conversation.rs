@@ -311,3 +311,50 @@ fn tool_call_log_lands_on_bus_when_provided() {
     assert!(!tool_log.is_empty(), "expected tool log lines, got {:?}", logs);
     assert!(!assistant.is_empty(), "expected [llm] text, got {:?}", logs);
 }
+
+#[test]
+fn token_usage_is_logged_after_each_call_when_usage_present() {
+    let ctx = make_ctx();
+    let bus = SimBus::new(false);
+    // Two scripted responses; only one carries a `usage` block.
+    let client = StubClient::new(vec![
+        json!({
+            "output": [fn_call("engage_heading_hold", json!({"heading_deg": 90.0}), "c1")],
+            "usage": {
+                "input_tokens": 1234,
+                "output_tokens": 56,
+                "input_tokens_details": {"cached_tokens": 900}
+            }
+        }),
+        json!({"output": [text_msg("heading 090 engaged")]}),
+    ]);
+    let (tx, rx) = unbounded::<IncomingMessage>();
+    tx.send(IncomingMessage::operator("fly heading 090")).unwrap();
+    let stop = Arc::new(AtomicBool::new(false));
+
+    std::thread::scope(|s| {
+        let handle = s.spawn({
+            let stop = stop.clone();
+            || run_conversation_loop(&client, &ctx, &rx, stop, 60, 120, Some(&bus))
+        });
+        for _ in 0..50 {
+            if client.n_calls() >= 2 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        stop.store(true, Ordering::Release);
+        handle.join().unwrap();
+    });
+
+    let (_, logs, _) = bus.snapshot();
+    let token_lines: Vec<&String> = logs.iter().filter(|l| l.contains("tokens in=")).collect();
+    // One `usage`-bearing response → exactly one token log line.
+    assert_eq!(token_lines.len(), 1, "logs = {:?}", logs);
+    let line = token_lines[0];
+    assert!(line.contains("in=1234"), "{}", line);
+    assert!(line.contains("cached=900"), "{}", line);
+    assert!(line.contains("out=56"), "{}", line);
+    // StubClient's default cache_snapshot() is zeros — session totals reflect that.
+    assert!(line.contains("session in=0 out=0"), "{}", line);
+}
