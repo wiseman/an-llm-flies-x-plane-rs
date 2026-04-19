@@ -195,9 +195,37 @@ fn set_system_prompt_rewrites_pinned_head() {
 }
 
 #[test]
-fn mode_switch_message_swaps_prompt_without_api_call() {
+fn runtime_mode_switch_injects_overlay_without_touching_system_prompt() {
+    // A runtime `/mode realistic` should leave pinned_items[0] alone (so the
+    // system prompt stays cache-stable) and push the overlay into the
+    // rotating user history tagged `[MODE_SWITCH]`.
+    let mut conv = Conversation::new(SYSTEM_PROMPT);
+    assert!(conv.rotating_items.is_empty());
+
+    conv.append_mode_switch_message(PilotMode::Realistic.runtime_overlay());
+    let pinned_text = conv.pinned_items[0]["content"][0]["text"].as_str().unwrap();
+    assert_eq!(
+        pinned_text, SYSTEM_PROMPT,
+        "system prompt must remain the base prompt at runtime"
+    );
+    assert_eq!(conv.rotating_items.len(), 1);
+    let injected = conv.rotating_items[0]["content"][0]["text"].as_str().unwrap();
+    assert!(injected.starts_with("[MODE_SWITCH] "));
+    assert!(injected.contains("Realistic-pilot mode"));
+}
+
+#[test]
+fn runtime_mode_switch_to_normal_injects_cancel_notice() {
+    let mut conv = Conversation::new(SYSTEM_PROMPT);
+    conv.append_mode_switch_message(PilotMode::Normal.runtime_overlay());
+    let injected = conv.rotating_items[0]["content"][0]["text"].as_str().unwrap();
+    assert!(injected.starts_with("[MODE_SWITCH] "));
+    assert!(injected.contains("Return to normal pilot mode"));
+}
+
+#[test]
+fn mode_switch_message_does_not_trigger_api_call() {
     let ctx = make_ctx();
-    // Script would be consumed if the loop made an API call. We expect zero.
     let client = StubClient::new(vec![json!({"output": [text_msg("unused")]})]);
     let (tx, rx) = unbounded::<IncomingMessage>();
     tx.send(IncomingMessage::mode_switch(PilotMode::Realistic)).unwrap();
@@ -208,7 +236,6 @@ fn mode_switch_message_swaps_prompt_without_api_call() {
             let stop = stop.clone();
             || run_conversation_loop(&client, &ctx, &rx, stop, 60, 120, PilotMode::Normal, None)
         });
-        // Give the loop a moment to drain the channel.
         std::thread::sleep(std::time::Duration::from_millis(200));
         stop.store(true, Ordering::Release);
         handle.join().unwrap();

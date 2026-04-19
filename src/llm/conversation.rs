@@ -21,11 +21,15 @@ use crate::llm::responses_client::ResponsesBackend;
 use crate::llm::tools::{dispatch_tool, tool_schemas, ToolContext};
 
 pub const SYSTEM_PROMPT: &str = include_str!("system_prompt.md");
+pub const SYSTEM_PROMPT_REALISTIC_OVERLAY: &str = include_str!("system_prompt_realistic_overlay.md");
 pub const SYSTEM_PROMPT_REALISTIC: &str = concat!(
     include_str!("system_prompt.md"),
     "\n",
     include_str!("system_prompt_realistic_overlay.md"),
 );
+const RUNTIME_NORMAL_NOTICE: &str =
+    "Return to normal pilot mode. Disregard any realistic-pilot overlay delivered earlier; \
+resume the base persona defined at the top of this conversation.";
 pub const MAX_INPUT_CHARS: usize = 60_000;
 pub const DEFAULT_PER_REQUEST_TIMEOUT_S: u64 = 60;
 pub const DEFAULT_TOTAL_WALL_BUDGET_S: u64 = 120;
@@ -56,6 +60,18 @@ impl PilotMode {
             "normal" => Some(PilotMode::Normal),
             "realistic" => Some(PilotMode::Realistic),
             _ => None,
+        }
+    }
+
+    /// Text to inject into rotating history when the mode is switched at
+    /// runtime via `/mode`. For realistic, this is the overlay verbatim so
+    /// the model sees the same instructions that `--pilot-mode realistic`
+    /// would have baked into the system prompt. For normal, it's a short
+    /// directive cancelling any earlier overlay.
+    pub fn runtime_overlay(self) -> &'static str {
+        match self {
+            PilotMode::Normal => RUNTIME_NORMAL_NOTICE,
+            PilotMode::Realistic => SYSTEM_PROMPT_REALISTIC_OVERLAY,
         }
     }
 }
@@ -152,6 +168,9 @@ impl Conversation {
     }
     pub fn append_heartbeat_message(&mut self, text: &str) {
         self.rotating_items.push(user_item(&format!("[HEARTBEAT] {}", text)));
+    }
+    pub fn append_mode_switch_message(&mut self, text: &str) {
+        self.rotating_items.push(user_item(&format!("[MODE_SWITCH] {}", text)));
     }
     pub fn append_response_items(&mut self, items: &[Value]) {
         for item in items {
@@ -267,10 +286,14 @@ fn handle_message(
             emit_radio(bus, &format!("[atc] {}", message.text));
         }
         IncomingSource::ModeSwitch(mode) => {
-            conv.set_system_prompt(mode.system_prompt());
-            let announce = format!("Pilot mode switched to {}.", mode.label());
-            conv.append_operator_message(&announce);
-            emit_log(bus, &format!("[llm-worker] {}", announce));
+            conv.append_mode_switch_message(mode.runtime_overlay());
+            emit_log(
+                bus,
+                &format!(
+                    "[llm-worker] pilot mode switched to {} (overlay injected as user message)",
+                    mode.label()
+                ),
+            );
             return Ok(());
         }
     }
