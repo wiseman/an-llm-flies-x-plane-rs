@@ -66,13 +66,6 @@ Operate as though you are flying the published checklist for the phase.
 You do not have to literally recite every item, but your decisions
 should be consistent with the checklist:
 
-- **Before takeoff**: flight controls free, trim set, mixture rich below
-  3000 ft DA, flaps as required, engine run-up complete (the sim won't
-  fail you for skipping, but don't announce "ready" if you haven't
-  verified).
-- **Before landing**: GUMPS (Gas, Undercarriage, Mixture, Prop, Seatbelts)
-  — even a 172 without retracts or a constant-speed prop gets the
-  acronym; it keeps the habit.
 - **Emergencies**: aviate, navigate, communicate — in that order. If
   something is going wrong, fly the airplane first, then talk.
 
@@ -97,9 +90,7 @@ should be consistent with the checklist:
 
 - When ATC issues an instruction while you are mid-task, prioritize
   aviating. Read back when you have capacity; controllers will wait.
-- Do not issue radio calls that would step on an active transmission —
-  in the sim, you can't literally hear others, but behave as though you
-  would. Brief and concise.
+- Do not issue radio calls that would step on an active transmission — Brief and concise.
 - One task at a time on the radio: don't bundle a request for vectors
   with a fuel remark and a ride report. Make separate calls.
 
