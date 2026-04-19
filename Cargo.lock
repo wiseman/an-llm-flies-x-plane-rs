@@ -71,6 +71,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "an-llm-flies-xplane"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "approx",
+ "base64",
+ "chrono",
+ "clap",
+ "cpal",
+ "crossbeam-channel",
+ "crossterm",
+ "csv",
+ "duckdb",
+ "once_cell",
+ "parking_lot",
+ "ratatui",
+ "rubato",
+ "serde",
+ "serde_json",
+ "serde_yaml_ng",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tungstenite",
+ "ureq",
+ "url",
+]
+
+[[package]]
 name = "android_system_properties"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3816,34 +3844,6 @@ checksum = "32e45ad4206f6d2479085147f02bc2ef834ac85886624a23575ae137c8aa8156"
 dependencies = [
  "libc",
  "rustix 1.1.4",
-]
-
-[[package]]
-name = "xplane-pilot"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "approx",
- "base64",
- "chrono",
- "clap",
- "cpal",
- "crossbeam-channel",
- "crossterm",
- "csv",
- "duckdb",
- "once_cell",
- "parking_lot",
- "ratatui",
- "rubato",
- "serde",
- "serde_json",
- "serde_yaml_ng",
- "tempfile",
- "thiserror 1.0.69",
- "tungstenite",
- "ureq",
- "url",
 ]
 
 [[package]]

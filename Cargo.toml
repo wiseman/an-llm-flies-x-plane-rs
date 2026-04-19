@@ -1,8 +1,8 @@
 [package]
-name = "xplane-pilot"
+name = "an-llm-flies-xplane"
 version = "0.1.0"
 edition = "2021"
-description = "Rust port of the LLM-driven X-Plane 12 pilot (xplane-pilot / sim_pilot)."
+description = "An LLM-driven pilot for X-Plane 12. Rust port of the Python sim_pilot project."
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/wiseman/an-llm-flies-x-plane-rs"
 readme = "README.md"
