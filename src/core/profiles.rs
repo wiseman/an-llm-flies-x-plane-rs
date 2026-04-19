@@ -582,7 +582,13 @@ impl PatternFlyProfile {
     fn go_around_guidance(&self, state: &AircraftState, bank_limit: f64) -> GuidanceTargets {
         let course = self.runway_frame.runway.course_deg;
         let track_error = wrap_degrees_180(course - state.track_deg);
-        let bank_cmd = clamp(track_error * 0.35, -bank_limit, bank_limit);
+        // Higher gain than the pattern/crosswind phases (0.35): go-around
+        // runs with firewalled power, so P-factor and slipstream yaw the
+        // nose left and the P-only loop with the smaller gain settled too
+        // far off course. 1.0 brings the closed-loop time constant down
+        // from ~13 s to ~4.5 s at climb speed without saturating the
+        // 25° bank limit at realistic track errors.
+        let bank_cmd = clamp(track_error * 1.0, -bank_limit, bank_limit);
         let pattern_alt = self.config.pattern_altitude_msl_ft();
         // Go-around is "committed to climb" — firewall the throttle and
         // hold it until pattern altitude is captured and PatternFlyProfile
