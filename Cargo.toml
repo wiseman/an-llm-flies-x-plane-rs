@@ -3,6 +3,9 @@ name = "xplane-pilot"
 version = "0.1.0"
 edition = "2021"
 description = "Rust port of the LLM-driven X-Plane 12 pilot (xplane-pilot / sim_pilot)."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/wiseman/an-llm-flies-x-plane-rs"
+readme = "README.md"
 
 [[bin]]
 name = "sim-pilot"
@@ -41,3 +44,8 @@ approx = "0.5"
 [profile.release]
 lto = "thin"
 codegen-units = 1
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"

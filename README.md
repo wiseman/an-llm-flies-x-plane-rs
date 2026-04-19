@@ -10,7 +10,19 @@ Those profiles own flight-control axes and are merged into a single command set 
 
 The live backend talks to X-Plane through the built-in web API and uses X-Plane's own `apt.dat` as the source of truth. That data is parsed into DuckDB-backed parquet views for airports, runways, comms, taxi nodes, taxi edges, and optional airspaces, so the LLM can query real airport geometry instead of guessing runway numbers, frequencies, or taxi routes.
 
-## Building
+## Getting the binary
+
+### Download a prebuilt binary
+
+The offline mission runs as a standalone executable — no Rust toolchain required. Grab the latest release from [GitHub Releases](https://github.com/wiseman/an-llm-flies-x-plane-rs/releases/latest), extract the archive, and run `./sim-pilot` (or `sim-pilot.exe` on Windows).
+
+```bash
+./sim-pilot --crosswind-kt 10         # offline pattern with a 10 kt crosswind
+```
+
+Live mode (`--backend xplane`) additionally needs X-Plane 12 running locally with the web API on 8086 and an `OPENAI_API_KEY`.
+
+### Building from source
 
 Requires a recent stable Rust toolchain. Release builds are recommended — the offline mission runs far faster and the live backend is less bursty when optimized.
 

@@ -1,0 +1,20 @@
+[workspace]
+members = ["cargo:."]
+
+# Config for 'dist'
+[dist]
+# The preferred dist version to use in CI (Cargo.toml SemVer syntax)
+cargo-dist-version = "0.31.0"
+# CI backends to support
+ci = "github"
+# The installers to generate for each app
+installers = []
+# Target platforms to build apps for (Rust target-triple syntax)
+targets = ["aarch64-apple-darwin", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc"]
+# Where to host releases
+hosting = "github"
+
+# System packages that must be installed before the build. cpal links ALSA
+# on Linux, so x86_64-unknown-linux-gnu needs libasound2-dev on the runner.
+[dist.dependencies.apt]
+libasound2-dev = "*"
