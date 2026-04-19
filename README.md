@@ -24,7 +24,7 @@ By default the executable connects to a running X-Plane 12 (web API on port 8086
 
 ### Building from source
 
-Requires a recent stable Rust toolchain. Release builds are recommended — the offline mission runs far faster and the live backend is less bursty when optimized.
+Requires a recent stable Rust toolchain. Always build with `--release` — the live backend is much less bursty when optimized, and the offline simulator runs far faster.
 
 ```bash
 cargo build --release
