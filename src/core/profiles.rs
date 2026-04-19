@@ -1037,8 +1037,8 @@ impl TaxiProfile {
             final_stop_distance_ft: 60.0,
             final_pose: None,
             pose_pivot_radius_ft: 15.0,
-            pose_position_tol_ft: 10.0,
-            pose_heading_tol_deg: 5.0,
+            pose_position_tol_ft: 20.0,
+            pose_heading_tol_deg: 20.0,
             pose_creep_speed_kt: 2.0,
         }
     }

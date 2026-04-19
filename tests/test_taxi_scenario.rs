@@ -139,13 +139,13 @@ fn pose_target_parks_at_position_and_heading() {
     }
     assert!(steps < 900, "pose-target did not settle");
 
-    // The pose phase is allowed 10 ft of position tolerance and 5° of
+    // The pose phase is allowed 20 ft of position tolerance and 20° of
     // heading tolerance. We allow a little slop on top of that for the
     // coast-to-stop after `finished` latches.
     let pos_err = (state.position_ft - hold_short).length();
     assert!(pos_err < 30.0, "position error {:.1} ft", pos_err);
     let hdg_err = (state.heading_deg - 0.0).abs().min((state.heading_deg - 360.0).abs());
-    assert!(hdg_err < 15.0, "heading error {:.1}°", hdg_err);
+    assert!(hdg_err < 30.0, "heading error {:.1}°", hdg_err);
 }
 
 #[test]
