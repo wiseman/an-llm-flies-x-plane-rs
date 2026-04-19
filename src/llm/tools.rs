@@ -56,6 +56,9 @@ pub struct ToolContext {
     pub apt_dat_cache_dir: Option<PathBuf>,
     pub bus: Option<SimBus>,
     pub runway_conn: Arc<Mutex<Option<duckdb::Connection>>>,
+    /// Handle into the live heartbeat pump. Only `sleep(suppress_idle_heartbeat_s=...)`
+    /// needs it today. `None` when heartbeats are disabled or in tests.
+    pub heartbeat_pump: Option<Arc<crate::live_runner::HeartbeatPump>>,
 }
 
 impl ToolContext {
@@ -71,6 +74,7 @@ impl ToolContext {
             apt_dat_cache_dir: None,
             bus: None,
             runway_conn: Arc::new(Mutex::new(None)),
+            heartbeat_pump: None,
         }
     }
 }
@@ -289,7 +293,25 @@ pub fn airspace_source(ctx: &ToolContext) -> Option<AirspaceSource> {
     })
 }
 
-pub fn tool_sleep(_ctx: &ToolContext, _args: &Map<String, Value>) -> String {
+/// Cap on `suppress_idle_heartbeat_s` to guard against the LLM handing us
+/// a pathological value (e.g. an hour+ of silence during which a real issue
+/// could go unreported). State-change heartbeats still fire regardless.
+const SLEEP_MAX_SUPPRESS_IDLE_S: f64 = 600.0;
+
+pub fn tool_sleep(ctx: &ToolContext, args: &Map<String, Value>) -> String {
+    let requested = args.get("suppress_idle_heartbeat_s").and_then(|v| v.as_f64());
+    if let Some(secs) = requested {
+        let clamped = secs.clamp(0.0, SLEEP_MAX_SUPPRESS_IDLE_S);
+        if let Some(pump) = &ctx.heartbeat_pump {
+            pump.suppress_idle_heartbeat_for_seconds(clamped);
+        }
+        if clamped > 0.0 {
+            return format!(
+                "sleeping; idle heartbeat suppressed for {}s (state-change heartbeats still fire)",
+                clamped.round() as i64,
+            );
+        }
+    }
     "sleeping; waiting for next external message".to_string()
 }
 
@@ -1682,9 +1704,14 @@ pub fn tool_schemas() -> Vec<Value> {
         ),
         schema(
             "sleep",
-            "End this turn explicitly. The pilot continues flying the active profiles; you wake up when the next operator/ATC message arrives.",
-            json!({}),
-            &[],
+            "End this turn explicitly. The pilot continues flying the active profiles; you wake up when the next operator/ATC message arrives, when a flight-phase or profile change fires a state-change heartbeat, or when the idle-cadence heartbeat fires (default every 30 s). Pass suppress_idle_heartbeat_s=N to skip the idle cadence for the next N seconds when you're confident the current state is stable for a while (capped at 600 s; state-change heartbeats still fire immediately). Use null when you have no reason to extend the default cadence.",
+            json!({
+                "suppress_idle_heartbeat_s": {
+                    "type": ["number", "null"],
+                    "description": "Optional. Suppress the idle-cadence heartbeat for this many seconds of wall time. Phase changes, profile changes, crash edges, and inbound operator/ATC messages still wake you immediately. Capped server-side at 600 s. Pass null to leave the default idle cadence unchanged."
+                }
+            }),
+            &["suppress_idle_heartbeat_s"],
         ),
         schema(
             "engage_heading_hold",

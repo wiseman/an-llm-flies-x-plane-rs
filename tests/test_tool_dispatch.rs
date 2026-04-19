@@ -727,6 +727,40 @@ fn sleep_returns_string() {
     assert!(!r.is_empty());
 }
 
+#[test]
+fn sleep_with_suppress_arg_is_noop_without_pump() {
+    // In tests the ToolContext has no heartbeat_pump; the sleep handler must
+    // still accept the new arg and return a sensible string instead of panicking.
+    let ctx = make_ctx(None, None);
+    let r = dispatch_tool(
+        &call("sleep", json!({"suppress_idle_heartbeat_s": 120.0})),
+        &ctx,
+    );
+    assert!(r.contains("suppressed"));
+    assert!(r.contains("120"));
+}
+
+#[test]
+fn sleep_null_suppress_arg_uses_default_message() {
+    let ctx = make_ctx(None, None);
+    let r = dispatch_tool(
+        &call("sleep", json!({"suppress_idle_heartbeat_s": serde_json::Value::Null})),
+        &ctx,
+    );
+    assert_eq!(r, "sleeping; waiting for next external message");
+}
+
+#[test]
+fn sleep_clamps_suppress_arg_to_cap() {
+    let ctx = make_ctx(None, None);
+    let r = dispatch_tool(
+        &call("sleep", json!({"suppress_idle_heartbeat_s": 9_999.0})),
+        &ctx,
+    );
+    // Cap is 600 s; message should reflect the clamped value.
+    assert!(r.contains("600"));
+}
+
 // ---------- sql_query ----------
 
 #[test]

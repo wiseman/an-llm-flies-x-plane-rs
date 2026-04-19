@@ -238,6 +238,70 @@ fn periodic_heartbeat_resets_its_own_timer() {
 }
 
 #[test]
+fn suppress_idle_heartbeat_blocks_periodic_fire() {
+    // LLM signals "stable for 120 s" via sleep(suppress_idle_heartbeat_s=120).
+    // Even when the idle interval has clearly elapsed, no heartbeat fires
+    // until the suppression window ends.
+    let (pilot, clock, rx, pump) = setup();
+    seed(&pilot, &["idle_lateral", "idle_vertical", "idle_speed"], None);
+    pump.check_and_emit();
+    pump.suppress_idle_heartbeat_for_seconds(120.0);
+    // Well past the default 30 s interval, but still inside the suppression window.
+    clock.advance_secs(60.0);
+    pump.check_and_emit();
+    assert!(drain(&rx).is_empty());
+    // Cross the 120 s window and the next tick fires normally.
+    clock.advance_secs(70.0);
+    pump.check_and_emit();
+    assert_eq!(drain(&rx).len(), 1);
+}
+
+#[test]
+fn suppress_idle_heartbeat_does_not_block_state_change() {
+    // Suppression is ONLY for the idle cadence; a real phase transition must
+    // still wake the LLM immediately.
+    let (pilot, clock, rx, pump) = setup();
+    seed(&pilot, &["pattern_fly"], Some(FlightPhase::Downwind));
+    pump.check_and_emit();
+    pump.suppress_idle_heartbeat_for_seconds(300.0);
+    clock.advance_secs(5.0);
+    pilot.lock().latest_snapshot = Some(make_snapshot(&["pattern_fly"], Some(FlightPhase::Base), 1500.0, None));
+    pump.check_and_emit();
+    let msgs = drain(&rx);
+    assert_eq!(msgs.len(), 1);
+    assert!(msgs[0].text.contains("downwind"));
+    assert!(msgs[0].text.contains("base"));
+}
+
+#[test]
+fn suppress_idle_heartbeat_newest_value_wins() {
+    // LLM may refine its estimate. The newest call replaces the window —
+    // a shorter second call does NOT get clamped up to the earlier one.
+    let (pilot, clock, rx, pump) = setup();
+    seed(&pilot, &["idle_lateral", "idle_vertical", "idle_speed"], None);
+    pump.check_and_emit();
+    pump.suppress_idle_heartbeat_for_seconds(300.0);
+    // Reconsider: actually only 60 s of confidence.
+    pump.suppress_idle_heartbeat_for_seconds(60.0);
+    clock.advance_secs(90.0);
+    pump.check_and_emit();
+    assert_eq!(drain(&rx).len(), 1);
+}
+
+#[test]
+fn suppress_idle_heartbeat_zero_clears_window() {
+    let (pilot, clock, rx, pump) = setup();
+    seed(&pilot, &["idle_lateral", "idle_vertical", "idle_speed"], None);
+    pump.check_and_emit();
+    pump.suppress_idle_heartbeat_for_seconds(600.0);
+    // Change of heart before any time elapses — clear the suppression.
+    pump.suppress_idle_heartbeat_for_seconds(0.0);
+    clock.advance_secs(35.0);
+    pump.check_and_emit();
+    assert_eq!(drain(&rx).len(), 1);
+}
+
+#[test]
 fn heartbeat_embeds_status_json() {
     let (pilot, clock, rx, pump) = setup();
     pilot.lock().latest_snapshot = Some(make_snapshot(

@@ -291,8 +291,15 @@ authorizes an exception (e.g. a vector below a normal minimum).
 - get_status(): current aircraft state. Includes lat/lon when running live so you
   can compute great-circle distances against the runway database directly.
 - sql_query(query): read-only SQL against the worldwide runway/airport database.
-- sleep(): explicitly end your turn and wait for the next external message; the
-  control loop keeps flying whatever profiles are active.
+- sleep(suppress_idle_heartbeat_s=null): explicitly end your turn and wait for
+  the next external message; the control loop keeps flying whatever profiles
+  are active. Pass suppress_idle_heartbeat_s=N when you're confident the
+  situation is stable for a while (e.g. long cruise leg, established on a
+  steady downwind) — the idle-cadence check-in is skipped for the next N
+  seconds, which cuts token spend on quiet stretches. State-change heartbeats
+  (phase/profile/crash) and inbound operator/ATC messages still wake you
+  immediately regardless. Capped at 600 s. Pass null when you have no reason
+  to extend.
 - Pattern-event tools (extend_downwind, turn_base_now, go_around,
   execute_touch_and_go, cleared_to_land, join_pattern): only when pattern_fly
   is engaged. execute_touch_and_go must be called during BASE or FINAL before

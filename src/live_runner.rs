@@ -55,6 +55,12 @@ struct HeartbeatState {
     last_seen_profiles: Option<Vec<String>>,
     last_seen_completed: Option<Vec<String>>,
     last_seen_has_crashed: Option<bool>,
+    /// While `clock.now_secs_f64() < idle_suppress_until_s`, the idle-cadence
+    /// heartbeat is suppressed. Set by the LLM via `sleep(suppress_idle_heartbeat_s=...)`
+    /// when it's confident the current state is stable for a while. State-change
+    /// heartbeats (phase/profile/crash-edge) and inbound user/ATC messages still
+    /// wake the LLM immediately regardless of this field.
+    idle_suppress_until_s: f64,
 }
 
 pub struct HeartbeatPump {
@@ -96,8 +102,19 @@ impl HeartbeatPump {
                 last_seen_profiles: None,
                 last_seen_completed: None,
                 last_seen_has_crashed: None,
+                idle_suppress_until_s: 0.0,
             }),
         }
+    }
+
+    /// LLM hint (via `sleep(suppress_idle_heartbeat_s=N)`): skip the idle-cadence
+    /// heartbeat for `seconds` of wall time. Non-positive values clear any
+    /// existing suppression; the newest call always wins (no min/max merging)
+    /// so the LLM can shorten an earlier, over-eager hint.
+    pub fn suppress_idle_heartbeat_for_seconds(&self, seconds: f64) {
+        let now = self.clock.now_secs_f64();
+        let mut st = self.state.lock().unwrap();
+        st.idle_suppress_until_s = if seconds > 0.0 { now + seconds } else { 0.0 };
     }
 
     pub fn with_bridge(mut self, bridge: Arc<dyn crate::llm::tools::ToolBridge>) -> Self {
@@ -205,7 +222,7 @@ impl HeartbeatPump {
         }
 
         let last_input = st.last_user_input_s.max(st.last_heartbeat_s);
-        if now - last_input >= self.heartbeat_interval_s {
+        if now - last_input >= self.heartbeat_interval_s && now >= st.idle_suppress_until_s {
             st.last_heartbeat_s = now;
             // Periodic check-in now threads the bridge through so the
             // airspace section stays populated on the "nothing happened
@@ -432,6 +449,29 @@ pub fn run_live_xplane(base_config: ConfigBundle, runtime: LiveRunConfig) -> Res
     if airspace_source.is_some() {
         bus.push_log("airspace awareness enabled".to_string());
     }
+    let heartbeat_pump = if runtime.heartbeat_enabled {
+        let clock: Arc<dyn Clock> = Arc::new(RealClock);
+        let mut pump_builder = HeartbeatPump::new(
+            pilot_arc.clone(),
+            Some(bus.clone()),
+            input_tx.clone(),
+            runtime.heartbeat_interval_s,
+            clock,
+        )
+        .with_bridge(bridge.clone() as Arc<dyn ToolBridge>);
+        if let Some(src) = &airspace_source {
+            pump_builder = pump_builder.with_airspace(src.clone());
+        }
+        let pump = Arc::new(pump_builder);
+        bus.push_log(format!(
+            "heartbeat pump started interval={:.0}s",
+            runtime.heartbeat_interval_s
+        ));
+        Some(pump)
+    } else {
+        None
+    };
+
     let tool_ctx = Arc::new(ToolContext {
         pilot: pilot_arc.clone(),
         bridge: Some(tool_bridge),
@@ -440,6 +480,7 @@ pub fn run_live_xplane(base_config: ConfigBundle, runtime: LiveRunConfig) -> Res
         apt_dat_cache_dir: runtime.apt_dat_cache_dir.clone(),
         bus: Some(bus.clone()),
         runway_conn: shared_duck_conn.clone(),
+        heartbeat_pump: heartbeat_pump.clone(),
     });
 
     let llm_stop = Arc::new(AtomicBool::new(false));
@@ -462,29 +503,6 @@ pub fn run_live_xplane(base_config: ConfigBundle, runtime: LiveRunConfig) -> Res
                     Some(&bus_clone),
                 );
             })?
-    };
-
-    let heartbeat_pump = if runtime.heartbeat_enabled {
-        let clock: Arc<dyn Clock> = Arc::new(RealClock);
-        let mut pump_builder = HeartbeatPump::new(
-            pilot_arc.clone(),
-            Some(bus.clone()),
-            input_tx.clone(),
-            runtime.heartbeat_interval_s,
-            clock,
-        )
-        .with_bridge(bridge.clone() as Arc<dyn ToolBridge>);
-        if let Some(src) = &airspace_source {
-            pump_builder = pump_builder.with_airspace(src.clone());
-        }
-        let pump = Arc::new(pump_builder);
-        bus.push_log(format!(
-            "heartbeat pump started interval={:.0}s",
-            runtime.heartbeat_interval_s
-        ));
-        Some(pump)
-    } else {
-        None
     };
 
     let track_recorder: Option<Arc<PLMutex<crate::track::TrackRecorder>>> =
