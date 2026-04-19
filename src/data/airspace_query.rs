@@ -4,7 +4,7 @@
 //! Given a DuckDB connection with the `airspaces` view registered (see
 //! `llm::tools::open_apt_dat_parquet`) and an aircraft state, returns
 //! the airspaces the aircraft is currently INSIDE (3D), 2D-footprint
-//! OVER (alt > ceiling), 2D-footprint UNDER (alt < floor), and
+//! OVER (alt > top), 2D-footprint UNDER (alt < bottom), and
 //! projected to enter within a short lookahead horizon (typically
 //! 120 s). The lookahead uses a flat-earth straight-line projection
 //! along `track_deg` at `gs_kt`, with altitude projected from current
@@ -33,12 +33,12 @@ pub struct AirspaceSource {
 pub struct AirspaceEntry {
     pub class: String,
     pub name: String,
-    pub floor_ft_msl: f64,
-    pub ceiling_ft_msl: f64,
-    pub floor_is_gnd: bool,
-    pub ceiling_is_gnd: bool,
-    /// For UNDER: how far below the floor we are (floor - alt). For OVER:
-    /// how far above the ceiling (alt - ceiling). For INSIDE and
+    pub bottom_ft_msl: f64,
+    pub top_ft_msl: f64,
+    pub bottom_is_gnd: bool,
+    pub top_is_gnd: bool,
+    /// For UNDER: how far below the bottom we are (bottom - alt). For OVER:
+    /// how far above the top (alt - top). For INSIDE and
     /// THROUGH_120S: not meaningful, set to 0.0.
     pub vertical_clearance_ft: f64,
     /// Seconds until the trajectory enters the airspace. Only populated
@@ -94,20 +94,20 @@ pub fn query_airspace_states(
         if !seen_keys.insert(key) {
             continue;
         }
-        let vertical = if alt_now > row.ceiling_ft_msl {
-            Some((State::Over, alt_now - row.ceiling_ft_msl))
-        } else if alt_now < row.floor_ft_msl {
-            Some((State::Under, row.floor_ft_msl - alt_now))
+        let vertical = if alt_now > row.top_ft_msl {
+            Some((State::Over, alt_now - row.top_ft_msl))
+        } else if alt_now < row.bottom_ft_msl {
+            Some((State::Under, row.bottom_ft_msl - alt_now))
         } else {
             Some((State::Inside, 0.0))
         };
         let entry = AirspaceEntry {
             class: row.class.clone(),
             name: row.name.clone(),
-            floor_ft_msl: row.floor_ft_msl,
-            ceiling_ft_msl: row.ceiling_ft_msl,
-            floor_is_gnd: row.floor_is_gnd,
-            ceiling_is_gnd: row.ceiling_is_gnd,
+            bottom_ft_msl: row.bottom_ft_msl,
+            top_ft_msl: row.top_ft_msl,
+            bottom_is_gnd: row.bottom_is_gnd,
+            top_is_gnd: row.top_is_gnd,
             vertical_clearance_ft: vertical.as_ref().map(|v| v.1).unwrap_or(0.0),
             t_sec: 0.0,
         };
@@ -133,7 +133,7 @@ pub fn query_airspace_states(
             // the vertical slab at arrival time. OVER/UNDER at the projected
             // point are less actionable than the ones at the current point,
             // and the heartbeat already caps size.
-            if alt_proj >= row.floor_ft_msl && alt_proj <= row.ceiling_ft_msl {
+            if alt_proj >= row.bottom_ft_msl && alt_proj <= row.top_ft_msl {
                 // Linear time-to-entry: pro-rate by how far along the path
                 // the projected endpoint sits. We don't have the entry
                 // point in hand, so report the lookahead horizon as an
@@ -141,10 +141,10 @@ pub fn query_airspace_states(
                 let entry = AirspaceEntry {
                     class: row.class.clone(),
                     name: row.name.clone(),
-                    floor_ft_msl: row.floor_ft_msl,
-                    ceiling_ft_msl: row.ceiling_ft_msl,
-                    floor_is_gnd: row.floor_is_gnd,
-                    ceiling_is_gnd: row.ceiling_is_gnd,
+                    bottom_ft_msl: row.bottom_ft_msl,
+                    top_ft_msl: row.top_ft_msl,
+                    bottom_is_gnd: row.bottom_is_gnd,
+                    top_is_gnd: row.top_is_gnd,
                     vertical_clearance_ft: 0.0,
                     t_sec: LOOKAHEAD_SECS,
                 };
@@ -166,10 +166,10 @@ pub fn query_airspace_states(
 struct Row {
     class: String,
     name: String,
-    floor_ft_msl: f64,
-    ceiling_ft_msl: f64,
-    floor_is_gnd: bool,
-    ceiling_is_gnd: bool,
+    bottom_ft_msl: f64,
+    top_ft_msl: f64,
+    bottom_is_gnd: bool,
+    top_is_gnd: bool,
 }
 
 enum State {
@@ -184,8 +184,8 @@ fn contains_query(conn: &Connection, lat: f64, lon: f64) -> Result<Vec<Row>> {
     // ST_GeomFromText so the bbox prefilter is essential — without it
     // every heartbeat would decode 19k WKT strings.
     let mut stmt = conn.prepare(
-        "SELECT class, name, floor_ft_msl, ceiling_ft_msl, \
-                floor_is_gnd, ceiling_is_gnd \
+        "SELECT class, name, bottom_ft_msl, top_ft_msl, \
+                bottom_is_gnd, top_is_gnd \
          FROM airspaces \
          WHERE ? BETWEEN min_lat AND max_lat \
            AND ? BETWEEN min_lon AND max_lon \
@@ -197,10 +197,10 @@ fn contains_query(conn: &Connection, lat: f64, lon: f64) -> Result<Vec<Row>> {
         out.push(Row {
             class: row.get(0)?,
             name: row.get(1)?,
-            floor_ft_msl: row.get(2)?,
-            ceiling_ft_msl: row.get(3)?,
-            floor_is_gnd: row.get(4)?,
-            ceiling_is_gnd: row.get(5)?,
+            bottom_ft_msl: row.get(2)?,
+            top_ft_msl: row.get(3)?,
+            bottom_is_gnd: row.get(4)?,
+            top_is_gnd: row.get(5)?,
         });
     }
     Ok(out)
@@ -208,7 +208,7 @@ fn contains_query(conn: &Connection, lat: f64, lon: f64) -> Result<Vec<Row>> {
 
 /// Emit the airspace states as the JSON value embedded under `"airspace"`
 /// in the heartbeat/status payload. Entries are rendered compactly: class,
-/// name, floor, ceiling, GND flags; UNDER/OVER also carry
+/// name, bottom, top, GND flags; UNDER/OVER also carry
 /// `vertical_clearance_ft`; THROUGH_120S carries `t_sec`. When every
 /// bucket is empty the function returns `null` so the JSON object omits
 /// the key via `Value::Null` handling upstream.
@@ -224,10 +224,10 @@ pub fn format_states_json(states: &AirspaceStates) -> Value {
         json!({
             "class": e.class,
             "name": e.name,
-            "floor_ft_msl": e.floor_ft_msl,
-            "ceiling_ft_msl": e.ceiling_ft_msl,
-            "floor_is_gnd": e.floor_is_gnd,
-            "ceiling_is_gnd": e.ceiling_is_gnd,
+            "bottom_ft_msl": e.bottom_ft_msl,
+            "top_ft_msl": e.top_ft_msl,
+            "bottom_is_gnd": e.bottom_is_gnd,
+            "top_is_gnd": e.top_is_gnd,
         })
     };
     let to_entry_margin = |e: &AirspaceEntry| -> Value {

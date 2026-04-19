@@ -101,11 +101,18 @@ pub fn resolve(apt_dat: &Path, airspace_txt: Option<&Path>) -> Result<AptDatCach
     Ok(cache)
 }
 
+/// Bump this whenever the parquet schema changes (column names / types /
+/// added or removed files) in an incompatible way. Folded into the cache
+/// directory hash, so old caches are transparently ignored and rebuilt
+/// rather than producing SQL errors against stale columns.
+const SCHEMA_VERSION: u64 = 2;
+
 fn cache_for(apt_dat: &Path) -> Result<AptDatCache> {
     let home = std::env::var_os("HOME")
         .ok_or_else(|| anyhow!("HOME is unset; cannot locate cache directory"))?;
     let canon = fs::canonicalize(apt_dat).unwrap_or_else(|_| apt_dat.to_path_buf());
     let mut hasher = DefaultHasher::new();
+    SCHEMA_VERSION.hash(&mut hasher);
     canon.hash(&mut hasher);
     let h = hasher.finish();
     let dir = PathBuf::from(home)
@@ -408,10 +415,10 @@ fn create_airspace_table(
             id BIGINT,
             class VARCHAR,
             name VARCHAR,
-            floor_ft_msl DOUBLE,
-            ceiling_ft_msl DOUBLE,
-            floor_is_gnd BOOLEAN,
-            ceiling_is_gnd BOOLEAN,
+            bottom_ft_msl DOUBLE,
+            top_ft_msl DOUBLE,
+            bottom_is_gnd BOOLEAN,
+            top_is_gnd BOOLEAN,
             min_lat DOUBLE,
             max_lat DOUBLE,
             min_lon DOUBLE,
@@ -428,10 +435,10 @@ fn create_airspace_table(
                 id,
                 a.class,
                 a.name,
-                a.floor_ft_msl,
-                a.ceiling_ft_msl,
-                a.floor_is_gnd,
-                a.ceiling_is_gnd,
+                a.bottom_ft_msl,
+                a.top_ft_msl,
+                a.bottom_is_gnd,
+                a.top_is_gnd,
                 a.min_lat,
                 a.max_lat,
                 a.min_lon,
@@ -443,8 +450,8 @@ fn create_airspace_table(
     }
     conn.execute_batch(
         "CREATE TABLE airspaces AS
-         SELECT id, class, name, floor_ft_msl, ceiling_ft_msl,
-                floor_is_gnd, ceiling_is_gnd,
+         SELECT id, class, name, bottom_ft_msl, top_ft_msl,
+                bottom_is_gnd, top_is_gnd,
                 min_lat, max_lat, min_lon, max_lon, polygon_wkt
          FROM airspaces_raw
          ORDER BY ST_Hilbert(
@@ -588,7 +595,7 @@ DP 37:30:00 N 122:10:00 W
         let (class, name, floor, ceiling): (String, String, f64, f64) = conn
             .query_row(
                 &format!(
-                    "SELECT class, name, floor_ft_msl, ceiling_ft_msl \
+                    "SELECT class, name, bottom_ft_msl, top_ft_msl \
                      FROM read_parquet('{}')",
                     cache.airspaces().display()
                 ),

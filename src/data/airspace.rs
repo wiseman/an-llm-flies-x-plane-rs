@@ -21,7 +21,7 @@
 //! Europe where they'd flood the heartbeat) and the stray AC=BRDR rows
 //! that appear in the sibling `borders.txt` (political boundaries).
 //! Vertices are normalized to signed decimal degrees; GND floors and
-//! ceilings collapse to 0 ft MSL with `floor_is_gnd` / `ceiling_is_gnd`
+//! "tops" collapse to 0 ft MSL with `bottom_is_gnd` / `top_is_gnd`
 //! flags preserved for display.
 
 use std::fs::File;
@@ -41,11 +41,11 @@ pub struct ParsedAirspace {
     /// Free-form name from the `AN` row.
     pub name: String,
     /// Lower limit in feet MSL. 0.0 when the row was `GND`.
-    pub floor_ft_msl: f64,
+    pub bottom_ft_msl: f64,
     /// Upper limit in feet MSL. 0.0 when the row was `GND`.
-    pub ceiling_ft_msl: f64,
-    pub floor_is_gnd: bool,
-    pub ceiling_is_gnd: bool,
+    pub top_ft_msl: f64,
+    pub bottom_is_gnd: bool,
+    pub top_is_gnd: bool,
     /// Polygon vertices as (lat, lon) decimal degrees, North and East
     /// positive. The polygon is closed: the last vertex equals the first.
     pub vertices: Vec<(f64, f64)>,
@@ -103,16 +103,16 @@ pub fn parse<R: BufRead>(reader: R) -> Result<Vec<ParsedAirspace>> {
                 if let Some(b) = cur.as_mut() {
                     let (ft, is_gnd) = parse_altitude(rest)
                         .with_context(|| format!("parsing AL at line {}", lineno))?;
-                    b.floor_ft_msl = ft;
-                    b.floor_is_gnd = is_gnd;
+                    b.bottom_ft_msl = ft;
+                    b.bottom_is_gnd = is_gnd;
                 }
             }
             "AH" => {
                 if let Some(b) = cur.as_mut() {
                     let (ft, is_gnd) = parse_altitude(rest)
                         .with_context(|| format!("parsing AH at line {}", lineno))?;
-                    b.ceiling_ft_msl = ft;
-                    b.ceiling_is_gnd = is_gnd;
+                    b.top_ft_msl = ft;
+                    b.top_is_gnd = is_gnd;
                 }
             }
             "DP" => {
@@ -136,10 +136,10 @@ pub fn parse<R: BufRead>(reader: R) -> Result<Vec<ParsedAirspace>> {
 struct Builder {
     class: String,
     name: String,
-    floor_ft_msl: f64,
-    ceiling_ft_msl: f64,
-    floor_is_gnd: bool,
-    ceiling_is_gnd: bool,
+    bottom_ft_msl: f64,
+    top_ft_msl: f64,
+    bottom_is_gnd: bool,
+    top_is_gnd: bool,
     vertices: Vec<(f64, f64)>,
 }
 
@@ -148,10 +148,10 @@ impl Builder {
         Self {
             class,
             name: String::new(),
-            floor_ft_msl: 0.0,
-            ceiling_ft_msl: 0.0,
-            floor_is_gnd: false,
-            ceiling_is_gnd: false,
+            bottom_ft_msl: 0.0,
+            top_ft_msl: 0.0,
+            bottom_is_gnd: false,
+            top_is_gnd: false,
             vertices: Vec::new(),
         }
     }
@@ -178,10 +178,10 @@ impl Builder {
         Some(ParsedAirspace {
             class: self.class,
             name: self.name,
-            floor_ft_msl: self.floor_ft_msl,
-            ceiling_ft_msl: self.ceiling_ft_msl,
-            floor_is_gnd: self.floor_is_gnd,
-            ceiling_is_gnd: self.ceiling_is_gnd,
+            bottom_ft_msl: self.bottom_ft_msl,
+            top_ft_msl: self.top_ft_msl,
+            bottom_is_gnd: self.bottom_is_gnd,
+            top_is_gnd: self.top_is_gnd,
             vertices: self.vertices,
             min_lat,
             max_lat,
@@ -316,10 +316,10 @@ DP 40:00:00 N 120:00:00 W
     fn gnd_floor_flagged_and_zero() {
         let v = parse(FIXTURE.as_bytes()).unwrap();
         let gwinn = v.iter().find(|a| a.name == "GWINN").unwrap();
-        assert!(gwinn.floor_is_gnd);
-        assert_eq!(gwinn.floor_ft_msl, 0.0);
-        assert!(!gwinn.ceiling_is_gnd);
-        assert_eq!(gwinn.ceiling_ft_msl, 2500.0);
+        assert!(gwinn.bottom_is_gnd);
+        assert_eq!(gwinn.bottom_ft_msl, 0.0);
+        assert!(!gwinn.top_is_gnd);
+        assert_eq!(gwinn.top_ft_msl, 2500.0);
     }
 
     #[test]

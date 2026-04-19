@@ -170,8 +170,8 @@ fn below_bravo_shelf_reports_under_with_margin() {
         .find(|e| e["name"].as_str() == Some("SAN FRANCISCO"))
         .expect("SF Bravo should be UNDER");
     assert_eq!(sf["vertical_clearance_ft"].as_f64().unwrap(), 500.0);
-    assert_eq!(sf["floor_ft_msl"].as_f64().unwrap(), 1500.0);
-    assert_eq!(sf["ceiling_ft_msl"].as_f64().unwrap(), 10000.0);
+    assert_eq!(sf["bottom_ft_msl"].as_f64().unwrap(), 1500.0);
+    assert_eq!(sf["top_ft_msl"].as_f64().unwrap(), 10000.0);
     // Inside should be empty at this point/altitude.
     assert!(out["airspace"]["inside"].as_array().unwrap().is_empty());
 }
