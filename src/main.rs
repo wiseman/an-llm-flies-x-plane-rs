@@ -19,7 +19,7 @@ use xplane_pilot::types::Vec2;
 #[derive(Parser, Debug)]
 #[command(about = "Deterministic offline sim / live X-Plane MVP bridge")]
 struct Cli {
-    #[arg(long, value_enum, default_value_t = Backend::Simple)]
+    #[arg(long, value_enum, default_value_t = Backend::Xplane)]
     backend: Backend,
 
     #[arg(long)]

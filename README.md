@@ -14,13 +14,13 @@ The live backend talks to X-Plane through the built-in web API and uses X-Plane'
 
 ### Download a prebuilt binary
 
-The offline mission runs as a standalone executable — no Rust toolchain required. Grab the latest release from [GitHub Releases](https://github.com/wiseman/an-llm-flies-x-plane-rs/releases/latest), extract the archive, and run `./sim-pilot` (or `sim-pilot.exe` on Windows).
+The pilot runs as a standalone executable — no Rust toolchain required. Grab the latest release from [GitHub Releases](https://github.com/wiseman/an-llm-flies-x-plane-rs/releases/latest), extract the archive, and run `./sim-pilot` (or `sim-pilot.exe` on Windows).
+
+By default the executable connects to a running X-Plane 12 (web API on port 8086) and needs an `OPENAI_API_KEY` in a `.env` file. To run the offline deterministic simulator with no X-Plane and no API key, pass `--backend simple`:
 
 ```bash
-./sim-pilot --crosswind-kt 10         # offline pattern with a 10 kt crosswind
+./sim-pilot --backend simple --crosswind-kt 10
 ```
-
-Live mode (`--backend xplane`) additionally needs X-Plane 12 running locally with the web API on 8086 and an `OPENAI_API_KEY`.
 
 ### Building from source
 
@@ -35,26 +35,27 @@ Live-mode DuckDB uses the spatial extension. The first run that touches the `sql
 
 ## Running
 
-### Offline (no X-Plane, no OpenAI key)
-
-The default backend runs a deterministic pattern mission against a point-mass dynamics model. Nothing to configure.
-
-```bash
-cargo run --release --                                      # zero-wind pattern → landing
-cargo run --release -- --crosswind-kt 10                    # 10 kt crosswind
-cargo run --release -- --log-csv out/flight.csv \
-                       --plots-dir out/plots                # CSV trace + SVG plots
-```
-
-### Live X-Plane
+### Live X-Plane (default)
 
 Requires X-Plane 12 running with the built-in web API enabled on port 8086, and an `OPENAI_API_KEY` (a `.env` file in the working directory is read at startup).
 
 ```bash
+cargo run --release --                                      # default: --backend xplane
 cargo run --release -- \
-  --backend xplane \
   --interactive-atc \
   --pilot-llm-model gpt-5.4-mini-2026-03-17
+```
+
+### Offline simulator (no X-Plane, no OpenAI key)
+
+Runs a deterministic pattern mission against a point-mass dynamics model. Nothing to configure beyond the flag.
+
+```bash
+cargo run --release -- --backend simple                     # zero-wind pattern → landing
+cargo run --release -- --backend simple --crosswind-kt 10   # 10 kt crosswind
+cargo run --release -- --backend simple \
+                       --log-csv out/flight.csv \
+                       --plots-dir out/plots                # CSV trace + SVG plots
 ```
 
 Common flags:

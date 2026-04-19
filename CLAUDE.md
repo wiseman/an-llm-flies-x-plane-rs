@@ -11,17 +11,17 @@ The Python project README has the user-facing overview (what the app does, tool 
 ## Commands
 
 ```bash
-# Offline deterministic simulation (no X-Plane, no OpenAI key).
-cargo run --release --                     # default: zero-wind pattern → landing
-cargo run --release -- --crosswind-kt 10 --log-csv output/flight.csv --plots-dir output/plots
+# Live X-Plane run (default backend; requires X-Plane 12 with web API on
+# 8086, OPENAI_API_KEY in .env). Runway truth auto-parses from the
+# detected X-Plane 12 apt.dat into zstd GeoParquet under
+# ~/.cache/sim_pilot/apt-<hash>/; pass --apt-dat-path to override the
+# autodetected location.
+cargo run --release --                     # default: --backend xplane
+cargo run --release -- --interactive-atc --pilot-llm-model gpt-5.4-mini-2026-03-17
 
-# Live X-Plane run (requires X-Plane 12 with web API on 8086, OPENAI_API_KEY in .env).
-# Runway truth auto-parses from the detected X-Plane 12 apt.dat into zstd
-# GeoParquet under ~/.cache/sim_pilot/apt-<hash>/; pass --apt-dat-path to
-# override the autodetected location.
-cargo run --release -- \
-  --backend xplane --interactive-atc \
-  --pilot-llm-model gpt-5.4-mini-2026-03-17
+# Offline deterministic simulation (no X-Plane, no OpenAI key).
+cargo run --release -- --backend simple
+cargo run --release -- --backend simple --crosswind-kt 10 --log-csv output/flight.csv --plots-dir output/plots
 
 # Tests.
 cargo test                                 # full suite (≈201 tests, ~1s wall-clock)
