@@ -122,12 +122,21 @@ pub fn format_snapshot_display(snapshot: Option<&StatusSnapshot>) -> String {
         fmt_left("°", 8),
         tgt_str(tgt_hdg, 7, "°"),
     ));
-    // altitude
+    // altitude (AGL)
     out.push_str(&format!(
         "  altitude       {}{}{}\n",
         fmt_right(&format!("{:.0}", state.alt_agl_ft), 10),
         fmt_left(" AGL", 8),
         tgt_str(tgt_alt_agl, 7, " AGL"),
+    ));
+    // altitude (MSL) — blank label so the instrument name column stays
+    // aligned and the eye reads this as the same metric at a different
+    // reference.
+    out.push_str(&format!(
+        "                 {}{}{}\n",
+        fmt_right(&format!("{:.0}", state.alt_msl_ft), 10),
+        fmt_left(" MSL", 8),
+        tgt_str(tgt_alt_msl, 7, " MSL"),
     ));
     // airspeed
     out.push_str(&format!(
@@ -273,6 +282,15 @@ pub fn run_tui(
     // inserted. All editing ops (insert, backspace, arrow keys, C-a/e/k)
     // work relative to this point.
     let mut input_cursor: usize = 0;
+    // Submitted lines, most-recent last. Up/Down walks this list.
+    let mut history: Vec<String> = Vec::new();
+    // Some(i) means the input pane is currently showing history[i]. None
+    // means the user is editing a fresh draft (the default state, and what
+    // Down-arrow restores when walking past the most-recent entry).
+    let mut history_index: Option<usize> = None;
+    // Draft saved when the user first presses Up from a fresh line, so
+    // Down can restore it once they walk past the end of history.
+    let mut pending_draft: String = String::new();
     let mut log_detail = true;
     // None = follow live tail (default). Some(offset) = paused at that
     // absolute scroll offset. Absolute rather than relative-to-bottom so
@@ -446,6 +464,7 @@ pub fn run_tui(
                         }
                         let raw = input_buffer.trim().to_string();
                         if !raw.is_empty() {
+                            history_record(&mut history, &raw, INPUT_HISTORY_MAX);
                             let (source, payload) = parse_input_source(&raw);
                             let msg = match source.as_str() {
                                 "atc" => IncomingMessage::atc(payload.clone()),
@@ -461,10 +480,30 @@ pub fn run_tui(
                         }
                         input_buffer.clear();
                         input_cursor = 0;
+                        history_index = None;
+                        pending_draft.clear();
                     }
                     KeyCode::Esc => {
                         break_outer(&stop_event);
                         break;
+                    }
+                    KeyCode::Up => {
+                        history_go_back(
+                            &history,
+                            &mut input_buffer,
+                            &mut input_cursor,
+                            &mut history_index,
+                            &mut pending_draft,
+                        );
+                    }
+                    KeyCode::Down => {
+                        history_go_forward(
+                            &history,
+                            &mut input_buffer,
+                            &mut input_cursor,
+                            &mut history_index,
+                            &mut pending_draft,
+                        );
                     }
                     KeyCode::Left => {
                         if input_cursor > 0 {
@@ -547,7 +586,7 @@ pub fn run_tui(
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
-                    Constraint::Length(12), // status
+                    Constraint::Length(13), // status
                     Constraint::Min(3),     // log (scrolling)
                     Constraint::Length(8),  // radio
                     Constraint::Length(5),  // input (3 content lines + borders)
@@ -600,7 +639,7 @@ pub fn run_tui(
             );
 
             let input_title =
-                " INPUT — space/tab hold to talk · enter to send · c-a/e/k edit · ctrl-t log detail · pgup/pgdn/end scroll log · ctrl-c to exit ";
+                " INPUT — space/tab hold to talk · enter to send · ↑/↓ history · c-a/e/k edit · ctrl-t log detail · pgup/pgdn/end scroll log · ctrl-c to exit ";
             let ptt_snap: Option<PttSnapshot> = ptt.as_ref().map(|p| p.snapshot());
             let mut spans: Vec<Span> = vec![
                 Span::styled("> ", Style::default().fg(Color::Cyan)),
@@ -949,6 +988,74 @@ fn kill_to_row_end(buffer: &mut String, cursor: usize, width: u16) {
     }
 }
 
+/// Cap on the number of retained history entries. Oldest are dropped when
+/// the cap is exceeded.
+const INPUT_HISTORY_MAX: usize = 200;
+
+/// Record a submitted entry in the input history. Consecutive duplicates
+/// are coalesced (bash-style), and the oldest entries are dropped once
+/// `max_len` is exceeded.
+fn history_record(history: &mut Vec<String>, entry: &str, max_len: usize) {
+    if history.last().map(|s| s.as_str()) == Some(entry) {
+        return;
+    }
+    history.push(entry.to_string());
+    while history.len() > max_len {
+        history.remove(0);
+    }
+}
+
+/// Up-arrow: walk backward through history. If this is the first step
+/// back (history_index is None), the current buffer is stashed into
+/// `pending_draft` so Down-arrow can restore it later. Saturates at the
+/// oldest entry.
+fn history_go_back(
+    history: &[String],
+    input_buffer: &mut String,
+    input_cursor: &mut usize,
+    history_index: &mut Option<usize>,
+    pending_draft: &mut String,
+) {
+    if history.is_empty() {
+        return;
+    }
+    let new_index = match *history_index {
+        None => {
+            *pending_draft = std::mem::take(input_buffer);
+            history.len() - 1
+        }
+        Some(0) => 0,
+        Some(i) => i - 1,
+    };
+    *history_index = Some(new_index);
+    *input_buffer = history[new_index].clone();
+    *input_cursor = input_buffer.chars().count();
+}
+
+/// Down-arrow: walk forward through history. If the cursor was past the
+/// most-recent entry, the in-progress `pending_draft` is restored and
+/// history_index is cleared. No-op when not browsing history.
+fn history_go_forward(
+    history: &[String],
+    input_buffer: &mut String,
+    input_cursor: &mut usize,
+    history_index: &mut Option<usize>,
+    pending_draft: &mut String,
+) {
+    let Some(i) = *history_index else {
+        return;
+    };
+    if i + 1 < history.len() {
+        let ni = i + 1;
+        *history_index = Some(ni);
+        *input_buffer = history[ni].clone();
+    } else {
+        *history_index = None;
+        *input_buffer = std::mem::take(pending_draft);
+    }
+    *input_cursor = input_buffer.chars().count();
+}
+
 fn is_verbose_line(line: &str) -> bool {
     line.contains("[llm-worker] tool ")
         || line.contains("[heartbeat]")
@@ -1119,6 +1226,19 @@ fn render_status_fragments(
         tgt_alt_agl.map(|v| format!("{:>7.0}", v)),
         " AGL",
         alt_style,
+    ));
+    // altitude MSL
+    let msl_style = match tgt_alt_msl {
+        Some(t) => dev_style((state.alt_msl_ft - t).abs(), 50.0, 200.0),
+        None => val_style,
+    };
+    lines.push(instrument_line(
+        "",
+        format!("{:>10.0}", state.alt_msl_ft),
+        " MSL",
+        tgt_alt_msl.map(|v| format!("{:>7.0}", v)),
+        " MSL",
+        msl_style,
     ));
     // airspeed
     let spd_style = match tgt_spd {
@@ -1413,6 +1533,104 @@ mod tests {
         // Cursor at char 5; end of row 0 would be char 38, clamped to 11.
         kill_to_row_end(&mut buf, 5, 40);
         assert_eq!(buf, "hello");
+    }
+
+    // ---- Input history ----------------------------------------------
+
+    #[test]
+    fn history_record_dedups_consecutive_duplicates() {
+        let mut h: Vec<String> = Vec::new();
+        history_record(&mut h, "a", 10);
+        history_record(&mut h, "a", 10);
+        history_record(&mut h, "b", 10);
+        history_record(&mut h, "b", 10);
+        history_record(&mut h, "a", 10);
+        assert_eq!(h, vec!["a".to_string(), "b".into(), "a".into()]);
+    }
+
+    #[test]
+    fn history_record_drops_oldest_past_cap() {
+        let mut h: Vec<String> = Vec::new();
+        for i in 0..5 {
+            history_record(&mut h, &i.to_string(), 3);
+        }
+        // Oldest entries evicted; the most-recent 3 remain.
+        assert_eq!(h, vec!["2".to_string(), "3".into(), "4".into()]);
+    }
+
+    #[test]
+    fn up_arrow_walks_history_and_saves_draft() {
+        let history = vec!["first".to_string(), "second".into(), "third".into()];
+        let mut buf = String::from("draft");
+        let mut cursor = 5;
+        let mut idx: Option<usize> = None;
+        let mut draft = String::new();
+
+        // First Up: stash the draft and load "third" (most recent).
+        history_go_back(&history, &mut buf, &mut cursor, &mut idx, &mut draft);
+        assert_eq!(buf, "third");
+        assert_eq!(cursor, 5);
+        assert_eq!(idx, Some(2));
+        assert_eq!(draft, "draft");
+
+        // Up → "second".
+        history_go_back(&history, &mut buf, &mut cursor, &mut idx, &mut draft);
+        assert_eq!(buf, "second");
+        assert_eq!(idx, Some(1));
+
+        // Up → "first".
+        history_go_back(&history, &mut buf, &mut cursor, &mut idx, &mut draft);
+        assert_eq!(buf, "first");
+        assert_eq!(idx, Some(0));
+
+        // Up at oldest: saturates.
+        history_go_back(&history, &mut buf, &mut cursor, &mut idx, &mut draft);
+        assert_eq!(buf, "first");
+        assert_eq!(idx, Some(0));
+    }
+
+    #[test]
+    fn down_arrow_walks_forward_and_restores_draft() {
+        let history = vec!["first".to_string(), "second".into(), "third".into()];
+        let mut buf = String::from("original draft");
+        let mut cursor = buf.chars().count();
+        let mut idx: Option<usize> = None;
+        let mut draft = String::new();
+
+        // Two Ups: land on "second" (idx 1), draft "original draft" stashed.
+        history_go_back(&history, &mut buf, &mut cursor, &mut idx, &mut draft);
+        history_go_back(&history, &mut buf, &mut cursor, &mut idx, &mut draft);
+        assert_eq!(buf, "second");
+        assert_eq!(idx, Some(1));
+
+        // Down → "third".
+        history_go_forward(&history, &mut buf, &mut cursor, &mut idx, &mut draft);
+        assert_eq!(buf, "third");
+        assert_eq!(idx, Some(2));
+
+        // Down past end → draft restored, idx cleared.
+        history_go_forward(&history, &mut buf, &mut cursor, &mut idx, &mut draft);
+        assert_eq!(buf, "original draft");
+        assert_eq!(idx, None);
+        assert_eq!(cursor, "original draft".chars().count());
+
+        // Down while not browsing: no-op.
+        history_go_forward(&history, &mut buf, &mut cursor, &mut idx, &mut draft);
+        assert_eq!(buf, "original draft");
+        assert_eq!(idx, None);
+    }
+
+    #[test]
+    fn up_on_empty_history_is_noop() {
+        let history: Vec<String> = Vec::new();
+        let mut buf = String::from("typing");
+        let mut cursor = 6;
+        let mut idx: Option<usize> = None;
+        let mut draft = String::new();
+        history_go_back(&history, &mut buf, &mut cursor, &mut idx, &mut draft);
+        assert_eq!(buf, "typing");
+        assert_eq!(idx, None);
+        assert!(draft.is_empty());
     }
 
     // ---- PTT key tracker tests ---------------------------------------

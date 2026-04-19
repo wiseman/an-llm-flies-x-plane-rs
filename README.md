@@ -74,6 +74,7 @@ Keys:
 | Hold Tab             | Push-to-talk as ATC (auto-prefixed `[atc]`).                                                            |
 | Ctrl-T               | Toggle log-pane detail (compact vs full).                                                               |
 | Left / Right         | Move the input cursor one character.                                                                    |
+| Up / Down            | Walk backward/forward through the submitted-line history. The in-progress draft is preserved.           |
 | Ctrl-A / Ctrl-E      | Smart home / end in the input pane. Repeated presses walk across wrapped visual rows.                   |
 | Ctrl-K               | Kill from the cursor to the end of the current visual row.                                              |
 | PgUp / PgDn / End    | Scroll the log pane. Home view auto-pins to the tail.                                                   |
