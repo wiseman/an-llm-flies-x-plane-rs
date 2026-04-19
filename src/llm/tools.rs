@@ -184,6 +184,11 @@ pub fn build_status_payload(
                 .unwrap()
                 .insert("engine_rpm".into(), json!(rpm.round() as i64));
         }
+        if let Some(pb) = b.get_dataref_value(PARKING_BRAKE_RATIO.name) {
+            let map = obj.as_object_mut().unwrap();
+            map.insert("parking_brake_set".into(), Value::Bool(pb >= 0.5));
+            map.insert("parking_brake_ratio".into(), json!(round_f64(pb, 2)));
+        }
     }
     if let Some(fuel) = build_fuel_payload(bridge) {
         obj.as_object_mut().unwrap().insert("fuel".into(), fuel);
@@ -1286,6 +1291,18 @@ pub fn tool_engage_taxi(ctx: &ToolContext, args: &Map<String, Value>) -> String 
             return "error: no X-Plane bridge available; engage_taxi needs the georef".to_string();
         }
     };
+    let released_brake_ratio = match parking_brake_ratio(ctx) {
+        Some(v) if v >= 0.5 => {
+            match bridge.write_dataref_values(&[(
+                PARKING_BRAKE_RATIO.name.to_string(),
+                0.0,
+            )]) {
+                Ok(_) => Some(v),
+                Err(e) => return format!("error: releasing parking brake: {}", e),
+            }
+        }
+        _ => None,
+    };
     let airport = match arg_str(args, "airport_ident") {
         Ok(s) => s.to_string(),
         Err(e) => return format!("error: {}", e),
@@ -1394,6 +1411,9 @@ pub fn tool_engage_taxi(ctx: &ToolContext, args: &Map<String, Value>) -> String 
         "engaged taxi {} — {} legs, {:.0} m",
         plan.airport_ident, leg_count, plan.total_distance_m
     );
+    if let Some(v) = released_brake_ratio {
+        summary.push_str(&format!(" (released parking brake, ratio was {:.2})", v));
+    }
     if let Some(d) = pullout_ft {
         summary.push_str(&format!(" (pullout: {:.0} ft from start)", d));
     }
@@ -1975,9 +1995,11 @@ speed targets ~15 kt on straights / ~5 kt through sharp turns / 0 at the \
 final node where the aircraft parks with hold brake applied. Displaces \
 any currently-engaged three-axis profile (pattern_fly, takeoff, cruise).
 
-Requires the aircraft to be on the ground with the parking brake \
-RELEASED. Requires a live X-Plane bridge (needs the georef anchor to \
-convert the planned lat/lon waypoints into the pilot's runway-frame feet).
+If the parking brake is set when this is called, it is released \
+automatically — no need to call set_parking_brake(engaged=False) first. \
+Requires the aircraft to be on the ground and a live X-Plane bridge \
+(needs the georef anchor to convert the planned lat/lon waypoints into \
+the pilot's runway-frame feet).
 
 For clearances where you want to preview the route before committing, \
 call plan_taxi_route first — its output has the same summary plus \

@@ -721,6 +721,36 @@ fn get_status_before_any_update_returns_uninitialized() {
 }
 
 #[test]
+fn get_status_includes_parking_brake_fields_when_bridge_present() {
+    let bridge = FakeBridge::new(
+        &[("sim/cockpit2/controls/parking_brake_ratio", 0.75)],
+        47.4638,
+        -122.308,
+    );
+    let ctx = make_ctx(Some(bridge.clone() as Arc<dyn ToolBridge>), None);
+    seed_snapshot(&ctx, 0, true);
+    let r = dispatch_tool(&call("get_status", json!({})), &ctx);
+    let v: serde_json::Value = serde_json::from_str(&r).unwrap();
+    assert_eq!(v["parking_brake_set"], json!(true));
+    assert_eq!(v["parking_brake_ratio"], json!(0.75));
+}
+
+#[test]
+fn get_status_reports_released_parking_brake() {
+    let bridge = FakeBridge::new(
+        &[("sim/cockpit2/controls/parking_brake_ratio", 0.0)],
+        47.4638,
+        -122.308,
+    );
+    let ctx = make_ctx(Some(bridge.clone() as Arc<dyn ToolBridge>), None);
+    seed_snapshot(&ctx, 0, true);
+    let r = dispatch_tool(&call("get_status", json!({})), &ctx);
+    let v: serde_json::Value = serde_json::from_str(&r).unwrap();
+    assert_eq!(v["parking_brake_set"], json!(false));
+    assert_eq!(v["parking_brake_ratio"], json!(0.0));
+}
+
+#[test]
 fn sleep_returns_string() {
     let ctx = make_ctx(None, None);
     let r = dispatch_tool(&call("sleep", json!({})), &ctx);
@@ -988,6 +1018,84 @@ fn engage_taxi_swaps_in_taxi_profile_and_reports_summary() {
     assert!(r.contains("A -> D"), "got: {}", r);
     let names = ctx.pilot.lock().list_profile_names();
     assert_eq!(names, vec!["taxi"]);
+}
+
+#[test]
+fn engage_taxi_releases_parking_brake_when_set() {
+    let dir = TempDir::new().unwrap();
+    build_taxi_fixture_parquet(dir.path());
+    let bridge = FakeBridge::new(
+        &[
+            ("sim/flightmodel/position/latitude", 37.000500),
+            ("sim/flightmodel/position/longitude", -122.002000),
+            ("sim/cockpit2/controls/parking_brake_ratio", 1.0),
+        ],
+        37.000100,
+        -121.997500,
+    );
+    let ctx = make_ctx(
+        Some(bridge.clone() as Arc<dyn ToolBridge>),
+        Some(dir.path().to_path_buf()),
+    );
+    let r = dispatch_tool(
+        &call(
+            "engage_taxi",
+            json!({
+                "airport_ident": "KTEST",
+                "destination_runway": "09",
+                "via_taxiways": ["A", "D"],
+                "start_lat": 37.000500,
+                "start_lon": -122.002000,
+            }),
+        ),
+        &ctx,
+    );
+    assert!(!r.starts_with("error"), "got: {}", r);
+    assert!(r.contains("released parking brake"), "got: {}", r);
+    let writes = bridge.writes();
+    let brake_release = writes
+        .iter()
+        .find(|m| m.get("sim/cockpit2/controls/parking_brake_ratio") == Some(&0.0));
+    assert!(brake_release.is_some(), "expected a parking_brake_ratio=0 write");
+}
+
+#[test]
+fn engage_taxi_leaves_parking_brake_alone_when_released() {
+    let dir = TempDir::new().unwrap();
+    build_taxi_fixture_parquet(dir.path());
+    let bridge = FakeBridge::new(
+        &[
+            ("sim/flightmodel/position/latitude", 37.000500),
+            ("sim/flightmodel/position/longitude", -122.002000),
+            ("sim/cockpit2/controls/parking_brake_ratio", 0.0),
+        ],
+        37.000100,
+        -121.997500,
+    );
+    let ctx = make_ctx(
+        Some(bridge.clone() as Arc<dyn ToolBridge>),
+        Some(dir.path().to_path_buf()),
+    );
+    let r = dispatch_tool(
+        &call(
+            "engage_taxi",
+            json!({
+                "airport_ident": "KTEST",
+                "destination_runway": "09",
+                "via_taxiways": ["A", "D"],
+                "start_lat": 37.000500,
+                "start_lon": -122.002000,
+            }),
+        ),
+        &ctx,
+    );
+    assert!(!r.starts_with("error"), "got: {}", r);
+    assert!(!r.contains("released parking brake"), "got: {}", r);
+    let writes = bridge.writes();
+    let brake_write = writes
+        .iter()
+        .find(|m| m.contains_key("sim/cockpit2/controls/parking_brake_ratio"));
+    assert!(brake_write.is_none(), "unexpected brake write: {:?}", writes);
 }
 
 #[test]
