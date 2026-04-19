@@ -16,7 +16,7 @@ Requires a recent stable Rust toolchain. Release builds are recommended — the 
 
 ```bash
 cargo build --release
-cargo test  --release        # ~290 tests, runs in ~3 seconds
+cargo test  --release        # ~320 tests, runs in ~4 seconds
 ```
 
 Live-mode DuckDB uses the spatial extension. The first run that touches the `sql_query` tool downloads it from the DuckDB repo into `~/.duckdb/extensions/`; after that it's cached and runs offline.
@@ -63,7 +63,7 @@ The interactive TUI is four stacked panes:
 - **STATUS** — phase, active profiles, position, altitude, speed, heading, control surfaces, flap/gear, throttle.
 - **LOG** — timestamped transcript of operator messages, ATC, LLM replies, tool calls, and heartbeats. Scrollable.
 - **RADIO** — radio transmissions only, labeled with the frequency they went out on.
-- **INPUT** — single-line editor for typing to the operator or ATC.
+- **INPUT** — type instructions to the LLM pilot, or act as ATC. emacs/bash-style keybindings; long lines wrap onto additional visual rows.
 
 Keys:
 
