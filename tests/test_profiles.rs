@@ -220,6 +220,49 @@ fn takeoff_starts_in_preflight_and_advances_on_acceleration() {
 }
 
 #[test]
+fn takeoff_profile_initial_climb_uses_l1_and_banks_toward_centerline() {
+    // Aircraft 3000 ft past the threshold, 400 ft offset to the "right"
+    // of the runway centerline (positive y in runway frame), climbing on
+    // runway heading. The new L1-follower-backed initial_climb guidance
+    // should command a LEFT bank (negative) to recover the centerline.
+    let (cfg, pilot) = make_pilot();
+    let rf = pilot.runway_frame.clone();
+    let mut profile = TakeoffProfile::new(cfg.clone(), rf.clone());
+    // Pin the phase — without this the ModeManager would start in
+    // Preflight and need us to drive through takeoff_roll/rotate before
+    // it settles on InitialClimb.
+    profile.phase = FlightPhase::InitialClimb;
+
+    let course = cfg.airport.runway.course_deg;
+    let position_ft = rf.to_world_frame(Vec2::new(3000.0, 400.0));
+    let vy = cfg.performance.vy_kt;
+    let state = AircraftState {
+        position_ft,
+        alt_msl_ft: cfg.airport.field_elevation_ft + 400.0,
+        alt_agl_ft: 400.0,
+        heading_deg: course,
+        track_deg: course,
+        ias_kt: vy,
+        tas_kt: vy,
+        gs_kt: vy,
+        ground_velocity_ft_s: heading_to_vector(course, vy * KT_TO_FPS),
+        on_ground: false,
+        ..AircraftState::synthetic_default()
+    };
+    use xplane_pilot::core::profiles::GuidanceProfile;
+    let tick = profile.contribute(&state, 0.2);
+    let g = tick.contribution;
+    assert_eq!(g.lateral_mode, Some(LateralMode::PathFollow));
+    assert!(g.target_path.is_some(), "target_path should be set for L1 follow");
+    let bank = g.target_bank_deg.expect("L1 should command a bank");
+    assert!(
+        bank < -0.5,
+        "aircraft offset right of centerline should bank left (negative), got {}",
+        bank
+    );
+}
+
+#[test]
 fn shortest_path_default_goes_left_from_060_to_290() {
     let mut profile = HeadingHoldProfile::new(290.0, 25.0, None).unwrap();
     let state = AircraftState {

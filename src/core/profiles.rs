@@ -337,6 +337,7 @@ pub struct TakeoffProfile {
     pub phase: FlightPhase,
     mode_manager: ModeManager,
     safety_monitor: SafetyMonitor,
+    lateral_guidance: L1PathFollower,
     pattern_stub: PatternGeometry,
     route_stub: RouteManager,
 }
@@ -351,6 +352,7 @@ impl TakeoffProfile {
         Self {
             mode_manager: ModeManager::new(config.clone()),
             safety_monitor: SafetyMonitor::new(config.clone()),
+            lateral_guidance: L1PathFollower::new(),
             pattern_stub,
             route_stub: RouteManager::new(vec![]),
             phase: FlightPhase::Preflight,
@@ -395,7 +397,30 @@ impl GuidanceProfile for TakeoffProfile {
         let guidance = match self.phase {
             FlightPhase::TakeoffRoll => build_takeoff_roll_guidance(&self.config, &self.runway_frame),
             FlightPhase::Rotate => build_rotate_guidance(&self.config, &self.runway_frame, state, bank_limit),
-            FlightPhase::InitialClimb | FlightPhase::EnrouteClimb | FlightPhase::Cruise => {
+            FlightPhase::InitialClimb => {
+                // L1 path follower anchored on the extended runway
+                // centerline (pavement-end -> 30_000 ft downtrack) so the
+                // climbout tracks the line, not just the heading — same
+                // behavior pattern_fly uses for the pattern legs, which
+                // means crosstrack offset feeds into bank and crosswind
+                // is handled implicitly by the resulting crab.
+                let leg = self.runway_frame.departure_leg(30_000.0);
+                let (desired_track, bank_cmd) =
+                    self.lateral_guidance.follow_leg(state, leg, bank_limit);
+                GuidanceTargets {
+                    lateral_mode: LateralMode::PathFollow,
+                    vertical_mode: VerticalMode::Tecs,
+                    target_bank_deg: Some(bank_cmd),
+                    target_track_deg: Some(desired_track),
+                    target_heading_deg: Some(self.runway_frame.runway.course_deg),
+                    target_path: Some(leg),
+                    target_altitude_ft: Some(self.config.cruise_altitude_ft()),
+                    target_speed_kt: Some(self.config.performance.vy_kt),
+                    throttle_limit: Some((0.9, 1.0)),
+                    ..Default::default()
+                }
+            }
+            FlightPhase::EnrouteClimb | FlightPhase::Cruise => {
                 let target_course = self.runway_frame.runway.course_deg;
                 let track_error = wrap_degrees_180(target_course - state.track_deg);
                 let target_bank = clamp(track_error * 0.35, -bank_limit, bank_limit);
@@ -582,15 +607,22 @@ impl PatternFlyProfile {
     }
 
     fn initial_climb_guidance(&self, state: &AircraftState, bank_limit: f64) -> GuidanceTargets {
-        let course = self.runway_frame.runway.course_deg;
-        let track_error = wrap_degrees_180(course - state.track_deg);
-        let bank_cmd = clamp(track_error * 0.35, -bank_limit, bank_limit);
+        // Follow the extended runway centerline with the same L1 follower
+        // the pattern legs use. Crosstrack offset accumulated during
+        // rotation / early climb gets actively recovered instead of
+        // leaving us parallel-to but offset-from the centerline like the
+        // old P-on-track form did, and crosswind is handled implicitly
+        // by the resulting crab angle.
+        let leg = self.runway_frame.departure_leg(30_000.0);
+        let (desired_track, bank_cmd) =
+            self.lateral_guidance.follow_leg(state, leg, bank_limit);
         GuidanceTargets {
-            lateral_mode: LateralMode::TrackHold,
+            lateral_mode: LateralMode::PathFollow,
             vertical_mode: VerticalMode::Tecs,
             target_bank_deg: Some(bank_cmd),
-            target_track_deg: Some(course),
-            target_heading_deg: Some(course),
+            target_track_deg: Some(desired_track),
+            target_heading_deg: Some(self.runway_frame.runway.course_deg),
+            target_path: Some(leg),
             target_altitude_ft: Some(self.config.pattern_altitude_msl_ft()),
             target_speed_kt: Some(self.config.performance.vy_kt),
             throttle_limit: Some((0.75, 1.0)),
