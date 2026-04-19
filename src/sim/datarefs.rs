@@ -37,6 +37,21 @@ pub const Y_AGL_M: DatarefSpec = DatarefSpec::new("sim/flightmodel/position/y_ag
 pub const SIM_TIME_S: DatarefSpec = DatarefSpec::new("sim/time/total_running_time_sec");
 pub const ON_GROUND_0: DatarefSpec = DatarefSpec::at("sim/flightmodel2/gear/on_ground", 0);
 pub const HAS_CRASHED: DatarefSpec = DatarefSpec::new("sim/flightmodel2/misc/has_crashed");
+/// Total fuel mass onboard, summed across all tanks, in kg.
+pub const FUEL_KG: DatarefSpec = DatarefSpec::new("sim/flightmodel/weight/m_fuel_total");
+/// Max fuel capacity for the loaded aircraft, in kg.
+pub const FUEL_CAPACITY_KG: DatarefSpec = DatarefSpec::new("sim/aircraft/weight/acf_m_fuel_tot");
+/// Per-engine fuel flow in kg/s. `coerce_scalar` reads engine 0 only —
+/// that covers the C172 target; multi-engine aircraft would need a
+/// per-index read to get a real total.
+pub const FUEL_FLOW_KG_SEC: DatarefSpec =
+    DatarefSpec::new("sim/cockpit2/engine/indicators/fuel_flow_kg_sec");
+/// Per-engine tachometer reading in RPM. For fixed-pitch piston aircraft
+/// (the C172 target) this is the same as prop RPM. `coerce_scalar` reads
+/// index 0 — multi-engine aircraft would need per-index reads to see
+/// each engine separately.
+pub const ENGINE_RPM: DatarefSpec =
+    DatarefSpec::new("sim/cockpit2/engine/indicators/engine_speed_rpm");
 
 pub const YOKE_PITCH_RATIO: DatarefSpec = DatarefSpec::new("sim/joystick/yoke_pitch_ratio");
 pub const YOKE_ROLL_RATIO: DatarefSpec = DatarefSpec::new("sim/joystick/yoke_roll_ratio");
@@ -84,6 +99,10 @@ pub const STATE_DATAREFS: &[DatarefSpec] = &[
     SIM_TIME_S,
     ON_GROUND_0,
     HAS_CRASHED,
+    FUEL_KG,
+    FUEL_CAPACITY_KG,
+    FUEL_FLOW_KG_SEC,
+    ENGINE_RPM,
     PARKING_BRAKE_RATIO,
     COM1_FREQUENCY_HZ_833,
     COM2_FREQUENCY_HZ_833,

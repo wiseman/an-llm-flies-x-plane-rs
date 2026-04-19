@@ -98,6 +98,39 @@ fn pilot_reference_label(ctx: &ToolContext) -> String {
     parts.join(" ")
 }
 
+/// Read the three fuel datarefs (`m_fuel_total`, `acf_m_fuel_tot`, engine-0
+/// fuel flow) and shape them into the `"fuel"` object embedded in the
+/// status payload. Returns `None` when no bridge is attached or when
+/// `m_fuel_total` hasn't been reported yet — both of which happen in
+/// offline / test contexts. Flow is converted from kg/s to kg/hr since
+/// that reads more naturally to the LLM and matches how pilots think
+/// about burn rates.
+fn build_fuel_payload(bridge: Option<&dyn ToolBridge>) -> Option<Value> {
+    let b = bridge?;
+    let kg = b.get_dataref_value(crate::sim::datarefs::FUEL_KG.name)?;
+    let mut obj = json!({ "kg": round_f64(kg, 2) });
+    if let Some(capacity) = b.get_dataref_value(crate::sim::datarefs::FUEL_CAPACITY_KG.name) {
+        if capacity > 0.0 {
+            obj.as_object_mut()
+                .unwrap()
+                .insert("capacity_kg".into(), json!(round_f64(capacity, 2)));
+            obj.as_object_mut().unwrap().insert(
+                "fraction".into(),
+                json!(round_f64((kg / capacity).clamp(0.0, 1.0), 3)),
+            );
+        }
+    }
+    if let Some(flow_sec) =
+        b.get_dataref_value(crate::sim::datarefs::FUEL_FLOW_KG_SEC.name)
+    {
+        obj.as_object_mut().unwrap().insert(
+            "flow_kg_hr".into(),
+            json!(round_f64(flow_sec * 3600.0, 2)),
+        );
+    }
+    Some(obj)
+}
+
 pub fn build_status_payload(
     snapshot: Option<&StatusSnapshot>,
     bridge: Option<&dyn ToolBridge>,
@@ -140,6 +173,16 @@ pub fn build_status_payload(
         obj.as_object_mut()
             .unwrap()
             .insert("has_crashed".into(), Value::Bool(crashed));
+    }
+    if let Some(b) = bridge {
+        if let Some(rpm) = b.get_dataref_value(crate::sim::datarefs::ENGINE_RPM.name) {
+            obj.as_object_mut()
+                .unwrap()
+                .insert("engine_rpm".into(), json!(rpm.round() as i64));
+        }
+    }
+    if let Some(fuel) = build_fuel_payload(bridge) {
+        obj.as_object_mut().unwrap().insert("fuel".into(), fuel);
     }
 
     // Airspace awareness is gated on (a) a live lat/lon (otherwise there's
@@ -445,8 +488,8 @@ pub fn open_apt_dat_parquet(
     if airspaces.exists() {
         conn.execute_batch(&format!(
             "CREATE VIEW airspaces AS
-               SELECT id, class, name, floor_ft_msl, ceiling_ft_msl,
-                      floor_is_gnd, ceiling_is_gnd,
+               SELECT id, class, name, bottom_ft_msl, top_ft_msl,
+                      bottom_is_gnd, top_is_gnd,
                       min_lat, max_lat, min_lon, max_lon, polygon_wkt,
                       ST_GeomFromText(polygon_wkt) AS footprint
                FROM read_parquet('{airspaces}');",
