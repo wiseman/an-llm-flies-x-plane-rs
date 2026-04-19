@@ -68,6 +68,7 @@ Common flags:
 | `--heartbeat-interval <s>`            | Idle cadence for the LLM heartbeat pump (default 30 s). The pump also wakes on phase/profile events.       |
 | `--no-heartbeat`, `--no-voice`, `--no-track`, `--no-log-file` | Disable individual subsystems.                                                       |
 | `--engage-profile pattern_fly`        | Start with `pattern_fly` already engaged instead of idle holds.                                            |
+| `--pilot-mode normal\|realistic`      | Pick the pilot persona at startup. `normal` (default) is the base prompt; `realistic` layers on real-world ATC phraseology, mandatory readbacks, stabilized-approach criteria, and procedural discipline. The mode can also be switched at runtime from the TUI with `/mode <name>`. |
 
 ### TUI
 
@@ -92,6 +93,13 @@ Keys:
 | Ctrl-C, Ctrl-D, Esc  | Exit cleanly (flushes the flight-track KML).                                                            |
 
 The input pane shows a steady (non-blinking) block cursor when idle. During PTT the cursor is replaced by an animated audio-level glyph, and a live dimmed transcription preview streams alongside the text you've typed.
+
+Slash commands (typed into the INPUT pane and submitted with Enter):
+
+| Command             | Action                                                                                                  |
+| ------------------- | ------------------------------------------------------------------------------------------------------- |
+| `/mode normal`      | Switch the pilot persona to normal mode. Injected as a `[MODE_SWITCH]` user message in conversation history; the system prompt prefix stays byte-stable so prompt caching is preserved. |
+| `/mode realistic`   | Switch to realistic mode (real-world ATC phraseology, readbacks, procedural discipline). Same delivery as above. |
 
 Voice transcription streams to the OpenAI Realtime API (`gpt-4o-mini-transcribe`) over WebSocket. Disable with `--no-voice` or by not providing an `OPENAI_API_KEY`.
 
