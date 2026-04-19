@@ -239,10 +239,16 @@ impl PilotCore {
         let mut metadata: Option<PatternMetadata> = None;
         for profile in &mut self.active_profiles {
             let owns: Vec<Axis> = profile.owns().into_iter().collect();
+            let ProfileTick { contribution, hand_off } = profile.contribute(state, dt);
+            // Capture metadata AFTER contribute(): a profile that
+            // transitions phase (e.g. Final -> GoAround) updates its
+            // last_go_around_reason inside contribute(). Reading
+            // pattern_metadata() before would snapshot the prior tick's
+            // values, leaving the GoAround transition heartbeat with
+            // reason=None ("unknown") even when a real cause was set.
             if metadata.is_none() {
                 metadata = profile.pattern_metadata();
             }
-            let ProfileTick { contribution, hand_off } = profile.contribute(state, dt);
             contributions.push((owns, contribution));
             if let Some(ho) = hand_off {
                 handoffs.push(ho);
