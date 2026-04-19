@@ -21,15 +21,51 @@ use crate::llm::responses_client::ResponsesBackend;
 use crate::llm::tools::{dispatch_tool, tool_schemas, ToolContext};
 
 pub const SYSTEM_PROMPT: &str = include_str!("system_prompt.md");
+pub const SYSTEM_PROMPT_REALISTIC: &str = concat!(
+    include_str!("system_prompt.md"),
+    "\n",
+    include_str!("system_prompt_realistic_overlay.md"),
+);
 pub const MAX_INPUT_CHARS: usize = 60_000;
 pub const DEFAULT_PER_REQUEST_TIMEOUT_S: u64 = 60;
 pub const DEFAULT_TOTAL_WALL_BUDGET_S: u64 = 120;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PilotMode {
+    Normal,
+    Realistic,
+}
+
+impl PilotMode {
+    pub fn system_prompt(self) -> &'static str {
+        match self {
+            PilotMode::Normal => SYSTEM_PROMPT,
+            PilotMode::Realistic => SYSTEM_PROMPT_REALISTIC,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            PilotMode::Normal => "normal",
+            PilotMode::Realistic => "realistic",
+        }
+    }
+
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "normal" => Some(PilotMode::Normal),
+            "realistic" => Some(PilotMode::Realistic),
+            _ => None,
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IncomingSource {
     Operator,
     Atc,
     Heartbeat,
+    ModeSwitch(PilotMode),
 }
 
 impl IncomingSource {
@@ -38,6 +74,7 @@ impl IncomingSource {
             IncomingSource::Operator => "OPERATOR",
             IncomingSource::Atc => "ATC",
             IncomingSource::Heartbeat => "HEARTBEAT",
+            IncomingSource::ModeSwitch(_) => "MODE_SWITCH",
         }
     }
 }
@@ -57,6 +94,9 @@ impl IncomingMessage {
     }
     pub fn heartbeat(text: impl Into<String>) -> Self {
         Self { source: IncomingSource::Heartbeat, text: text.into() }
+    }
+    pub fn mode_switch(mode: PilotMode) -> Self {
+        Self { source: IncomingSource::ModeSwitch(mode), text: mode.label().to_string() }
     }
 }
 
@@ -89,6 +129,19 @@ impl Conversation {
             pinned_items: pinned,
             rotating_items: Vec::new(),
         }
+    }
+
+    /// Replace the pinned system prompt in place. History (`rotating_items`)
+    /// is preserved so the model stays in the same turn; only the leading
+    /// system item is rewritten.
+    pub fn set_system_prompt(&mut self, prompt: impl Into<String>) {
+        let prompt = prompt.into();
+        if self.pinned_items.is_empty() {
+            self.pinned_items.push(system_item(&prompt));
+        } else {
+            self.pinned_items[0] = system_item(&prompt);
+        }
+        self.system_prompt = prompt;
     }
 
     pub fn append_operator_message(&mut self, text: &str) {
@@ -169,9 +222,11 @@ pub fn run_conversation_loop(
     stop: Arc<AtomicBool>,
     per_request_timeout_s: u64,
     total_wall_budget_s: u64,
+    initial_mode: PilotMode,
     bus: Option<&SimBus>,
 ) {
-    let mut conv = Conversation::new(SYSTEM_PROMPT);
+    let mut conv = Conversation::new(initial_mode.system_prompt());
+    emit_log(bus, &format!("[llm-worker] pilot mode: {}", initial_mode.label()));
     while !stop.load(Ordering::Acquire) {
         let message = match input_queue.recv_timeout(Duration::from_millis(500)) {
             Ok(m) => m,
@@ -210,6 +265,13 @@ fn handle_message(
         IncomingSource::Atc => {
             conv.append_atc_message(&message.text);
             emit_radio(bus, &format!("[atc] {}", message.text));
+        }
+        IncomingSource::ModeSwitch(mode) => {
+            conv.set_system_prompt(mode.system_prompt());
+            let announce = format!("Pilot mode switched to {}.", mode.label());
+            conv.append_operator_message(&announce);
+            emit_log(bus, &format!("[llm-worker] {}", announce));
+            return Ok(());
         }
     }
     conv.compact_if_needed(MAX_INPUT_CHARS);

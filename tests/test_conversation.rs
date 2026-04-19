@@ -17,7 +17,8 @@ use xplane_pilot::bus::SimBus;
 use xplane_pilot::config::load_default_config_bundle;
 use xplane_pilot::core::mission_manager::PilotCore;
 use xplane_pilot::llm::conversation::{
-    run_conversation_loop, Conversation, IncomingMessage, MAX_INPUT_CHARS, SYSTEM_PROMPT,
+    run_conversation_loop, Conversation, IncomingMessage, PilotMode, MAX_INPUT_CHARS,
+    SYSTEM_PROMPT,
 };
 use xplane_pilot::llm::responses_client::ResponsesBackend;
 use xplane_pilot::llm::tools::ToolContext;
@@ -162,6 +163,60 @@ fn compaction_leaves_partial_turn_alone() {
     let _ = MAX_INPUT_CHARS;
 }
 
+// ---------- pilot mode ----------
+
+#[test]
+fn pilot_mode_parse_accepts_known_modes_case_insensitive() {
+    assert_eq!(PilotMode::parse("normal"), Some(PilotMode::Normal));
+    assert_eq!(PilotMode::parse("Realistic"), Some(PilotMode::Realistic));
+    assert_eq!(PilotMode::parse("  REALISTIC  "), Some(PilotMode::Realistic));
+    assert_eq!(PilotMode::parse("strict"), None);
+    assert_eq!(PilotMode::parse(""), None);
+}
+
+#[test]
+fn pilot_mode_selects_distinct_prompts() {
+    let normal = PilotMode::Normal.system_prompt();
+    let realistic = PilotMode::Realistic.system_prompt();
+    assert!(realistic.len() > normal.len());
+    assert!(realistic.starts_with(normal));
+    assert!(realistic.contains("Realistic-pilot mode"));
+}
+
+#[test]
+fn set_system_prompt_rewrites_pinned_head() {
+    let mut conv = Conversation::new("first prompt");
+    conv.append_operator_message("msg before swap");
+    conv.set_system_prompt("second prompt");
+    assert_eq!(conv.system_prompt, "second prompt");
+    let text = conv.pinned_items[0]["content"][0]["text"].as_str().unwrap();
+    assert_eq!(text, "second prompt");
+    assert_eq!(conv.rotating_items.len(), 1, "history preserved across swap");
+}
+
+#[test]
+fn mode_switch_message_swaps_prompt_without_api_call() {
+    let ctx = make_ctx();
+    // Script would be consumed if the loop made an API call. We expect zero.
+    let client = StubClient::new(vec![json!({"output": [text_msg("unused")]})]);
+    let (tx, rx) = unbounded::<IncomingMessage>();
+    tx.send(IncomingMessage::mode_switch(PilotMode::Realistic)).unwrap();
+    let stop = Arc::new(AtomicBool::new(false));
+
+    std::thread::scope(|s| {
+        let handle = s.spawn({
+            let stop = stop.clone();
+            || run_conversation_loop(&client, &ctx, &rx, stop, 60, 120, PilotMode::Normal, None)
+        });
+        // Give the loop a moment to drain the channel.
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        stop.store(true, Ordering::Release);
+        handle.join().unwrap();
+    });
+
+    assert_eq!(client.n_calls(), 0, "mode switch must not trigger an API call");
+}
+
 // ---------- run loop ----------
 
 #[test]
@@ -179,7 +234,7 @@ fn single_tool_call_then_text_ends_turn() {
         let handle = s.spawn({
             let stop = stop.clone();
             || {
-                run_conversation_loop(&client, &ctx, &rx, stop, 60, 120, None);
+                run_conversation_loop(&client, &ctx, &rx, stop, 60, 120, PilotMode::Normal, None);
             }
         });
         // wait for the stub to drain
@@ -208,7 +263,7 @@ fn sleep_tool_ends_turn_without_second_post() {
     std::thread::scope(|s| {
         let handle = s.spawn({
             let stop = stop.clone();
-            || run_conversation_loop(&client, &ctx, &rx, stop, 60, 120, None)
+            || run_conversation_loop(&client, &ctx, &rx, stop, 60, 120, PilotMode::Normal, None)
         });
         for _ in 0..50 {
             if client.n_calls() >= 1 {
@@ -234,7 +289,7 @@ fn text_only_first_response_ends_turn_immediately() {
     std::thread::scope(|s| {
         let handle = s.spawn({
             let stop = stop.clone();
-            || run_conversation_loop(&client, &ctx, &rx, stop, 60, 120, None)
+            || run_conversation_loop(&client, &ctx, &rx, stop, 60, 120, PilotMode::Normal, None)
         });
         for _ in 0..50 {
             if client.n_calls() >= 1 {
@@ -259,7 +314,7 @@ fn system_prompt_is_pinned_at_head_of_input() {
     std::thread::scope(|s| {
         let handle = s.spawn({
             let stop = stop.clone();
-            || run_conversation_loop(&client, &ctx, &rx, stop, 60, 120, None)
+            || run_conversation_loop(&client, &ctx, &rx, stop, 60, 120, PilotMode::Normal, None)
         });
         for _ in 0..50 {
             if client.n_calls() >= 1 {
@@ -293,7 +348,7 @@ fn tool_call_log_lands_on_bus_when_provided() {
     std::thread::scope(|s| {
         let handle = s.spawn({
             let stop = stop.clone();
-            || run_conversation_loop(&client, &ctx, &rx, stop, 60, 120, Some(&bus))
+            || run_conversation_loop(&client, &ctx, &rx, stop, 60, 120, PilotMode::Normal, Some(&bus))
         });
         for _ in 0..50 {
             if client.n_calls() >= 2 {
@@ -335,7 +390,7 @@ fn token_usage_is_logged_after_each_call_when_usage_present() {
     std::thread::scope(|s| {
         let handle = s.spawn({
             let stop = stop.clone();
-            || run_conversation_loop(&client, &ctx, &rx, stop, 60, 120, Some(&bus))
+            || run_conversation_loop(&client, &ctx, &rx, stop, 60, 120, PilotMode::Normal, Some(&bus))
         });
         for _ in 0..50 {
             if client.n_calls() >= 2 {

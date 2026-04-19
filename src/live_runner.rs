@@ -328,7 +328,7 @@ use parking_lot::Mutex as PLMutex;
 
 use crate::bus::FileLog;
 use crate::core::profiles::PatternFlyProfile;
-use crate::llm::conversation::run_conversation_loop;
+use crate::llm::conversation::{run_conversation_loop, PilotMode};
 use crate::llm::responses_client::ResponsesClient;
 use crate::llm::tools::{ToolBridge, ToolContext};
 use crate::sim::xplane_bridge::{probe_bootstrap_sample, GeoReference, XPlaneWebBridge};
@@ -360,6 +360,9 @@ pub struct LiveRunConfig {
     pub heartbeat_interval_s: f64,
     pub heartbeat_enabled: bool,
     pub voice_enabled: bool,
+    /// Initial pilot persona. Can be swapped at runtime via the `/mode`
+    /// TUI command.
+    pub pilot_mode: PilotMode,
 }
 
 pub fn run_live_xplane(base_config: ConfigBundle, runtime: LiveRunConfig) -> Result<()> {
@@ -497,6 +500,7 @@ pub fn run_live_xplane(base_config: ConfigBundle, runtime: LiveRunConfig) -> Res
         let rx = input_rx.clone();
         let stop = llm_stop.clone();
         let bus_clone = bus.clone();
+        let initial_mode = runtime.pilot_mode;
         thread::Builder::new()
             .name("llm-worker".into())
             .spawn(move || {
@@ -507,6 +511,7 @@ pub fn run_live_xplane(base_config: ConfigBundle, runtime: LiveRunConfig) -> Res
                     stop,
                     60,
                     120,
+                    initial_mode,
                     Some(&bus_clone),
                 );
             })?

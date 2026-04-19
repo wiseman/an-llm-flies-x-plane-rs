@@ -241,7 +241,7 @@ use ratatui::Terminal;
 use crate::bus::SimBus;
 use crate::core::mission_manager::PilotCore;
 use crate::live_runner::HeartbeatPump;
-use crate::llm::conversation::IncomingMessage;
+use crate::llm::conversation::{IncomingMessage, PilotMode};
 use crate::llm::responses_client::CacheStats;
 use crate::transcribe::{PttController, PttMode, PttSnapshot};
 
@@ -465,17 +465,37 @@ pub fn run_tui(
                         let raw = input_buffer.trim().to_string();
                         if !raw.is_empty() {
                             history_record(&mut history, &raw, INPUT_HISTORY_MAX);
-                            let (source, payload) = parse_input_source(&raw);
-                            let msg = match source.as_str() {
-                                "atc" => IncomingMessage::atc(payload.clone()),
-                                _ => IncomingMessage::operator(payload.clone()),
-                            };
-                            let _ = input_queue.send(msg);
-                            if let Some(pump) = &heartbeat_pump {
-                                pump.record_user_input();
-                            }
-                            if source != "atc" {
-                                bus.push_log(format!("[{}] {}", source, payload));
+                            if let Some(rest) = raw.strip_prefix("/mode") {
+                                let arg = rest.trim();
+                                match PilotMode::parse(arg) {
+                                    Some(mode) => {
+                                        let _ = input_queue
+                                            .send(IncomingMessage::mode_switch(mode));
+                                        bus.push_log(format!(
+                                            "[mode] switched to {}",
+                                            mode.label()
+                                        ));
+                                    }
+                                    None => {
+                                        bus.push_log(format!(
+                                            "[mode] unknown mode {:?} — expected normal | realistic",
+                                            arg
+                                        ));
+                                    }
+                                }
+                            } else {
+                                let (source, payload) = parse_input_source(&raw);
+                                let msg = match source.as_str() {
+                                    "atc" => IncomingMessage::atc(payload.clone()),
+                                    _ => IncomingMessage::operator(payload.clone()),
+                                };
+                                let _ = input_queue.send(msg);
+                                if let Some(pump) = &heartbeat_pump {
+                                    pump.record_user_input();
+                                }
+                                if source != "atc" {
+                                    bus.push_log(format!("[{}] {}", source, payload));
+                                }
                             }
                         }
                         input_buffer.clear();

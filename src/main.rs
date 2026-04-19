@@ -10,6 +10,7 @@ use clap::{Parser, ValueEnum};
 use xplane_pilot::config::load_default_config_bundle;
 use xplane_pilot::data::{apt_dat, parquet as data_parquet};
 use xplane_pilot::live_runner::{run_live_xplane, LiveRunConfig};
+use xplane_pilot::llm::conversation::PilotMode;
 use xplane_pilot::sim::{
     logging::write_scenario_log_csv, plotting::write_scenario_plots, scenario::ScenarioRunner,
 };
@@ -47,6 +48,13 @@ struct Cli {
 
     #[arg(long = "pilot-llm-model", default_value = "gpt-5.4-2026-03-05")]
     pilot_llm_model: String,
+
+    /// Pilot persona that selects which system prompt the LLM runs with at
+    /// startup. Can be swapped at runtime via the TUI `/mode <name>` command.
+    /// `normal` is the default operational prompt; `realistic` layers on
+    /// real-world ATC phraseology, readbacks, and procedural discipline.
+    #[arg(long = "pilot-mode", value_enum, default_value_t = CliPilotMode::Normal)]
+    pilot_mode: CliPilotMode,
 
     /// Optional reasoning effort hint passed to the pilot LLM (e.g. "low",
     /// "medium", "high"). When unset, no reasoning field is sent and the
@@ -125,6 +133,21 @@ struct Cli {
 enum Backend {
     Simple,
     Xplane,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum CliPilotMode {
+    Normal,
+    Realistic,
+}
+
+impl From<CliPilotMode> for PilotMode {
+    fn from(m: CliPilotMode) -> Self {
+        match m {
+            CliPilotMode::Normal => PilotMode::Normal,
+            CliPilotMode::Realistic => PilotMode::Realistic,
+        }
+    }
 }
 
 fn resolve_scenario_name(explicit: Option<&str>, wind: Vec2) -> String {
@@ -255,6 +278,8 @@ fn main() -> Result<()> {
             println!("xplane_host={}", args.xplane_host);
             println!("xplane_port={}", args.xplane_port);
             println!("pilot_llm_model={}", args.pilot_llm_model);
+            let pilot_mode: PilotMode = args.pilot_mode.into();
+            println!("pilot_mode={}", pilot_mode.label());
             if let Some(e) = &args.pilot_llm_reasoning_effort {
                 println!("pilot_llm_reasoning_effort={}", e);
             }
@@ -289,6 +314,7 @@ fn main() -> Result<()> {
                     heartbeat_interval_s: args.heartbeat_interval,
                     heartbeat_enabled: !args.no_heartbeat,
                     voice_enabled: !args.no_voice,
+                    pilot_mode,
                 },
             )?;
         }
