@@ -673,15 +673,19 @@ pub fn run_tui(
                     ));
                 }
             }
-            let input_paragraph = Paragraph::new(Line::from(spans))
-                .block(Block::default().borders(Borders::ALL).title(input_title))
-                .wrap(Wrap { trim: false });
-            f.render_widget(input_paragraph, chunks[3]);
-
             let pane = chunks[3];
             let content_width = pane.width.saturating_sub(2).max(1);
             let content_height = pane.height.saturating_sub(2).max(1);
             last_input_width = content_width;
+            // Pre-split into visual rows on hard char boundaries so the
+            // rendered glyphs line up with the cursor math below (ratatui's
+            // `Wrap` is word-wrap, which disagrees with char-based cursor
+            // positioning the moment the buffer contains spaces).
+            let input_lines = wrap_input_spans(spans, content_width);
+            let input_paragraph = Paragraph::new(input_lines)
+                .block(Block::default().borders(Borders::ALL).title(input_title));
+            f.render_widget(input_paragraph, chunks[3]);
+
             if !recording {
                 // Park the terminal cursor at `input_cursor` (not the end
                 // of the buffer) so emacs-style editing (C-a / C-e / C-k
@@ -920,6 +924,53 @@ fn char_byte_index(s: &str, char_idx: usize) -> usize {
 /// editing helper needs to account for it since it shifts everything on
 /// the first visual row two columns to the right.
 const PROMPT_COLS: usize = 2;
+
+/// Split the INPUT-pane spans into one `Line` per visual row, wrapping on
+/// hard character boundaries that match the cursor math (not on word
+/// boundaries the way `Wrap { trim: false }` would). Row capacity is
+/// `content_width` cells across the board — the 2-col prompt is the first
+/// span in `spans`, so it naturally consumes 2 cells of row 0. Per-span
+/// `Style` is preserved on both sides of any split. Always returns at
+/// least one `Line`.
+fn wrap_input_spans(spans: Vec<Span<'_>>, content_width: u16) -> Vec<Line<'static>> {
+    let cap = (content_width as usize).max(1);
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    let mut current: Vec<Span<'static>> = Vec::new();
+    let mut used: usize = 0;
+    for span in spans {
+        let style = span.style;
+        let mut remaining: String = span.content.into_owned();
+        while !remaining.is_empty() {
+            let room = cap.saturating_sub(used);
+            if room == 0 {
+                lines.push(Line::from(std::mem::take(&mut current)));
+                used = 0;
+                continue;
+            }
+            let char_count = remaining.chars().count();
+            if char_count <= room {
+                used += char_count;
+                current.push(Span::styled(remaining, style));
+                break;
+            }
+            let split_idx = remaining
+                .char_indices()
+                .nth(room)
+                .map(|(i, _)| i)
+                .unwrap_or(remaining.len());
+            let right: String = remaining[split_idx..].to_string();
+            remaining.truncate(split_idx);
+            current.push(Span::styled(remaining, style));
+            lines.push(Line::from(std::mem::take(&mut current)));
+            used = 0;
+            remaining = right;
+        }
+    }
+    if !current.is_empty() || lines.is_empty() {
+        lines.push(Line::from(current));
+    }
+    lines
+}
 
 /// Return the visual wrap row that `cursor` (a char index) is on given
 /// `width` content columns. Treats the buffer as single-width chars.
@@ -1533,6 +1584,95 @@ mod tests {
         // Cursor at char 5; end of row 0 would be char 38, clamped to 11.
         kill_to_row_end(&mut buf, 5, 40);
         assert_eq!(buf, "hello");
+    }
+
+    // ---- wrap_input_spans ------------------------------------------------
+    //
+    // With content_width = 40 the INPUT pane's renderable rows are 40 cells
+    // wide. The "> " prompt lives in the first span so it naturally takes
+    // 2 cells of row 0 — no special-casing.
+
+    fn joined(lines: &[Line<'_>]) -> String {
+        lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
+            .collect()
+    }
+
+    #[test]
+    fn wrap_input_spans_empty_buffer_yields_prompt_only_line() {
+        let spans = vec![Span::raw("> ")];
+        let lines = wrap_input_spans(spans, 40);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(joined(&lines), "> ");
+    }
+
+    #[test]
+    fn wrap_input_spans_short_buffer_fits_one_row() {
+        let spans = vec![Span::raw("> "), Span::raw("hello")];
+        let lines = wrap_input_spans(spans, 40);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(joined(&lines), "> hello");
+    }
+
+    #[test]
+    fn wrap_input_spans_exactly_fills_row_zero_no_extra_row() {
+        // Prompt (2) + 38-char buffer = 40 cells = exactly one row.
+        let spans = vec![Span::raw("> "), Span::raw("x".repeat(38))];
+        let lines = wrap_input_spans(spans, 40);
+        assert_eq!(lines.len(), 1);
+    }
+
+    #[test]
+    fn wrap_input_spans_overflows_to_row_one() {
+        let spans = vec![Span::raw("> "), Span::raw("x".repeat(40))];
+        let lines = wrap_input_spans(spans, 40);
+        assert_eq!(lines.len(), 2);
+        // Row 0: "> " + 38 x's (40 cells). Row 1: 2 x's.
+        assert_eq!(joined(&lines[0..1]), format!("> {}", "x".repeat(38)));
+        assert_eq!(joined(&lines[1..2]), "xx");
+    }
+
+    #[test]
+    fn wrap_input_spans_does_not_word_wrap_on_spaces() {
+        // The whole point of this function: unlike ratatui's Wrap, spaces
+        // are preserved at hard row boundaries, not used as break points.
+        let text = "hello world this is a test of wrapping abc";
+        let spans = vec![Span::raw("> "), Span::raw(text)];
+        let lines = wrap_input_spans(spans, 40);
+        // 2 + 42 = 44 cells → 2 rows.
+        assert_eq!(lines.len(), 2);
+        // No chars lost or reordered.
+        assert_eq!(joined(&lines), format!("> {}", text));
+    }
+
+    #[test]
+    fn wrap_input_spans_splits_spans_preserving_style() {
+        // A long second span straddling a row boundary must produce two
+        // styled pieces with the same style.
+        let style = Style::default().fg(Color::Cyan);
+        let spans = vec![
+            Span::styled("> ", style),
+            Span::styled("a".repeat(50), Style::default()),
+        ];
+        let lines = wrap_input_spans(spans, 40);
+        assert_eq!(lines.len(), 2);
+        // Row 0 has two spans: the prompt + the first 38 a's.
+        assert_eq!(lines[0].spans.len(), 2);
+        assert_eq!(lines[0].spans[0].style, style);
+        // Row 1 has the remaining 12 a's.
+        assert_eq!(lines[1].spans.len(), 1);
+        assert_eq!(lines[1].spans[0].content.as_ref().len(), 12);
+    }
+
+    #[test]
+    fn wrap_input_spans_handles_tiny_width() {
+        // Pane narrower than the prompt itself — don't panic, just wrap
+        // character-by-character.
+        let spans = vec![Span::raw("> "), Span::raw("ab")];
+        let lines = wrap_input_spans(spans, 1);
+        assert_eq!(lines.len(), 4);
+        assert_eq!(joined(&lines), "> ab");
     }
 
     // ---- Input history ----------------------------------------------
