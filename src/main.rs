@@ -45,8 +45,14 @@ struct Cli {
     #[arg(long, default_value_t = 8086)]
     xplane_port: u16,
 
-    #[arg(long, default_value = "gpt-5.4-2026-03-05")]
-    llm_model: String,
+    #[arg(long = "pilot-llm-model", default_value = "gpt-5.4-2026-03-05")]
+    pilot_llm_model: String,
+
+    /// Optional reasoning effort hint passed to the pilot LLM (e.g. "low",
+    /// "medium", "high"). When unset, no reasoning field is sent and the
+    /// model uses its provider default.
+    #[arg(long = "pilot-llm-reasoning-effort")]
+    pilot_llm_reasoning_effort: Option<String>,
 
     /// ATC/operator message sent through the LLM at startup. Repeat for multiple messages.
     #[arg(long = "atc-message")]
@@ -248,7 +254,10 @@ fn main() -> Result<()> {
             println!("backend=xplane");
             println!("xplane_host={}", args.xplane_host);
             println!("xplane_port={}", args.xplane_port);
-            println!("llm_model={}", args.llm_model);
+            println!("pilot_llm_model={}", args.pilot_llm_model);
+            if let Some(e) = &args.pilot_llm_reasoning_effort {
+                println!("pilot_llm_reasoning_effort={}", e);
+            }
             if let Some(p) = &log_file {
                 println!("log_file={}", p.display());
             }
@@ -266,7 +275,8 @@ fn main() -> Result<()> {
                 LiveRunConfig {
                     xplane_host: args.xplane_host,
                     xplane_port: args.xplane_port,
-                    llm_model: args.llm_model,
+                    llm_model: args.pilot_llm_model,
+                    llm_reasoning_effort: args.pilot_llm_reasoning_effort,
                     atc_messages: args.atc_message,
                     interactive: args.interactive_atc,
                     control_hz: args.control_hz,

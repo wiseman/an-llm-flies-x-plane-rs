@@ -21,7 +21,7 @@ cargo run --release -- --crosswind-kt 10 --log-csv output/flight.csv --plots-dir
 # override the autodetected location.
 cargo run --release -- \
   --backend xplane --interactive-atc \
-  --llm-model gpt-5.4-mini-2026-03-17
+  --pilot-llm-model gpt-5.4-mini-2026-03-17
 
 # Tests.
 cargo test                                 # full suite (≈201 tests, ~1s wall-clock)

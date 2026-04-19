@@ -42,7 +42,7 @@ Requires X-Plane 12 running with the built-in web API enabled on port 8086, and 
 cargo run --release -- \
   --backend xplane \
   --interactive-atc \
-  --llm-model gpt-5.4-mini-2026-03-17
+  --pilot-llm-model gpt-5.4-mini-2026-03-17
 ```
 
 Common flags:

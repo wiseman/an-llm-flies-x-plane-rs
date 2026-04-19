@@ -340,6 +340,9 @@ pub struct LiveRunConfig {
     pub xplane_host: String,
     pub xplane_port: u16,
     pub llm_model: String,
+    /// When `Some`, passed to the Responses API as `reasoning.effort`. When
+    /// `None`, the `reasoning` field is omitted entirely.
+    pub llm_reasoning_effort: Option<String>,
     pub atc_messages: Vec<String>,
     pub interactive: bool,
     pub control_hz: f64,
@@ -429,7 +432,11 @@ pub fn run_live_xplane(base_config: ConfigBundle, runtime: LiveRunConfig) -> Res
         let _ = input_tx.send(IncomingMessage::atc(msg.clone()));
     }
 
-    let llm_client = Arc::new(ResponsesClient::new(runtime.llm_model.clone()));
+    let llm_client = {
+        let mut c = ResponsesClient::new(runtime.llm_model.clone());
+        c.reasoning_effort = runtime.llm_reasoning_effort.clone();
+        Arc::new(c)
+    };
     let cache_stats = llm_client.cache_stats.clone();
     // One DuckDB connection slot, shared between the LLM's tool handlers
     // (via ToolContext.runway_conn) and the heartbeat airspace query. Both

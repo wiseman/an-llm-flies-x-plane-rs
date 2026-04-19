@@ -64,7 +64,7 @@ pub struct ResponsesClient {
     pub model: String,
     pub api_key: Option<String>,
     pub api_base: String,
-    pub reasoning_effort: String,
+    pub reasoning_effort: Option<String>,
     pub cache_stats: Arc<CacheStats>,
 }
 
@@ -74,7 +74,7 @@ impl ResponsesClient {
             model: model.into(),
             api_key: None,
             api_base: "https://api.openai.com/v1".to_string(),
-            reasoning_effort: "low".to_string(),
+            reasoning_effort: None,
             cache_stats: Arc::new(CacheStats::default()),
         }
     }
@@ -92,12 +92,14 @@ impl ResponsesBackend for ResponsesClient {
             .clone()
             .or_else(|| env::var("OPENAI_API_KEY").ok())
             .ok_or_else(|| anyhow!("OPENAI_API_KEY is required for the LLM worker"))?;
-        let payload = json!({
+        let mut payload = json!({
             "model": self.model,
             "input": input_items,
             "tools": tools,
-            "reasoning": { "effort": self.reasoning_effort },
         });
+        if let Some(effort) = &self.reasoning_effort {
+            payload["reasoning"] = json!({ "effort": effort });
+        }
         let url = format!("{}/responses", self.api_base.trim_end_matches('/'));
         let resp = ureq::post(&url)
             .set("Authorization", &format!("Bearer {}", api_key))
