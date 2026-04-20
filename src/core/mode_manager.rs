@@ -12,13 +12,58 @@ use crate::guidance::pattern_manager::PatternGeometry;
 use crate::guidance::route_manager::RouteManager;
 use crate::types::{clamp, wrap_degrees_180, AircraftState, FlightPhase};
 
+/// ATC-side clearance state for pattern-phase transitions. Each gate
+/// authorizes one transition from running automatically. Default is "all
+/// granted" so untowered/CTAF ops behave as before. "I'll call your base"
+/// revokes `turn_base`; "turn base now" is handled via
+/// [`PatternTriggers`], not by flipping a clearance.
+///
+/// `land` defaults to `true` and is informational only — the mode
+/// machine does not enforce landing clearance. The LLM reads it in the
+/// status snapshot and decides whether to go around.
+#[derive(Debug, Clone)]
+pub struct PatternClearances {
+    pub turn_crosswind: bool,
+    pub turn_downwind: bool,
+    pub turn_base: bool,
+    pub turn_final: bool,
+    pub land: bool,
+    pub landing_runway: Option<String>,
+}
+
+impl Default for PatternClearances {
+    fn default() -> Self {
+        Self {
+            turn_crosswind: true,
+            turn_downwind: true,
+            turn_base: true,
+            turn_final: true,
+            land: true,
+            landing_runway: None,
+        }
+    }
+}
+
+/// One-shot triggers that force a pattern-phase turn immediately,
+/// bypassing the automatic geometric readiness gate. Each trigger is
+/// consumed (cleared) by `PatternFlyProfile` after the corresponding
+/// transition fires.
+#[derive(Debug, Clone, Default)]
+pub struct PatternTriggers {
+    pub turn_crosswind: bool,
+    pub turn_downwind: bool,
+    pub turn_base: bool,
+    pub turn_final: bool,
+}
+
 pub struct ModeManagerUpdate<'a> {
     pub phase: FlightPhase,
     pub state: &'a AircraftState,
     pub route_manager: &'a RouteManager,
     pub pattern: &'a PatternGeometry,
     pub safety_status: &'a SafetyStatus,
-    pub turn_base_now: bool,
+    pub triggers: &'a PatternTriggers,
+    pub clearances: &'a PatternClearances,
     pub force_go_around: bool,
     pub stay_in_pattern: bool,
     pub touch_and_go: bool,
@@ -34,18 +79,17 @@ impl ModeManager {
         Self { config }
     }
 
-    pub fn update(
-        &self,
-        phase: FlightPhase,
-        state: &AircraftState,
-        route_manager: &RouteManager,
-        pattern: &PatternGeometry,
-        safety_status: &SafetyStatus,
-        turn_base_now: bool,
-        force_go_around: bool,
-        stay_in_pattern: bool,
-        touch_and_go: bool,
-    ) -> FlightPhase {
+    pub fn update(&self, u: &ModeManagerUpdate) -> FlightPhase {
+        let phase = u.phase;
+        let state = u.state;
+        let route_manager = u.route_manager;
+        let pattern = u.pattern;
+        let safety_status = u.safety_status;
+        let triggers = u.triggers;
+        let clearances = u.clearances;
+        let force_go_around = u.force_go_around;
+        let stay_in_pattern = u.stay_in_pattern;
+        let touch_and_go = u.touch_and_go;
         if force_go_around || safety_status.request_go_around {
             return FlightPhase::GoAround;
         }
@@ -82,7 +126,9 @@ impl ModeManager {
                 if stay_in_pattern {
                     let crosswind_turn_agl_ft =
                         (self.config.pattern.altitude_agl_ft - 300.0).max(400.0);
-                    if state.alt_agl_ft >= crosswind_turn_agl_ft && state.vs_fpm > 250.0 {
+                    let auto_ready =
+                        state.alt_agl_ft >= crosswind_turn_agl_ft && state.vs_fpm > 250.0;
+                    if triggers.turn_crosswind || (clearances.turn_crosswind && auto_ready) {
                         return FlightPhase::Crosswind;
                     }
                     return phase;
@@ -103,7 +149,8 @@ impl ModeManager {
                     wrap_degrees_180(state.track_deg - crosswind_course_deg).abs();
                 let heading_captured = heading_error_deg <= 15.0;
                 let at_offset = y.abs() >= downwind_offset_ft * 0.75;
-                if heading_captured && at_offset {
+                let auto_ready = heading_captured && at_offset;
+                if triggers.turn_downwind || (clearances.turn_downwind && auto_ready) {
                     return FlightPhase::Downwind;
                 }
                 return phase;
@@ -150,25 +197,26 @@ impl ModeManager {
                 return phase;
             }
             FlightPhase::Downwind => {
-                if turn_base_now || self.downwind_base_turn_ready(state, pattern) {
+                let auto_ready = self.downwind_base_turn_ready(state, pattern);
+                if triggers.turn_base || (clearances.turn_base && auto_ready) {
                     return FlightPhase::Base;
                 }
                 return phase;
             }
             FlightPhase::Base => {
-                if pattern.is_established_on_final(
+                let on_final = pattern.is_established_on_final(
                     state.runway_x_ft,
                     state.runway_y_ft,
                     state.track_deg,
-                ) {
-                    return FlightPhase::Final;
-                }
+                );
                 let leg = pattern.base_leg;
                 let path = leg.end_ft - leg.start_ft;
                 let rel = state.position_ft - leg.start_ft;
                 let path_length = path.length().max(1.0);
                 let along = rel.dot(path.normalized());
-                if along >= path_length * 0.65 {
+                let past_65_pct = along >= path_length * 0.65;
+                let auto_ready = on_final || past_65_pct;
+                if triggers.turn_final || (clearances.turn_final && auto_ready) {
                     return FlightPhase::Final;
                 }
                 return phase;

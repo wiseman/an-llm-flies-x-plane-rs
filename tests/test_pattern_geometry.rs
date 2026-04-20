@@ -12,7 +12,7 @@ use xplane_pilot::guidance::runway_geometry::RunwayFrame;
 fn downwind_line_generated_on_correct_side() {
     let config = load_default_config_bundle();
     let rf = RunwayFrame::new(config.airport.runway.clone());
-    let pattern = build_pattern_geometry(&rf, config.pattern.downwind_offset_ft, 0.0);
+    let pattern = build_pattern_geometry(&rf, config.pattern.downwind_offset_ft, 0.0, 0.0);
     let start = rf.to_runway_frame(pattern.downwind_leg.start_ft);
     let end = rf.to_runway_frame(pattern.downwind_leg.end_ft);
     assert_abs_diff_eq!(start.y, -config.pattern.downwind_offset_ft, epsilon = 1e-6);
@@ -23,8 +23,8 @@ fn downwind_line_generated_on_correct_side() {
 fn base_turn_point_moves_after_extension() {
     let config = load_default_config_bundle();
     let rf = RunwayFrame::new(config.airport.runway.clone());
-    let nominal = build_pattern_geometry(&rf, config.pattern.downwind_offset_ft, 0.0);
-    let extended = build_pattern_geometry(&rf, config.pattern.downwind_offset_ft, 2000.0);
+    let nominal = build_pattern_geometry(&rf, config.pattern.downwind_offset_ft, 0.0, 0.0);
+    let extended = build_pattern_geometry(&rf, config.pattern.downwind_offset_ft, 2000.0, 0.0);
     assert!(extended.base_turn_x_ft < nominal.base_turn_x_ft);
     assert_abs_diff_eq!(
         extended.base_turn_x_ft - nominal.base_turn_x_ft,
@@ -37,7 +37,7 @@ fn base_turn_point_moves_after_extension() {
 fn final_intercept_stays_on_centerline() {
     let config = load_default_config_bundle();
     let rf = RunwayFrame::new(config.airport.runway.clone());
-    let pattern = build_pattern_geometry(&rf, config.pattern.downwind_offset_ft, 0.0);
+    let pattern = build_pattern_geometry(&rf, config.pattern.downwind_offset_ft, 0.0, 0.0);
     let base_end = rf.to_runway_frame(pattern.base_leg.end_ft);
     let final_start = rf.to_runway_frame(pattern.final_leg.start_ft);
     let final_end = rf.to_runway_frame(pattern.final_leg.end_ft);

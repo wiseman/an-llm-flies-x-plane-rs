@@ -15,7 +15,9 @@
 use std::collections::BTreeSet;
 
 use crate::config::ConfigBundle;
-use crate::core::mode_manager::ModeManager;
+use crate::core::mode_manager::{
+    ModeManager, ModeManagerUpdate, PatternClearances, PatternTriggers,
+};
 use crate::core::safety_monitor::SafetyMonitor;
 use crate::guidance::lateral::L1PathFollower;
 use crate::guidance::pattern_manager::{
@@ -348,6 +350,7 @@ impl TakeoffProfile {
             &runway_frame,
             config.pattern.downwind_offset_ft,
             config.pattern.default_extension_ft,
+            0.0,
         );
         Self {
             mode_manager: ModeManager::new(config.clone()),
@@ -382,17 +385,20 @@ impl GuidanceProfile for TakeoffProfile {
     }
     fn contribute(&mut self, state: &AircraftState, _dt: f64) -> ProfileTick {
         let safety = self.safety_monitor.evaluate(state, self.phase);
-        self.phase = self.mode_manager.update(
-            self.phase,
+        let empty_triggers = PatternTriggers::default();
+        let default_clearances = PatternClearances::default();
+        self.phase = self.mode_manager.update(&ModeManagerUpdate {
+            phase: self.phase,
             state,
-            &self.route_stub,
-            &self.pattern_stub,
-            &safety,
-            false,
-            false,
-            false,
-            false,
-        );
+            route_manager: &self.route_stub,
+            pattern: &self.pattern_stub,
+            safety_status: &safety,
+            triggers: &empty_triggers,
+            clearances: &default_clearances,
+            force_go_around: false,
+            stay_in_pattern: false,
+            touch_and_go: false,
+        });
         let bank_limit = self.safety_monitor.bank_limit_deg(self.phase);
         let guidance = match self.phase {
             FlightPhase::TakeoffRoll => build_takeoff_roll_guidance(&self.config, &self.runway_frame),
@@ -452,14 +458,96 @@ impl GuidanceProfile for TakeoffProfile {
 
 // ---------- pattern fly profile ----------
 
+/// Which pattern leg a turn trigger applies to. Used by `execute_turn`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PatternLeg {
+    Crosswind,
+    Downwind,
+    Base,
+    Final,
+}
+
+impl PatternLeg {
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "crosswind" => Some(Self::Crosswind),
+            "downwind" => Some(Self::Downwind),
+            "base" => Some(Self::Base),
+            "final" => Some(Self::Final),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Crosswind => "crosswind",
+            Self::Downwind => "downwind",
+            Self::Base => "base",
+            Self::Final => "final",
+        }
+    }
+}
+
+/// Which gate `set_clearance` controls. "turn_X" gates the auto-transition
+/// into phase X; "land" records (but does not enforce) landing
+/// authorization.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PatternClearanceGate {
+    TurnCrosswind,
+    TurnDownwind,
+    TurnBase,
+    TurnFinal,
+    Land,
+}
+
+impl PatternClearanceGate {
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "turn_crosswind" => Some(Self::TurnCrosswind),
+            "turn_downwind" => Some(Self::TurnDownwind),
+            "turn_base" => Some(Self::TurnBase),
+            "turn_final" => Some(Self::TurnFinal),
+            "land" => Some(Self::Land),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::TurnCrosswind => "turn_crosswind",
+            Self::TurnDownwind => "turn_downwind",
+            Self::TurnBase => "turn_base",
+            Self::TurnFinal => "turn_final",
+            Self::Land => "land",
+        }
+    }
+}
+
+/// `Add` accumulates onto the existing extension; `Set` replaces it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExtendMode {
+    Add,
+    Set,
+}
+
+/// Accumulated leg extensions applied to the pattern geometry. Crosswind
+/// widens the effective downwind offset (pushing the whole pattern
+/// further out laterally); downwind pushes the base turn further past
+/// the threshold. Both compose additively in `build_pattern_geometry`.
+#[derive(Debug, Clone, Default)]
+pub struct PatternLegExtensions {
+    pub crosswind_ft: f64,
+    pub downwind_ft: f64,
+}
+
 pub struct PatternFlyProfile {
     pub config: ConfigBundle,
     pub runway_frame: RunwayFrame,
-    pub pattern_extension_ft: f64,
-    pub turn_base_trigger: bool,
+    pub clearances: PatternClearances,
+    pub triggers: PatternTriggers,
+    pub leg_extensions: PatternLegExtensions,
     pub force_go_around_trigger: bool,
     pub touch_and_go_trigger: bool,
-    pub cleared_to_land_runway: Option<String>,
     pub phase: FlightPhase,
     pub last_go_around_reason: Option<String>,
     pub mode_manager: ModeManager,
@@ -474,10 +562,12 @@ pub struct PatternFlyProfile {
 
 impl PatternFlyProfile {
     pub fn new(config: ConfigBundle, runway_frame: RunwayFrame) -> Self {
+        let default_downwind_ext = config.pattern.default_extension_ft;
         let pattern = build_pattern_geometry(
             &runway_frame,
             config.pattern.downwind_offset_ft,
-            config.pattern.default_extension_ft,
+            default_downwind_ext,
+            0.0,
         );
         let route = RouteManager::new(vec![Waypoint {
             name: "pattern_entry_start".to_string(),
@@ -490,11 +580,14 @@ impl PatternFlyProfile {
             lateral_guidance: L1PathFollower::new(),
             pattern,
             route_manager: route,
-            pattern_extension_ft: 0.0,
-            turn_base_trigger: false,
+            clearances: PatternClearances::default(),
+            triggers: PatternTriggers::default(),
+            leg_extensions: PatternLegExtensions {
+                crosswind_ft: 0.0,
+                downwind_ft: default_downwind_ext,
+            },
             force_go_around_trigger: false,
             touch_and_go_trigger: false,
-            cleared_to_land_runway: None,
             phase: FlightPhase::Preflight,
             last_go_around_reason: None,
             config,
@@ -503,30 +596,84 @@ impl PatternFlyProfile {
         }
     }
 
-    pub fn turn_base_now(&mut self) { self.turn_base_trigger = true; }
     pub fn go_around(&mut self) { self.force_go_around_trigger = true; }
     pub fn execute_touch_and_go(&mut self) { self.touch_and_go_trigger = true; }
 
-    pub fn extend_downwind(&mut self, extension_ft: f64) {
-        self.pattern_extension_ft += extension_ft.max(0.0);
-        self.pattern = build_pattern_geometry(
-            &self.runway_frame,
-            self.config.pattern.downwind_offset_ft,
-            self.config.pattern.default_extension_ft + self.pattern_extension_ft,
-        );
+    /// Fire the one-shot trigger for a given turn. Once set, the next
+    /// `ModeManager::update` tick forces the corresponding transition
+    /// (bypassing the auto-ready predicate and any revoked clearance). The
+    /// dynamic-leg-rebuild side effect for `Base` (base leg must start
+    /// where the aircraft is, not at a stale precomputed point) is
+    /// handled in `contribute()` before `update` runs.
+    pub fn execute_turn(&mut self, leg: PatternLeg) {
+        match leg {
+            PatternLeg::Crosswind => self.triggers.turn_crosswind = true,
+            PatternLeg::Downwind => self.triggers.turn_downwind = true,
+            PatternLeg::Base => self.triggers.turn_base = true,
+            PatternLeg::Final => self.triggers.turn_final = true,
+        }
     }
 
-    pub fn cleared_to_land(&mut self, runway_id: Option<&str>) {
-        self.cleared_to_land_runway = runway_id
-            .map(|s| s.to_string())
-            .or_else(|| self.runway_frame.runway.id.clone());
+    /// Grant or revoke an ATC clearance gate. `runway_id` is meaningful
+    /// only for `Land` and is ignored otherwise.
+    pub fn set_clearance(
+        &mut self,
+        gate: PatternClearanceGate,
+        granted: bool,
+        runway_id: Option<String>,
+    ) {
+        match gate {
+            PatternClearanceGate::TurnCrosswind => self.clearances.turn_crosswind = granted,
+            PatternClearanceGate::TurnDownwind => self.clearances.turn_downwind = granted,
+            PatternClearanceGate::TurnBase => self.clearances.turn_base = granted,
+            PatternClearanceGate::TurnFinal => self.clearances.turn_final = granted,
+            PatternClearanceGate::Land => {
+                self.clearances.land = granted;
+                self.clearances.landing_runway = if granted {
+                    runway_id.or_else(|| self.runway_frame.runway.id.clone())
+                } else {
+                    None
+                };
+            }
+        }
+    }
+
+    /// Extend a pattern leg by adding to (or setting) its stored
+    /// extension, then rebuild geometry. Only `Crosswind` and `Downwind`
+    /// have an effect — `Base`/`Final` return `Err` so the tool layer
+    /// can report a clean error. `feet` for `Set` is clamped to >= 0.
+    pub fn extend_leg(
+        &mut self,
+        leg: PatternLeg,
+        feet: f64,
+        mode: ExtendMode,
+    ) -> Result<f64, String> {
+        let slot = match leg {
+            PatternLeg::Crosswind => &mut self.leg_extensions.crosswind_ft,
+            PatternLeg::Downwind => &mut self.leg_extensions.downwind_ft,
+            PatternLeg::Base | PatternLeg::Final => {
+                return Err(format!(
+                    "leg '{}' is not length-extensible (only crosswind and downwind are)",
+                    leg.as_str()
+                ));
+            }
+        };
+        match mode {
+            ExtendMode::Add => *slot += feet,
+            ExtendMode::Set => *slot = feet.max(0.0),
+        }
+        let new_total = slot.max(0.0);
+        *slot = new_total;
+        self.rebuild_pattern();
+        Ok(new_total)
     }
 
     fn rebuild_pattern(&mut self) {
         self.pattern = build_pattern_geometry(
             &self.runway_frame,
             self.config.pattern.downwind_offset_ft,
-            self.config.pattern.default_extension_ft + self.pattern_extension_ft,
+            self.leg_extensions.downwind_ft,
+            self.leg_extensions.crosswind_ft,
         );
     }
 
@@ -861,10 +1008,23 @@ impl GuidanceProfile for PatternFlyProfile {
     }
 
     fn contribute(&mut self, state: &AircraftState, _dt: f64) -> ProfileTick {
-        if self.turn_base_trigger && self.phase == FlightPhase::Downwind {
+        // Dynamic leg rebuild on triggers: the subsequent leg must start
+        // at the aircraft's *current* runway-frame position, not at a
+        // stale precomputed point, or "extend then turn X" would leave
+        // the next leg behind the aircraft.
+        if self.triggers.turn_base && self.phase == FlightPhase::Downwind {
             if let Some(rx) = state.runway_x_ft {
                 let downwind_offset = self.config.pattern.downwind_offset_ft;
-                self.pattern_extension_ft = (-rx - downwind_offset).max(0.0);
+                self.leg_extensions.downwind_ft =
+                    (-rx - downwind_offset - self.leg_extensions.crosswind_ft).max(0.0);
+                self.rebuild_pattern();
+            }
+        }
+        if self.triggers.turn_downwind && self.phase == FlightPhase::Crosswind {
+            if let Some(ry) = state.runway_y_ft {
+                let downwind_offset = self.config.pattern.downwind_offset_ft;
+                self.leg_extensions.crosswind_ft =
+                    (ry.abs() - downwind_offset).max(0.0);
                 self.rebuild_pattern();
             }
         }
@@ -873,19 +1033,32 @@ impl GuidanceProfile for PatternFlyProfile {
         let safety = self.safety_monitor.evaluate(state, self.phase);
         let previous_phase = self.phase;
         let manual_go_around = self.force_go_around_trigger;
-        self.phase = self.mode_manager.update(
-            self.phase,
+        self.phase = self.mode_manager.update(&ModeManagerUpdate {
+            phase: self.phase,
             state,
-            &self.route_manager,
-            &self.pattern,
-            &safety,
-            self.turn_base_trigger,
-            self.force_go_around_trigger,
-            true,
-            self.touch_and_go_trigger,
-        );
+            route_manager: &self.route_manager,
+            pattern: &self.pattern,
+            safety_status: &safety,
+            triggers: &self.triggers,
+            clearances: &self.clearances,
+            force_go_around: self.force_go_around_trigger,
+            stay_in_pattern: true,
+            touch_and_go: self.touch_and_go_trigger,
+        });
+        // Consume one-shot triggers when their corresponding transition
+        // has been taken (or is no longer applicable because the phase
+        // advanced anyway).
+        if previous_phase == FlightPhase::InitialClimb && self.phase != FlightPhase::InitialClimb {
+            self.triggers.turn_crosswind = false;
+        }
+        if previous_phase == FlightPhase::Crosswind && self.phase != FlightPhase::Crosswind {
+            self.triggers.turn_downwind = false;
+        }
         if previous_phase == FlightPhase::Downwind && self.phase != FlightPhase::Downwind {
-            self.turn_base_trigger = false;
+            self.triggers.turn_base = false;
+        }
+        if previous_phase == FlightPhase::Base && self.phase != FlightPhase::Base {
+            self.triggers.turn_final = false;
         }
         if previous_phase == FlightPhase::TakeoffRoll && self.phase == FlightPhase::Rotate {
             self.touch_and_go_trigger = false;

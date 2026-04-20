@@ -15,7 +15,13 @@ pub struct PatternGeometry {
     pub join_point_runway_ft: Vec2,
     pub base_turn_x_ft: f64,
     pub downwind_y_ft: f64,
+    /// Downwind extension applied at build time (pushes the base-turn point
+    /// further from the runway). "Extend downwind" cumulates here.
     pub extension_ft: f64,
+    /// Crosswind extension applied at build time (widens the effective
+    /// downwind offset — i.e. pushes the pattern further out to the side).
+    /// "Extend crosswind" cumulates here.
+    pub crosswind_extension_ft: f64,
 }
 
 impl PatternGeometry {
@@ -62,20 +68,29 @@ impl PatternGeometry {
     }
 }
 
+/// Build pattern geometry with independent downwind and crosswind
+/// extensions. `crosswind_extension_ft` widens the effective downwind
+/// offset (pushes the pattern further out laterally), which is how
+/// "extend crosswind" is modelled — you fly further perpendicular to the
+/// runway before the downwind turn. `downwind_extension_ft` moves the
+/// base-turn point further past the threshold along the runway axis, as
+/// before. Both default to 0 and compose additively.
 pub fn build_pattern_geometry(
     runway_frame: &RunwayFrame,
     downwind_offset_ft: f64,
-    extension_ft: f64,
+    downwind_extension_ft: f64,
+    crosswind_extension_ft: f64,
 ) -> PatternGeometry {
     let side_sign = runway_frame.runway.traffic_side.sign();
-    let downwind_y_ft = side_sign * downwind_offset_ft;
-    let join_x_ft = downwind_offset_ft * 1.1;
-    let base_turn_x_ft = -(downwind_offset_ft + extension_ft);
-    let final_start_x_ft = -(10000.0f64).max(downwind_offset_ft * 2.5);
+    let effective_offset_ft = downwind_offset_ft + crosswind_extension_ft.max(0.0);
+    let downwind_y_ft = side_sign * effective_offset_ft;
+    let join_x_ft = effective_offset_ft * 1.1;
+    let base_turn_x_ft = -(effective_offset_ft + downwind_extension_ft);
+    let final_start_x_ft = -(10000.0f64).max(effective_offset_ft * 2.5);
 
     let entry_start_rf = Vec2::new(
-        join_x_ft + downwind_offset_ft,
-        downwind_y_ft + side_sign * downwind_offset_ft,
+        join_x_ft + effective_offset_ft,
+        downwind_y_ft + side_sign * effective_offset_ft,
     );
     let join_point_rf = Vec2::new(join_x_ft, downwind_y_ft);
     let downwind_end_rf = Vec2::new(base_turn_x_ft, downwind_y_ft);
@@ -103,7 +118,8 @@ pub fn build_pattern_geometry(
         join_point_runway_ft: join_point_rf,
         base_turn_x_ft,
         downwind_y_ft,
-        extension_ft,
+        extension_ft: downwind_extension_ft,
+        crosswind_extension_ft,
     }
 }
 

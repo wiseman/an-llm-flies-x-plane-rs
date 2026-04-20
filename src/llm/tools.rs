@@ -18,8 +18,8 @@ use crate::bus::SimBus;
 use crate::config::ConfigBundle;
 use crate::core::mission_manager::{PilotCore, StatusSnapshot};
 use crate::core::profiles::{
-    AltitudeHoldProfile, HeadingHoldProfile, PatternFlyProfile, SpeedHoldProfile, TakeoffProfile,
-    TaxiProfile,
+    AltitudeHoldProfile, ExtendMode, HeadingHoldProfile, PatternClearanceGate, PatternFlyProfile,
+    PatternLeg, SpeedHoldProfile, TakeoffProfile, TaxiProfile,
 };
 use crate::data::airspace_query::{self, AircraftSnapshot, AirspaceSource};
 use crate::data::parquet::{
@@ -861,7 +861,7 @@ pub fn tool_takeoff_checklist(ctx: &ToolContext, _args: &Map<String, Value>) -> 
         lines.push(format!("  [INFO]   already engaged: {}", active.join(", ")));
     }
 
-    lines.push("  [REMINDER] identify the runway you are on (get_status for lat/lon + heading, then sql_query with the 'What runway am I on?' example) before committing to the roll".to_string());
+    lines.push("  [REMINDER] identify the runway you are on (get_status for lat/lon + heading, then sql_query with the 'What is the closest runway?' example) before committing to the roll".to_string());
     lines.push("  [REMINDER] acknowledge takeoff clearance on the radio (broadcast_on_radio) if ATC has issued one".to_string());
     lines.push("".to_string());
     if action_needed {
@@ -922,26 +922,92 @@ fn with_pattern_profile<R>(ctx: &ToolContext, f: impl FnOnce(&mut PatternFlyProf
     })
 }
 
-pub fn tool_extend_downwind(ctx: &ToolContext, args: &Map<String, Value>) -> String {
-    let ext = match arg_f64(args, "extension_ft") {
+pub fn tool_extend_pattern_leg(ctx: &ToolContext, args: &Map<String, Value>) -> String {
+    let leg_str = match arg_str(args, "leg") {
+        Ok(s) => s.to_string(),
+        Err(e) => return format!("error: {}", e),
+    };
+    let Some(leg) = PatternLeg::from_str(&leg_str) else {
+        return format!(
+            "error: unknown leg {:?} (expected one of: crosswind, downwind)",
+            leg_str
+        );
+    };
+    let feet = match arg_f64(args, "extension_ft") {
         Ok(v) => v,
         Err(e) => return format!("error: {}", e),
     };
-    match with_pattern_profile(ctx, |p| {
-        p.extend_downwind(ext);
-        p.pattern_extension_ft
-    }) {
-        Some(total) => format!(
-            "extended downwind by {:.0}ft; total extension={:.0}ft",
-            ext, total
+    let mode_str = arg_str(args, "mode").unwrap_or("add").to_string();
+    let mode = match mode_str.to_ascii_lowercase().as_str() {
+        "add" => ExtendMode::Add,
+        "set" => ExtendMode::Set,
+        other => return format!("error: unknown mode {:?} (expected 'add' or 'set')", other),
+    };
+    let result = with_pattern_profile(ctx, |p| p.extend_leg(leg, feet, mode));
+    match result {
+        Some(Ok(total)) => format!(
+            "{} leg extension now {:.0}ft (mode={})",
+            leg.as_str(),
+            total,
+            match mode {
+                ExtendMode::Add => "add",
+                ExtendMode::Set => "set",
+            }
         ),
+        Some(Err(msg)) => format!("error: {}", msg),
         None => "error: pattern_fly profile is not active".to_string(),
     }
 }
 
-pub fn tool_turn_base_now(ctx: &ToolContext, _args: &Map<String, Value>) -> String {
-    match with_pattern_profile(ctx, |p| p.turn_base_now()) {
-        Some(_) => "turn_base_now triggered".to_string(),
+pub fn tool_execute_pattern_turn(ctx: &ToolContext, args: &Map<String, Value>) -> String {
+    let leg_str = match arg_str(args, "leg") {
+        Ok(s) => s.to_string(),
+        Err(e) => return format!("error: {}", e),
+    };
+    let Some(leg) = PatternLeg::from_str(&leg_str) else {
+        return format!(
+            "error: unknown leg {:?} (expected one of: crosswind, downwind, base, final)",
+            leg_str
+        );
+    };
+    match with_pattern_profile(ctx, |p| p.execute_turn(leg)) {
+        Some(_) => format!("turn to {} triggered", leg.as_str()),
+        None => "error: pattern_fly profile is not active".to_string(),
+    }
+}
+
+pub fn tool_set_pattern_clearance(ctx: &ToolContext, args: &Map<String, Value>) -> String {
+    let gate_str = match arg_str(args, "gate") {
+        Ok(s) => s.to_string(),
+        Err(e) => return format!("error: {}", e),
+    };
+    let Some(gate) = PatternClearanceGate::from_str(&gate_str) else {
+        return format!(
+            "error: unknown gate {:?} (expected one of: turn_crosswind, turn_downwind, turn_base, turn_final, land)",
+            gate_str
+        );
+    };
+    let granted = match args.get("granted").and_then(|v| v.as_bool()) {
+        Some(b) => b,
+        None => return "error: missing required bool argument 'granted'".to_string(),
+    };
+    let runway_id = args
+        .get("runway_id")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    match with_pattern_profile(ctx, |p| p.set_clearance(gate, granted, runway_id.clone())) {
+        Some(_) => match (gate, granted) {
+            (PatternClearanceGate::Land, true) => format!(
+                "cleared to land{}",
+                runway_id
+                    .as_ref()
+                    .map(|r| format!(" runway={}", r))
+                    .unwrap_or_default()
+            ),
+            (PatternClearanceGate::Land, false) => "landing clearance revoked".to_string(),
+            (_, true) => format!("{} clearance granted", gate.as_str()),
+            (_, false) => format!("{} clearance revoked — ATC will call", gate.as_str()),
+        },
         None => "error: pattern_fly profile is not active".to_string(),
     }
 }
@@ -956,17 +1022,6 @@ pub fn tool_go_around(ctx: &ToolContext, _args: &Map<String, Value>) -> String {
 pub fn tool_execute_touch_and_go(ctx: &ToolContext, _args: &Map<String, Value>) -> String {
     match with_pattern_profile(ctx, |p| p.execute_touch_and_go()) {
         Some(_) => "touch-and-go armed; landing will transition to takeoff_roll instead of rollout".to_string(),
-        None => "error: pattern_fly profile is not active".to_string(),
-    }
-}
-
-pub fn tool_cleared_to_land(ctx: &ToolContext, args: &Map<String, Value>) -> String {
-    let runway = match arg_str(args, "runway_id") {
-        Ok(s) => s.to_string(),
-        Err(e) => return format!("error: {}", e),
-    };
-    match with_pattern_profile(ctx, |p| p.cleared_to_land(Some(&runway))) {
-        Some(_) => format!("cleared to land runway={}", runway),
         None => "error: pattern_fly profile is not active".to_string(),
     }
 }
@@ -1680,11 +1735,11 @@ pub fn dispatch_tool(call: &Value, ctx: &ToolContext) -> String {
         "engage_route_follow" => tool_engage_route_follow(ctx, &map),
         "disengage_profile" => tool_disengage_profile(ctx, &map),
         "list_profiles" => tool_list_profiles(ctx, &map),
-        "extend_downwind" => tool_extend_downwind(ctx, &map),
-        "turn_base_now" => tool_turn_base_now(ctx, &map),
+        "extend_pattern_leg" => tool_extend_pattern_leg(ctx, &map),
+        "execute_pattern_turn" => tool_execute_pattern_turn(ctx, &map),
+        "set_pattern_clearance" => tool_set_pattern_clearance(ctx, &map),
         "go_around" => tool_go_around(ctx, &map),
         "execute_touch_and_go" => tool_execute_touch_and_go(ctx, &map),
-        "cleared_to_land" => tool_cleared_to_land(ctx, &map),
         "join_pattern" => tool_join_pattern(ctx, &map),
         "tune_radio" => tool_tune_radio(ctx, &map),
         "broadcast_on_radio" => tool_broadcast_on_radio(ctx, &map),
@@ -1819,16 +1874,32 @@ pub fn tool_schemas() -> Vec<Value> {
             &[],
         ),
         schema(
-            "extend_downwind",
-            "Extend the downwind leg of the traffic pattern. Requires pattern_fly to be active.",
-            json!({"extension_ft": {"type": "number", "description": "Additional downwind distance in feet."}}),
-            &["extension_ft"],
+            "extend_pattern_leg",
+            "Lengthen a traffic-pattern leg. Use for ATC instructions like 'extend your downwind 2 miles' or 'extend crosswind'. Only 'crosswind' and 'downwind' are extensible. Crosswind extension widens the effective downwind offset (the pattern is flown further out to the side); downwind extension pushes the base-turn point further past the threshold. Requires pattern_fly to be active. mode='add' (default) accumulates onto the current extension; mode='set' replaces it with the exact value.",
+            json!({
+                "leg": {"type": "string", "enum": ["crosswind", "downwind"], "description": "Which leg to extend."},
+                "extension_ft": {"type": "number", "description": "Extension in feet. With mode='add' adds to the current extension; with mode='set' replaces it (clamped to >= 0)."},
+                "mode": {"type": ["string", "null"], "enum": ["add", "set", null], "description": "How to apply the value. 'add' (default) or 'set'. null means 'add'."}
+            }),
+            &["leg", "extension_ft", "mode"],
         ),
         schema(
-            "turn_base_now",
-            "Trigger the base turn immediately. Requires pattern_fly to be active and phase DOWNWIND.",
-            json!({}),
-            &[],
+            "execute_pattern_turn",
+            "Force an immediate pattern-phase turn, bypassing the automatic geometric trigger. Use for ATC instructions like 'turn base now', 'turn final', 'turn crosswind early'. For 'base' in the DOWNWIND phase the base leg is rebuilt dynamically from the aircraft's current runway-frame position, so it works correctly even after an extended downwind. Valid legs: crosswind (InitialClimb->Crosswind), downwind (Crosswind->Downwind), base (Downwind->Base), final (Base->Final). Requires pattern_fly to be active.",
+            json!({
+                "leg": {"type": "string", "enum": ["crosswind", "downwind", "base", "final"], "description": "The turn to execute immediately."}
+            }),
+            &["leg"],
+        ),
+        schema(
+            "set_pattern_clearance",
+            "Grant or revoke an ATC clearance gate for a pattern-phase transition. Revoking a gate holds the aircraft on its current leg until ATC calls it (e.g. ATC says 'I'll call your base' => set_pattern_clearance(gate='turn_base', granted=false)). Granting re-enables the automatic transition. The 'land' gate records (but does not enforce) landing authorization — the LLM is responsible for calling go_around if landing isn't cleared. Defaults: all gates granted. Use runway_id only when gate='land'.",
+            json!({
+                "gate": {"type": "string", "enum": ["turn_crosswind", "turn_downwind", "turn_base", "turn_final", "land"], "description": "Which clearance gate to set."},
+                "granted": {"type": "boolean", "description": "true to grant (auto-transition enabled); false to revoke (aircraft holds on current leg until execute_pattern_turn is called or clearance is granted)."},
+                "runway_id": {"type": ["string", "null"], "description": "Runway identifier for land clearance (e.g. '16L'). Only meaningful when gate='land' and granted=true. Pass null otherwise."}
+            }),
+            &["gate", "granted", "runway_id"],
         ),
         schema(
             "go_around",
@@ -1841,12 +1912,6 @@ pub fn tool_schemas() -> Vec<Value> {
             "Declare that the upcoming landing is a touch-and-go. Must be called during BASE or FINAL (before the wheels touch). On touchdown the phase machine will skip ROLLOUT (braking) and transition directly to TAKEOFF_ROLL: full throttle, flaps retract to 10°, no brakes. The aircraft re-accelerates, rotates, and flies another pattern. The flag auto-clears on TAKEOFF_ROLL → ROTATE so the next approach defaults to a normal full-stop landing unless you call execute_touch_and_go again. Requires pattern_fly to be active.",
             json!({}),
             &[],
-        ),
-        schema(
-            "cleared_to_land",
-            "Record a cleared-to-land clearance. Requires pattern_fly to be active.",
-            json!({"runway_id": {"type": "string", "description": "Runway identifier, e.g. '16L'."}}),
-            &["runway_id"],
         ),
         schema(
             "join_pattern",
@@ -2120,43 +2185,89 @@ projection shown below — do NOT pass a runway LINESTRING to ST_Distance_Sphere
 
 Common queries:
 
-  -- 'What runway am I on?' / 'Where am I?' — call get_status first to get
-  -- your lat/lon AND heading, then run this with all three substituted in.
+  -- 'What is the closest runway?' / 'Where am I?' / 'What runway am I on?'
+  -- — call get_status first to get your lat/lon AND heading, then run this
+  -- with all three substituted in. Returns the ONE runway whose body
+  -- (treated as a line segment between thresholds) is closest to you, plus
+  -- the geometry you need to decide whether you're actually *on* it.
+  --
   -- IMPORTANT details baked into this query (do not skip any of them):
-  --   * each runway row stores BOTH ends (le_* and he_*); the LEAST() of the
-  --     two spatial distances is your distance to the nearest threshold on
-  --     that runway, which matters when you're sitting at the high-numbered
-  --     end (e.g. 34R, whose threshold is in the he_* columns).
+  --   * miles_from_centerline is the PERPENDICULAR distance from the
+  --     aircraft to the runway centerline, in statute miles. Computed in a
+  --     local flat-earth projection rooted at the le threshold (accurate
+  --     to sub-meter over a single runway). A runway surface is ~50-150 ft
+  --     wide, so miles_from_centerline < ~0.02 (~100 ft) means you are
+  --     laterally on (or on the extended line of) the runway. Larger
+  --     values mean you're on a taxiway / ramp / parallel runway adjacent
+  --     to it.
+  --   * feet_from_threshold is the Euclidean distance to the *nearer* of
+  --     the two thresholds. Combined with length_ft this tells you where
+  --     along the runway you are: near zero = at a threshold, ~length_ft/2
+  --     = midfield, > length_ft = past the far end / off the pavement.
   --   * active_ident is computed in SQL from cos(heading - end_heading).
-  --     cos handles angular wraparound automatically: heading 0.6 is next
-  --     to 360 (cos ~ +1), not across from it. Do NOT compute this column
+  --     cos handles angular wraparound automatically (heading 0.6 is next
+  --     to 360, cos ~ +1, not across from it). Do NOT compute this column
   --     in your head — read it from the query result.
-  --   * no bounding box. ORDER BY the spatial distance over the whole
-  --     table. DuckDB scans 43k rows in milliseconds.
-  SELECT airport_ident, le_ident, he_ident, length_ft, surface,
-         le_heading_degT, he_heading_degT,
-         LEAST(
-           ST_Distance_Sphere(ST_Point(le_longitude_deg, le_latitude_deg),
-                              ST_Point(<lon>, <lat>)),
-           ST_Distance_Sphere(ST_Point(he_longitude_deg, he_latitude_deg),
-                              ST_Point(<lon>, <lat>))
-         ) AS dist_m,
-         CASE
-           WHEN cos(radians(le_heading_degT - <hdg>)) >
-                cos(radians(he_heading_degT - <hdg>))
-           THEN le_ident
-           ELSE he_ident
-         END AS active_ident
-  FROM runways
-  WHERE closed = 0
-    AND le_latitude_deg IS NOT NULL
-    AND he_latitude_deg IS NOT NULL
-  ORDER BY dist_m
-  LIMIT 5;
+  --   * ORDER BY uses point-to-segment distance (not point-to-threshold),
+  --     so sitting at midfield on a 10000 ft runway still correctly picks
+  --     that runway as closest even though both thresholds are 5000 ft
+  --     away. No bounding box; DuckDB scans 43k rows in milliseconds.
+  WITH me AS (SELECT <lat> AS lat_a, <lon> AS lon_a, <hdg> AS hdg_a),
+  proj AS (
+    SELECT
+      r.airport_ident, r.le_ident, r.he_ident,
+      r.length_ft, r.surface,
+      r.le_heading_degT, r.he_heading_degT,
+      (r.he_longitude_deg - r.le_longitude_deg)
+        * 111320.0 * cos(radians(r.le_latitude_deg)) AS rx,
+      (r.he_latitude_deg - r.le_latitude_deg) * 111320.0 AS ry,
+      (m.lon_a - r.le_longitude_deg)
+        * 111320.0 * cos(radians(r.le_latitude_deg)) AS ax,
+      (m.lat_a - r.le_latitude_deg) * 111320.0 AS ay,
+      ST_Distance_Sphere(ST_Point(r.le_longitude_deg, r.le_latitude_deg),
+                         ST_Point(m.lon_a, m.lat_a)) AS le_dist_m,
+      ST_Distance_Sphere(ST_Point(r.he_longitude_deg, r.he_latitude_deg),
+                         ST_Point(m.lon_a, m.lat_a)) AS he_dist_m,
+      m.hdg_a AS hdg_a
+    FROM runways r, me m
+    WHERE r.closed = 0
+      AND r.le_latitude_deg IS NOT NULL
+      AND r.he_latitude_deg IS NOT NULL
+  ),
+  metrics AS (
+    SELECT *,
+      CASE WHEN (rx*rx + ry*ry) > 0
+           THEN (ax*rx + ay*ry) / (rx*rx + ry*ry)
+           ELSE 0 END AS t,
+      CASE WHEN (rx*rx + ry*ry) > 0
+           THEN abs(ax*ry - ay*rx) / sqrt(rx*rx + ry*ry)
+           ELSE sqrt(ax*ax + ay*ay) END AS crosstrack_m
+    FROM proj
+  )
+  SELECT
+    airport_ident, le_ident, he_ident, length_ft, surface,
+    le_heading_degT, he_heading_degT,
+    crosstrack_m / 1609.344 AS miles_from_centerline,
+    LEAST(le_dist_m, he_dist_m) * 3.28084 AS feet_from_threshold,
+    CASE
+      WHEN cos(radians(le_heading_degT - hdg_a)) >
+           cos(radians(he_heading_degT - hdg_a))
+      THEN le_ident ELSE he_ident
+    END AS active_ident
+  FROM metrics
+  ORDER BY
+    CASE
+      WHEN t < 0 THEN sqrt(ax*ax + ay*ay)
+      WHEN t > 1 THEN sqrt((ax-rx)*(ax-rx) + (ay-ry)*(ay-ry))
+      ELSE crosstrack_m
+    END
+  LIMIT 1;
 
-  -- The runway you are on is the top row's active_ident column, provided
-  -- dist_m is small (< ~100 m if you're actually on a runway). Do not pick
-  -- le_ident or he_ident yourself — always read active_ident.
+  -- Interpreting the row: you are ON the returned runway if
+  -- miles_from_centerline < ~0.02 AND feet_from_threshold < length_ft.
+  -- Otherwise you're near it but not on it (taxiway/ramp/extended
+  -- centerline on approach). active_ident is the end you are pointed at —
+  -- use that as the runway_ident for engage_pattern_fly / engage_takeoff.
 
   -- All active runways at a known airport
   SELECT airport_ident, le_ident, he_ident, length_ft, surface,

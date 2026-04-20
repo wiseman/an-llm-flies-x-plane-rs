@@ -6,8 +6,10 @@ use common::state_with;
 use approx::assert_abs_diff_eq;
 use xplane_pilot::config::load_default_config_bundle;
 use xplane_pilot::core::mission_manager::PilotCore;
-use xplane_pilot::core::mode_manager::ModeManager;
-use xplane_pilot::core::profiles::PatternFlyProfile;
+use xplane_pilot::core::mode_manager::{
+    ModeManager, ModeManagerUpdate, PatternClearances, PatternTriggers,
+};
+use xplane_pilot::core::profiles::{ExtendMode, PatternFlyProfile, PatternLeg};
 use xplane_pilot::core::safety_monitor::SafetyStatus;
 use xplane_pilot::guidance::pattern_manager::build_pattern_geometry;
 use xplane_pilot::guidance::route_manager::RouteManager;
@@ -35,7 +37,11 @@ fn extend_downwind_rebuilds_pattern_geometry() {
     pilot.find_profile_mut("pattern_fly", |p| {
         let ptr = p as *mut dyn xplane_pilot::core::profiles::GuidanceProfile as *mut u8;
         let concrete = ptr as *mut PatternFlyProfile;
-        unsafe { (*concrete).extend_downwind(2400.0) }
+        unsafe {
+            (*concrete)
+                .extend_leg(PatternLeg::Downwind, 2400.0, ExtendMode::Add)
+                .unwrap()
+        }
     });
     let (new_ext, new_base) = pilot.find_profile_mut("pattern_fly", |p| {
         let ptr = p as *mut dyn xplane_pilot::core::profiles::GuidanceProfile as *mut u8;
@@ -51,7 +57,7 @@ fn turn_base_now_override_skips_waiting_for_nominal_turn_point() {
     let cfg = load_default_config_bundle();
     let mm = ModeManager::new(cfg.clone());
     let rf = RunwayFrame::new(cfg.airport.runway.clone());
-    let pattern = build_pattern_geometry(&rf, cfg.pattern.downwind_offset_ft, 0.0);
+    let pattern = build_pattern_geometry(&rf, cfg.pattern.downwind_offset_ft, 0.0, 0.0);
     let state = state_with(|s| {
         s.runway_x_ft = Some(1200.0);
         s.runway_y_ft = Some(pattern.downwind_y_ft);
@@ -64,8 +70,21 @@ fn turn_base_now_override_skips_waiting_for_nominal_turn_point() {
         reason: None,
         bank_limit_deg: cfg.limits.max_bank_pattern_deg,
     };
+    let triggers = PatternTriggers { turn_base: true, ..Default::default() };
+    let clearances = PatternClearances::default();
     assert_eq!(
-        mm.update(FlightPhase::Downwind, &state, &route, &pattern, &safe, true, false, false, false),
+        mm.update(&ModeManagerUpdate {
+            phase: FlightPhase::Downwind,
+            state: &state,
+            route_manager: &route,
+            pattern: &pattern,
+            safety_status: &safe,
+            triggers: &triggers,
+            clearances: &clearances,
+            force_go_around: false,
+            stay_in_pattern: false,
+            touch_and_go: false,
+        }),
         FlightPhase::Base
     );
 }
@@ -75,7 +94,7 @@ fn force_go_around_override_preempts_normal_sequence() {
     let cfg = load_default_config_bundle();
     let mm = ModeManager::new(cfg.clone());
     let rf = RunwayFrame::new(cfg.airport.runway.clone());
-    let pattern = build_pattern_geometry(&rf, cfg.pattern.downwind_offset_ft, 0.0);
+    let pattern = build_pattern_geometry(&rf, cfg.pattern.downwind_offset_ft, 0.0, 0.0);
     let state = state_with(|s| {
         s.alt_agl_ft = 300.0;
         s.runway_x_ft = Some(-2000.0);
@@ -87,8 +106,21 @@ fn force_go_around_override_preempts_normal_sequence() {
         reason: None,
         bank_limit_deg: cfg.limits.max_bank_final_deg,
     };
+    let triggers = PatternTriggers::default();
+    let clearances = PatternClearances::default();
     assert_eq!(
-        mm.update(FlightPhase::Final, &state, &route, &pattern, &safe, false, true, false, false),
+        mm.update(&ModeManagerUpdate {
+            phase: FlightPhase::Final,
+            state: &state,
+            route_manager: &route,
+            pattern: &pattern,
+            safety_status: &safe,
+            triggers: &triggers,
+            clearances: &clearances,
+            force_go_around: true,
+            stay_in_pattern: false,
+            touch_and_go: false,
+        }),
         FlightPhase::GoAround
     );
 }

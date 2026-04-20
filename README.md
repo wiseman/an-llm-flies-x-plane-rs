@@ -135,11 +135,11 @@ Every live run produces three timestamped artifacts in `output/`, sharing one st
 | `engage_takeoff`       | Verifies runway alignment and starts the deterministic takeoff roll, rotation, and climb.        |
 | `takeoff_checklist`    | Reports takeoff readiness, including parking brake, flaps, and other live-state checks.          |
 | `engage_pattern_fly`   | Anchors the mission pilot to a real runway and flies a full traffic pattern from a chosen phase. |
-| `extend_downwind`      | Pushes the base-turn point farther out while `pattern_fly` is active.                            |
-| `turn_base_now`        | Forces an immediate base turn from downwind.                                                     |
+| `extend_pattern_leg`   | Lengthens the downwind or crosswind leg (ATC: "extend your downwind 2 miles").                    |
+| `execute_pattern_turn` | Forces an immediate turn to crosswind/downwind/base/final, rebuilding the next leg from current position. |
+| `set_pattern_clearance`| Grants or revokes an ATC clearance gate (turn_crosswind/turn_downwind/turn_base/turn_final/land); revoking holds the aircraft on its current leg. |
 | `go_around`            | Commands an immediate go-around during pattern flying.                                           |
 | `execute_touch_and_go` | Arms the next landing to skip rollout braking and transition straight back to takeoff.           |
-| `cleared_to_land`      | Records a landing clearance for the active pattern.                                              |
 | `join_pattern`         | Acknowledges a pattern-entry instruction while `pattern_fly` is active.                          |
 
 ### Ground, Radio, And Airport Data

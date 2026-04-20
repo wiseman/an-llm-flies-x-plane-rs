@@ -380,7 +380,7 @@ fn engage_approach_returns_not_implemented() {
 }
 
 #[test]
-fn extend_downwind_with_pattern_fly_succeeds() {
+fn extend_pattern_leg_downwind_with_pattern_fly_succeeds() {
     let ctx = make_ctx(None, None);
     {
         let mut p = ctx.pilot.lock();
@@ -388,12 +388,18 @@ fn extend_downwind_with_pattern_fly_succeeds() {
         let rf = p.runway_frame.clone();
         p.engage_profile(Box::new(PatternFlyProfile::new(cfg, rf)));
     }
-    let r = dispatch_tool(&call("extend_downwind", json!({"extension_ft": 1500.0})), &ctx);
-    assert!(r.contains("extended downwind"));
+    let r = dispatch_tool(
+        &call(
+            "extend_pattern_leg",
+            json!({"leg": "downwind", "extension_ft": 1500.0, "mode": "add"}),
+        ),
+        &ctx,
+    );
+    assert!(r.contains("downwind leg extension"));
 }
 
 #[test]
-fn turn_base_now_sets_profile_trigger() {
+fn extend_pattern_leg_base_returns_error() {
     let ctx = make_ctx(None, None);
     {
         let mut p = ctx.pilot.lock();
@@ -401,7 +407,69 @@ fn turn_base_now_sets_profile_trigger() {
         let rf = p.runway_frame.clone();
         p.engage_profile(Box::new(PatternFlyProfile::new(cfg, rf)));
     }
-    dispatch_tool(&call("turn_base_now", json!({})), &ctx);
+    let r = dispatch_tool(
+        &call(
+            "extend_pattern_leg",
+            json!({"leg": "base", "extension_ft": 500.0, "mode": "add"}),
+        ),
+        &ctx,
+    );
+    assert!(r.starts_with("error:"));
+}
+
+#[test]
+fn execute_pattern_turn_base_sets_trigger() {
+    let ctx = make_ctx(None, None);
+    {
+        let mut p = ctx.pilot.lock();
+        let cfg = ctx.config.lock().clone();
+        let rf = p.runway_frame.clone();
+        p.engage_profile(Box::new(PatternFlyProfile::new(cfg, rf)));
+    }
+    let r = dispatch_tool(
+        &call("execute_pattern_turn", json!({"leg": "base"})),
+        &ctx,
+    );
+    assert!(r.contains("turn to base triggered"));
+}
+
+#[test]
+fn set_pattern_clearance_revokes_base() {
+    let ctx = make_ctx(None, None);
+    {
+        let mut p = ctx.pilot.lock();
+        let cfg = ctx.config.lock().clone();
+        let rf = p.runway_frame.clone();
+        p.engage_profile(Box::new(PatternFlyProfile::new(cfg, rf)));
+    }
+    let r = dispatch_tool(
+        &call(
+            "set_pattern_clearance",
+            json!({"gate": "turn_base", "granted": false, "runway_id": null}),
+        ),
+        &ctx,
+    );
+    assert!(r.contains("turn_base clearance revoked"));
+}
+
+#[test]
+fn set_pattern_clearance_cleared_to_land() {
+    let ctx = make_ctx(None, None);
+    {
+        let mut p = ctx.pilot.lock();
+        let cfg = ctx.config.lock().clone();
+        let rf = p.runway_frame.clone();
+        p.engage_profile(Box::new(PatternFlyProfile::new(cfg, rf)));
+    }
+    let r = dispatch_tool(
+        &call(
+            "set_pattern_clearance",
+            json!({"gate": "land", "granted": true, "runway_id": "16L"}),
+        ),
+        &ctx,
+    );
+    assert!(r.contains("cleared to land"));
+    assert!(r.contains("16L"));
 }
 
 #[test]
@@ -1258,6 +1326,78 @@ fn spatial_function_finds_nearest_runways() {
     assert_eq!(lines[0], "airport_ident\tle_ident");
     let airports: Vec<&str> = lines[1..4].iter().map(|l| l.split('\t').next().unwrap()).collect();
     assert_eq!(airports, vec!["KSEA", "KSEA", "KSEA"]);
+}
+
+#[test]
+fn spatial_closest_runway_template_returns_centerline_and_threshold_distances() {
+    // Sanity-check the "What is the closest runway?" template the system
+    // prompt points the LLM at. Runs the exact query shape (flat-earth
+    // projection, point-to-segment ORDER BY) against the fake KSEA
+    // parquet using a point sitting near the 16L threshold.
+    let dir = TempDir::new().unwrap();
+    build_fake_parquet(dir.path(), &[]);
+    let (ctx, _) = make_ctx_with_parquet(dir.path());
+    let lat = 47.431388_f64;
+    let lon = -122.308039_f64;
+    let hdg = 160.0_f64;
+    let query = format!(
+        "WITH me AS (SELECT {lat} AS lat_a, {lon} AS lon_a, {hdg} AS hdg_a), \
+         proj AS ( \
+           SELECT r.airport_ident, r.le_ident, r.he_ident, r.length_ft, r.surface, \
+             r.le_heading_degT, r.he_heading_degT, \
+             (r.he_longitude_deg - r.le_longitude_deg) * 111320.0 * cos(radians(r.le_latitude_deg)) AS rx, \
+             (r.he_latitude_deg - r.le_latitude_deg) * 111320.0 AS ry, \
+             (m.lon_a - r.le_longitude_deg) * 111320.0 * cos(radians(r.le_latitude_deg)) AS ax, \
+             (m.lat_a - r.le_latitude_deg) * 111320.0 AS ay, \
+             ST_Distance_Sphere(ST_Point(r.le_longitude_deg, r.le_latitude_deg), ST_Point(m.lon_a, m.lat_a)) AS le_dist_m, \
+             ST_Distance_Sphere(ST_Point(r.he_longitude_deg, r.he_latitude_deg), ST_Point(m.lon_a, m.lat_a)) AS he_dist_m, \
+             m.hdg_a AS hdg_a \
+           FROM runways r, me m \
+           WHERE r.closed = 0 AND r.le_latitude_deg IS NOT NULL AND r.he_latitude_deg IS NOT NULL \
+         ), \
+         metrics AS ( \
+           SELECT *, \
+             CASE WHEN (rx*rx + ry*ry) > 0 THEN (ax*rx + ay*ry) / (rx*rx + ry*ry) ELSE 0 END AS t, \
+             CASE WHEN (rx*rx + ry*ry) > 0 THEN abs(ax*ry - ay*rx) / sqrt(rx*rx + ry*ry) ELSE sqrt(ax*ax + ay*ay) END AS crosstrack_m \
+           FROM proj \
+         ) \
+         SELECT airport_ident, le_ident, he_ident, length_ft, surface, \
+           le_heading_degT, he_heading_degT, \
+           crosstrack_m / 1609.344 AS miles_from_centerline, \
+           LEAST(le_dist_m, he_dist_m) * 3.28084 AS feet_from_threshold, \
+           CASE WHEN cos(radians(le_heading_degT - hdg_a)) > cos(radians(he_heading_degT - hdg_a)) \
+                THEN le_ident ELSE he_ident END AS active_ident \
+         FROM metrics \
+         ORDER BY CASE WHEN t < 0 THEN sqrt(ax*ax + ay*ay) \
+                       WHEN t > 1 THEN sqrt((ax-rx)*(ax-rx) + (ay-ry)*(ay-ry)) \
+                       ELSE crosstrack_m END \
+         LIMIT 1",
+        lat = lat, lon = lon, hdg = hdg,
+    );
+    let r = dispatch_tool(&call("sql_query", json!({"query": query})), &ctx);
+    let lines: Vec<&str> = r.lines().collect();
+    assert_eq!(
+        lines[0],
+        "airport_ident\tle_ident\the_ident\tlength_ft\tsurface\tle_heading_degT\the_heading_degT\tmiles_from_centerline\tfeet_from_threshold\tactive_ident"
+    );
+    let fields: Vec<&str> = lines[1].split('\t').collect();
+    assert_eq!(fields[0], "KSEA");
+    let miles_from_centerline: f64 = fields[7].parse().unwrap();
+    let feet_from_threshold: f64 = fields[8].parse().unwrap();
+    let active: &str = fields[9];
+    assert!(
+        miles_from_centerline < 0.02,
+        "expected laterally on runway (< 0.02 mi), got {}",
+        miles_from_centerline
+    );
+    assert!(
+        feet_from_threshold < 300.0,
+        "expected near a threshold (< 300 ft), got {}",
+        feet_from_threshold
+    );
+    // Heading 160 -> aligned with 16L (le end course ~160), so active_ident
+    // should name the low-end ident.
+    assert_eq!(active, "16L");
 }
 
 #[test]

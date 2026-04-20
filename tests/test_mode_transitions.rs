@@ -4,7 +4,9 @@ mod common;
 use common::state_with;
 
 use xplane_pilot::config::load_default_config_bundle;
-use xplane_pilot::core::mode_manager::ModeManager;
+use xplane_pilot::core::mode_manager::{
+    ModeManager, ModeManagerUpdate, PatternClearances, PatternTriggers,
+};
 use xplane_pilot::core::safety_monitor::SafetyStatus;
 use xplane_pilot::guidance::pattern_manager::build_pattern_geometry;
 use xplane_pilot::guidance::route_manager::RouteManager;
@@ -21,7 +23,7 @@ fn fixtures() -> (
     let config = load_default_config_bundle();
     let mode_manager = ModeManager::new(config.clone());
     let rf = RunwayFrame::new(config.airport.runway.clone());
-    let pattern = build_pattern_geometry(&rf, config.pattern.downwind_offset_ft, 0.0);
+    let pattern = build_pattern_geometry(&rf, config.pattern.downwind_offset_ft, 0.0, 0.0);
     let route = RouteManager::new(vec![]);
     let safe = SafetyStatus {
         request_go_around: false,
@@ -43,7 +45,23 @@ fn update(
     stay_in_pattern: bool,
     touch_and_go: bool,
 ) -> FlightPhase {
-    mm.update(phase, state, rm, p, s, turn_base_now, force_go_around, stay_in_pattern, touch_and_go)
+    let triggers = PatternTriggers {
+        turn_base: turn_base_now,
+        ..Default::default()
+    };
+    let clearances = PatternClearances::default();
+    mm.update(&ModeManagerUpdate {
+        phase,
+        state,
+        route_manager: rm,
+        pattern: p,
+        safety_status: s,
+        triggers: &triggers,
+        clearances: &clearances,
+        force_go_around,
+        stay_in_pattern,
+        touch_and_go,
+    })
 }
 
 #[test]
