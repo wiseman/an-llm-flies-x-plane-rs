@@ -886,14 +886,35 @@ impl PatternFlyProfile {
                 (0.0, 1.0),
                 Some(0),
             ),
-            FlightPhase::Downwind => (
-                self.config.pattern_altitude_msl_ft(),
-                self.config.performance.downwind_speed_kt,
-                VerticalMode::Tecs,
-                None,
-                (0.0, 1.0),
-                Some(10),
-            ),
+            FlightPhase::Downwind => {
+                // Real VFR pattern descent: power back and start a gentle
+                // descent abeam the numbers, so we arrive at the base turn
+                // already partway down rather than forcing a 600 ft step
+                // drop into the base target. Lerp the altitude target from
+                // pattern altitude at abeam (x=0) down to `field+500` at
+                // the base-turn x. Before abeam (x>0) we hold pattern
+                // altitude; the clamp handles the missing-runway-frame
+                // case and any overshoot past the base-turn point.
+                let pattern_alt = self.config.pattern_altitude_msl_ft();
+                let base_turn_intercept_alt_ft =
+                    self.config.airport.field_elevation_ft + 500.0;
+                let base_turn_x = self.pattern.base_turn_x_ft;
+                let target_alt = match state.runway_x_ft {
+                    Some(x) if base_turn_x < 0.0 => {
+                        let frac = (x / base_turn_x).clamp(0.0, 1.0);
+                        pattern_alt + (base_turn_intercept_alt_ft - pattern_alt) * frac
+                    }
+                    _ => pattern_alt,
+                };
+                (
+                    target_alt,
+                    self.config.performance.downwind_speed_kt,
+                    VerticalMode::Tecs,
+                    None,
+                    (0.0, 1.0),
+                    Some(10),
+                )
+            }
             FlightPhase::Base => (
                 self.config.airport.field_elevation_ft + 400.0,
                 self.config.performance.base_speed_kt,
@@ -903,7 +924,7 @@ impl PatternFlyProfile {
                 Some(20),
             ),
             FlightPhase::Final => {
-                let final_slope = 4.0;
+                let final_slope = 3.0;
                 let target_altitude = glidepath_target_altitude_ft_default(
                     &self.runway_frame,
                     state.runway_x_ft.unwrap_or(-3000.0),
