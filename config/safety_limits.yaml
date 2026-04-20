@@ -1,5 +1,5 @@
-max_bank_enroute_deg: 25
-max_bank_pattern_deg: 20
+max_bank_enroute_deg: 45
+max_bank_pattern_deg: 30
 max_bank_final_deg: 20
 max_pitch_up_deg: 12
 max_pitch_down_deg: 10
