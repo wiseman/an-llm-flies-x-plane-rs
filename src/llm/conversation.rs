@@ -1,6 +1,7 @@
 //! Multi-turn Responses-API conversation loop. Mirrors llm/conversation.py.
 //!
 //! `Conversation` holds the pinned system prompt + rotating message history.
+//! History grows unbounded — there is no compaction.
 //! `run_conversation_loop` pulls one `IncomingMessage` off the queue, appends
 //! it, then drives the Responses API in a loop: each tool call is dispatched
 //! and its output posted back as a `function_call_output` item. The loop
@@ -30,7 +31,6 @@ pub const SYSTEM_PROMPT_REALISTIC: &str = concat!(
 const RUNTIME_NORMAL_NOTICE: &str =
     "Return to normal pilot mode. Disregard any realistic-pilot overlay delivered earlier; \
 resume the base persona defined at the top of this conversation.";
-pub const MAX_INPUT_CHARS: usize = 60_000;
 pub const DEFAULT_PER_REQUEST_TIMEOUT_S: u64 = 60;
 pub const DEFAULT_TOTAL_WALL_BUDGET_S: u64 = 120;
 
@@ -200,38 +200,6 @@ impl Conversation {
         out.push(summary);
         out
     }
-
-    pub fn total_char_count(&self) -> usize {
-        let mut total = 0;
-        for item in self.pinned_items.iter().chain(self.rotating_items.iter()) {
-            total += serde_json::to_string(item).unwrap_or_default().len();
-        }
-        total
-    }
-
-    pub fn compact_if_needed(&mut self, threshold_chars: usize) -> usize {
-        let mut dropped = 0;
-        while self.total_char_count() > threshold_chars {
-            let Some(end) = self.first_full_turn_end() else { break };
-            self.rotating_items.drain(0..end);
-            dropped += end;
-        }
-        dropped
-    }
-
-    fn first_full_turn_end(&self) -> Option<usize> {
-        let first_user = self.first_user_index(0)?;
-        self.first_user_index(first_user + 1)
-    }
-
-    fn first_user_index(&self, start: usize) -> Option<usize> {
-        for (i, item) in self.rotating_items.iter().enumerate().skip(start) {
-            if item.get("role").and_then(|v| v.as_str()) == Some("user") {
-                return Some(i);
-            }
-        }
-        None
-    }
 }
 
 pub fn run_conversation_loop(
@@ -297,7 +265,6 @@ fn handle_message(
             return Ok(());
         }
     }
-    conv.compact_if_needed(MAX_INPUT_CHARS);
 
     let deadline = Instant::now() + Duration::from_secs(total_wall_budget_s);
     loop {

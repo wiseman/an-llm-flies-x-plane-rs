@@ -17,8 +17,7 @@ use xplane_pilot::bus::SimBus;
 use xplane_pilot::config::load_default_config_bundle;
 use xplane_pilot::core::mission_manager::PilotCore;
 use xplane_pilot::llm::conversation::{
-    run_conversation_loop, Conversation, IncomingMessage, PilotMode, MAX_INPUT_CHARS,
-    SYSTEM_PROMPT,
+    run_conversation_loop, Conversation, IncomingMessage, PilotMode, SYSTEM_PROMPT,
 };
 use xplane_pilot::llm::responses_client::ResponsesBackend;
 use xplane_pilot::llm::tools::ToolContext;
@@ -131,36 +130,6 @@ fn build_input_includes_pinned_profiles_summary_and_rotating() {
     let summary = items[2]["content"][0]["text"].as_str().unwrap();
     assert!(summary.contains("Active profiles"));
     assert!(summary.contains("heading_hold"));
-}
-
-#[test]
-fn compaction_drops_oldest_full_turn() {
-    let mut conv = Conversation::new("sys");
-    for turn in 0..2 {
-        conv.append_operator_message(&format!("msg{turn}"));
-        conv.rotating_items.push(fn_call("noop", json!({}), &format!("c{turn}")));
-        conv.append_function_call_output(&format!("c{turn}"), "ok").unwrap();
-    }
-    let user_count = |c: &Conversation| -> usize {
-        c.rotating_items
-            .iter()
-            .filter(|i| i.get("role").and_then(|v| v.as_str()) == Some("user"))
-            .count()
-    };
-    assert_eq!(user_count(&conv), 2);
-    let dropped = conv.compact_if_needed(50);
-    assert!(dropped > 0);
-    assert_eq!(user_count(&conv), 1);
-}
-
-#[test]
-fn compaction_leaves_partial_turn_alone() {
-    let mut conv = Conversation::new("sys");
-    conv.append_operator_message("only");
-    conv.rotating_items.push(fn_call("noop", json!({}), "c0"));
-    conv.append_function_call_output("c0", "ok").unwrap();
-    assert_eq!(conv.compact_if_needed(10), 0);
-    let _ = MAX_INPUT_CHARS;
 }
 
 // ---------- pilot mode ----------
