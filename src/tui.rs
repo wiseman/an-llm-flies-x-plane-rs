@@ -303,6 +303,12 @@ pub fn run_tui(
     let mut last_input_width: u16 = 0;
     let frame_interval = Duration::from_millis(100);
     let mut ptt_tracker = PttKeyTracker::default();
+    // EMA-smoothed mic amplitude for the recording waveform. Reset to 0
+    // whenever we re-enter Idle so the bar drops cleanly between holds.
+    let mut ptt_amp_smoothed: f32 = 0.0;
+    // Fixed epoch for driving time-based UI animations (the Finalizing
+    // shimmer, etc.) without allocating a new Instant each render.
+    let tui_epoch = Instant::now();
 
     let outcome = loop {
         let next_tick = Instant::now() + frame_interval;
@@ -310,11 +316,11 @@ pub fn run_tui(
         // Drain any final transcripts into the input buffer.
         if let Some(p) = &ptt {
             while let Some(final_text) = p.try_recv_final() {
-                if !input_buffer.is_empty() && !input_buffer.ends_with(' ') {
-                    input_buffer.push(' ');
-                }
-                input_buffer.push_str(final_text.trim());
-                input_cursor = input_buffer.chars().count();
+                insert_transcript_at_cursor(
+                    &mut input_buffer,
+                    &mut input_cursor,
+                    &final_text,
+                );
             }
         }
 
@@ -450,12 +456,11 @@ pub fn run_tui(
                                     + Duration::from_millis(300);
                                 while Instant::now() < deadline {
                                     if let Some(t) = p.try_recv_final() {
-                                        if !input_buffer.is_empty()
-                                            && !input_buffer.ends_with(' ')
-                                        {
-                                            input_buffer.push(' ');
-                                        }
-                                        input_buffer.push_str(t.trim());
+                                        insert_transcript_at_cursor(
+                                            &mut input_buffer,
+                                            &mut input_cursor,
+                                            &t,
+                                        );
                                         break;
                                     }
                                     std::thread::sleep(Duration::from_millis(15));
@@ -669,6 +674,29 @@ pub fn run_tui(
                 ptt_snap.as_ref().map(|s| &s.mode),
                 Some(PttMode::Recording)
             );
+            let finalizing = matches!(
+                ptt_snap.as_ref().map(|s| &s.mode),
+                Some(PttMode::Finalizing)
+            );
+            // "keep holding…" warmup hint: PTT key is pressed but the
+            // auto-repeat / kitty Repeat hasn't fired yet, so recording
+            // hasn't started. Threshold keeps single-char taps clean.
+            let warmup_hint = ptt_tracker
+                .pending
+                .as_ref()
+                .filter(|p| !p.recording)
+                .filter(|p| p.last_seen.elapsed() >= Duration::from_millis(120))
+                .is_some();
+            // Smooth the amp towards the live reading while recording,
+            // and decay back to silence between holds so the next hold
+            // starts from zero.
+            if recording {
+                if let Some(snap) = &ptt_snap {
+                    ptt_amp_smoothed = smooth_amp(ptt_amp_smoothed, snap.amp);
+                }
+            } else {
+                ptt_amp_smoothed *= 0.3;
+            }
             if let Some(snap) = &ptt_snap {
                 if snap.mode != PttMode::Idle && !snap.partial.is_empty() {
                     // Show prefix + partial dimmed while streaming.
@@ -687,11 +715,29 @@ pub fn run_tui(
                     // the cursor during PTT — no separator space, and the
                     // terminal cursor is suppressed below so this is the
                     // only thing the eye lands on.
+                    let level = amp_level_from_smoothed(ptt_amp_smoothed);
                     spans.push(Span::styled(
-                        amp_glyph(snap.amp).to_string(),
+                        amp_glyph(level).to_string(),
                         Style::default().fg(Color::LightGreen),
                     ));
+                } else if finalizing {
+                    // Pulsing ellipsis while we're waiting for the final
+                    // transcript. 1.6 s period (half-sine → visible) so
+                    // it's a gentle breath rather than a strobe.
+                    let t = tui_epoch.elapsed().as_secs_f64();
+                    let phase = ((t / 0.8) * std::f64::consts::PI).sin();
+                    let mut style = Style::default().fg(Color::Yellow);
+                    if phase < 0.0 {
+                        style = style.add_modifier(Modifier::DIM);
+                    }
+                    spans.push(Span::styled("…", style));
                 }
+            }
+            if warmup_hint {
+                spans.push(Span::styled(
+                    " keep holding…".to_string(),
+                    Style::default().add_modifier(Modifier::DIM),
+                ));
             }
             let pane = chunks[3];
             let content_width = pane.width.saturating_sub(2).max(1);
@@ -734,20 +780,69 @@ pub fn run_tui(
     outcome
 }
 
-/// Vertical bar glyph for the mic amplitude (0..=8). The lowest level
-/// is still a thin bar (not a space or dot) so the indicator is always
-/// visible as a bar even when silent.
-fn amp_glyph(level: u8) -> char {
-    match level.min(8) {
-        0 | 1 => '▁',
-        2 => '▂',
-        3 => '▃',
-        4 => '▄',
-        5 => '▅',
-        6 => '▆',
-        7 => '▇',
-        _ => '█',
+/// Splice a finalized transcript into `buffer` at the caret so voice
+/// input lands where the user is looking, not tacked onto the end of
+/// the line. Adds an auto-space before/after only when the adjacent
+/// characters aren't already whitespace. `cursor` is advanced to sit
+/// immediately after the inserted text.
+fn insert_transcript_at_cursor(
+    buffer: &mut String,
+    cursor: &mut usize,
+    transcript: &str,
+) {
+    let trimmed = transcript.trim();
+    if trimmed.is_empty() {
+        return;
     }
+    let byte_idx = char_byte_index(buffer, *cursor);
+    let needs_leading_space = *cursor > 0 && {
+        let prev_byte = char_byte_index(buffer, *cursor - 1);
+        !buffer[prev_byte..]
+            .chars()
+            .next()
+            .map(|c| c.is_whitespace())
+            .unwrap_or(false)
+    };
+    let needs_trailing_space = byte_idx < buffer.len() && {
+        !buffer[byte_idx..]
+            .chars()
+            .next()
+            .map(|c| c.is_whitespace())
+            .unwrap_or(false)
+    };
+    let mut insert = String::new();
+    if needs_leading_space {
+        insert.push(' ');
+    }
+    insert.push_str(trimmed);
+    if needs_trailing_space {
+        insert.push(' ');
+    }
+    let inserted_chars = insert.chars().count();
+    buffer.insert_str(byte_idx, &insert);
+    *cursor += inserted_chars;
+}
+
+/// Glyphs for the mic amplitude indicator, from silence to peak. The
+/// bottom two rungs (space and light-shade) render as near-empty so
+/// true silence shows as a quiet cell instead of a floor bar.
+const AMP_GLYPHS: [char; 9] = [' ', '░', '▁', '▂', '▃', '▄', '▅', '▆', '█'];
+
+fn amp_glyph(level: u8) -> char {
+    AMP_GLYPHS[level.min(8) as usize]
+}
+
+/// EMA-smooth the raw 0..=8 amp bucket so the rendered bar doesn't
+/// strobe at cpal's callback rate. `prev` is last render's smoothed
+/// value; `raw` is the newest reading.
+fn smooth_amp(prev: f32, raw: u8) -> f32 {
+    const EMA_NEW_WEIGHT: f32 = 0.7;
+    prev * (1.0 - EMA_NEW_WEIGHT) + (raw as f32) * EMA_NEW_WEIGHT
+}
+
+/// Map the smoothed float level back into the 0..=8 glyph index.
+fn amp_level_from_smoothed(smoothed: f32) -> u8 {
+    smoothed.round().clamp(0.0, 8.0) as u8
 }
 
 /// PTT key tracker. Lives on the TUI thread and translates raw key events
@@ -784,27 +879,8 @@ impl PttKey {
         }
     }
 
-    /// Transcription biasing prompt for this key. Narrower context ⇒
-    /// better recognition of runway numbers, taxiway letters, and
-    /// ATC phraseology.
-    fn transcribe_prompt(self) -> &'static str {
-        match self {
-            PttKey::Space => {
-                "Aviation conversation. Common words: runway, heading, \
-                 altitude, taxi, takeoff, landing, flaps, throttle, pattern, \
-                 downwind, base, final, VFR, IFR, squawk."
-            }
-            PttKey::Tab => {
-                "Air traffic control radio communication. Common phrases: \
-                 cleared to land runway [number], cleared for takeoff, hold \
-                 short of [taxiway], taxi via [taxiway] to runway [number], \
-                 line up and wait, contact tower, contact ground, go around, \
-                 traffic pattern, left traffic, right traffic, squawk \
-                 [code], ident. Callsigns: tower, ground, approach, \
-                 departure, unicom, CTAF. Numbers are spoken digit by \
-                 digit (one-two-zero not one hundred twenty)."
-            }
-        }
+    fn atc_mode(self) -> bool {
+        matches!(self, PttKey::Tab)
     }
 
     fn from_code(code: &KeyCode) -> Option<Self> {
@@ -820,13 +896,13 @@ impl PttKey {
 /// `handle_ptt_key` decoupled from `PttController` makes it trivially
 /// unit-testable with a stub.
 trait PttControl {
-    fn start(&self, prefix: String, prompt: Option<String>);
+    fn start(&self, prefix: String, atc_mode: bool);
     fn stop(&self);
 }
 
 impl PttControl for PttController {
-    fn start(&self, prefix: String, prompt: Option<String>) {
-        PttController::start(self, prefix, prompt);
+    fn start(&self, prefix: String, atc_mode: bool) {
+        PttController::start(self, prefix, atc_mode);
     }
     fn stop(&self) {
         PttController::stop(self);
@@ -899,10 +975,7 @@ fn handle_ptt_key<P: PttControl + ?Sized>(
                     *input_cursor += key.prefix().chars().count();
                 }
                 if let Some(p) = ptt {
-                    p.start(
-                        key.prefix().to_string(),
-                        Some(key.transcribe_prompt().to_string()),
-                    );
+                    p.start(key.prefix().to_string(), key.atc_mode());
                 }
                 tracker.pending = Some(PendingPtt {
                     key,
@@ -1804,14 +1877,11 @@ mod tests {
     }
 
     impl PttControl for FakePtt {
-        fn start(&self, prefix: String, prompt: Option<String>) {
-            let tag = prompt
-                .as_deref()
-                .map(|p| if p.contains("radio communication") { "atc" } else { "conv" })
-                .unwrap_or("none");
+        fn start(&self, prefix: String, atc_mode: bool) {
+            let tag = if atc_mode { "atc" } else { "conv" };
             self.calls
                 .borrow_mut()
-                .push(format!("start:{prefix}|prompt={tag}"));
+                .push(format!("start:{prefix}|mode={tag}"));
         }
         fn stop(&self) {
             self.calls.borrow_mut().push("stop".to_string());
@@ -1827,6 +1897,87 @@ mod tests {
         ptt: &FakePtt,
     ) {
         handle_ptt_key(&kind, &code, tracker, buffer, cursor, Some(ptt));
+    }
+
+    // ---- Transcript insertion helper ----------------------------------
+
+    #[test]
+    fn insert_transcript_into_empty_buffer_lands_at_zero() {
+        let mut buf = String::new();
+        let mut cur = 0;
+        insert_transcript_at_cursor(&mut buf, &mut cur, "hello world");
+        assert_eq!(buf, "hello world");
+        assert_eq!(cur, 11);
+    }
+
+    #[test]
+    fn insert_transcript_at_end_of_word_adds_leading_space() {
+        let mut buf = String::from("hello");
+        let mut cur = 5;
+        insert_transcript_at_cursor(&mut buf, &mut cur, "world");
+        assert_eq!(buf, "hello world");
+        assert_eq!(cur, 11);
+    }
+
+    #[test]
+    fn insert_transcript_after_space_adds_no_leading_space() {
+        let mut buf = String::from("hello ");
+        let mut cur = 6;
+        insert_transcript_at_cursor(&mut buf, &mut cur, "world");
+        assert_eq!(buf, "hello world");
+        assert_eq!(cur, 11);
+    }
+
+    #[test]
+    fn insert_transcript_mid_buffer_splices_at_cursor() {
+        // "hello|world" → hold PTT, say "brave new" → cursor goes between
+        // the two words, and we auto-space on both sides because neither
+        // neighboring char is whitespace.
+        let mut buf = String::from("helloworld");
+        let mut cur = 5;
+        insert_transcript_at_cursor(&mut buf, &mut cur, "brave new");
+        assert_eq!(buf, "hello brave new world");
+        // Cursor lands just after the trailing auto-space, right before
+        // "world".
+        assert_eq!(cur, 16);
+    }
+
+    #[test]
+    fn insert_transcript_between_spaces_no_extra_spaces() {
+        let mut buf = String::from("hello  world");
+        let mut cur = 6; // between the two spaces
+        insert_transcript_at_cursor(&mut buf, &mut cur, "there");
+        assert_eq!(buf, "hello there world");
+        assert_eq!(cur, 11);
+    }
+
+    #[test]
+    fn insert_transcript_trims_whitespace_payload() {
+        let mut buf = String::new();
+        let mut cur = 0;
+        insert_transcript_at_cursor(&mut buf, &mut cur, "  hello  ");
+        assert_eq!(buf, "hello");
+        assert_eq!(cur, 5);
+    }
+
+    #[test]
+    fn insert_empty_transcript_is_noop() {
+        let mut buf = String::from("hello");
+        let mut cur = 3;
+        insert_transcript_at_cursor(&mut buf, &mut cur, "   ");
+        assert_eq!(buf, "hello");
+        assert_eq!(cur, 3);
+    }
+
+    #[test]
+    fn insert_transcript_after_atc_prefix() {
+        // "[atc] |" — cursor right after the prefix, transcript slots in
+        // cleanly without doubling the space.
+        let mut buf = String::from("[atc] ");
+        let mut cur = 6;
+        insert_transcript_at_cursor(&mut buf, &mut cur, "Whiteman Tower cleared");
+        assert_eq!(buf, "[atc] Whiteman Tower cleared");
+        assert_eq!(cur, 28);
     }
 
     #[test]
@@ -1911,7 +2062,7 @@ mod tests {
         // Stray trailing space stripped; no prefix for operator mode.
         assert_eq!(buf, "hello ");
         assert_eq!(cursor, 6);
-        assert_eq!(*ptt.calls.borrow(), vec!["start:|prompt=conv".to_string()]);
+        assert_eq!(*ptt.calls.borrow(), vec!["start:|mode=conv".to_string()]);
         assert!(tracker.pending.as_ref().unwrap().recording);
     }
 
@@ -1943,7 +2094,7 @@ mod tests {
         // (not at cursor) so parse_input_source sees it.
         assert_eq!(buf, "[atc] ");
         assert_eq!(cursor, 6);
-        assert_eq!(*ptt.calls.borrow(), vec!["start:[atc] |prompt=atc".to_string()]);
+        assert_eq!(*ptt.calls.borrow(), vec!["start:[atc] |mode=atc".to_string()]);
     }
 
     #[test]
@@ -2004,7 +2155,7 @@ mod tests {
         );
         assert_eq!(
             *ptt2.calls.borrow(),
-            vec!["start:|prompt=conv".to_string(), "stop".to_string()]
+            vec!["start:|mode=conv".to_string(), "stop".to_string()]
         );
         assert!(tracker2.pending.is_none());
     }
@@ -2040,7 +2191,7 @@ mod tests {
         // the stray space and starting PTT.
         assert_eq!(buf, "");
         assert_eq!(cursor, 0);
-        assert_eq!(*ptt.calls.borrow(), vec!["start:|prompt=conv".to_string()]);
+        assert_eq!(*ptt.calls.borrow(), vec!["start:|mode=conv".to_string()]);
         assert!(tracker.pending.as_ref().unwrap().recording);
     }
 

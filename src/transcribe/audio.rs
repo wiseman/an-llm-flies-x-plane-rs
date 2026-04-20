@@ -1,9 +1,6 @@
-//! Microphone capture + resample to 24 kHz mono PCM16 for the OpenAI
-//! Realtime transcription API. Built on `cpal` (cross-platform) and a
-//! simple linear-interpolating resampler (voice-grade is plenty for STT).
-//!
-//! Mirrors the capture portion of Python's `sim_pilot/speech.py`
-//! (not ported in the original Rust port).
+//! Microphone capture + resample to 16 kHz mono PCM16 for the Deepgram
+//! streaming STT API. Built on `cpal` (cross-platform) and a simple
+//! linear-interpolating resampler (voice-grade is plenty for STT).
 
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::Arc;
@@ -13,11 +10,12 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{FromSample, Sample, SampleFormat, SizedSample, Stream, StreamConfig};
 use crossbeam_channel::Sender;
 
-/// Target sample rate for the OpenAI Realtime transcription API.
-pub const TARGET_SR: u32 = 24_000;
+/// Target sample rate for Deepgram. Nova 3's native rate is 16 kHz;
+/// anything higher is downsampled server-side so we'd just burn bandwidth.
+pub const TARGET_SR: u32 = 16_000;
 
 /// Flush PCM frames to the WebSocket in ~20 ms chunks.
-const FLUSH_SAMPLES: usize = 480;
+const FLUSH_SAMPLES: usize = 320;
 
 /// Owner of an active cpal input stream. Dropping stops the capture.
 pub struct AudioCapture {
@@ -27,7 +25,7 @@ pub struct AudioCapture {
 }
 
 /// Open the default input device and begin streaming. While `recording`
-/// is true, ~20 ms frames of 24 kHz mono PCM16 are pushed to `pcm_tx`.
+/// is true, ~20 ms frames of 16 kHz mono PCM16 are pushed to `pcm_tx`.
 /// The `amp` field tracks an 0..=8 RMS bucket for the TUI indicator.
 pub fn start_capture(pcm_tx: Sender<Vec<i16>>) -> Result<AudioCapture> {
     let host = cpal::default_host();
@@ -206,18 +204,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn linear_resampler_48k_to_24k_halves_length() {
-        let mut r = LinearResampler::new(48_000, 24_000);
+    fn linear_resampler_48k_to_16k_thirds_length() {
+        let mut r = LinearResampler::new(48_000, 16_000);
         let input: Vec<f32> = (0..480).map(|i| (i as f32).sin() * 0.1).collect();
         let mut out = Vec::new();
         r.process(&input, &mut out);
-        // 2:1 ratio → roughly half the samples out, within ±2.
-        assert!(out.len() >= 238 && out.len() <= 242, "got {} samples", out.len());
+        // 3:1 ratio → roughly a third of the samples out, within ±2.
+        assert!(out.len() >= 158 && out.len() <= 162, "got {} samples", out.len());
     }
 
     #[test]
     fn linear_resampler_identity_passthrough() {
-        let mut r = LinearResampler::new(24_000, 24_000);
+        let mut r = LinearResampler::new(16_000, 16_000);
         let input = vec![0.5_f32; 100];
         let mut out = Vec::new();
         r.process(&input, &mut out);

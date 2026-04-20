@@ -122,7 +122,7 @@ All aircraft/airport/gain values live in YAML under `config/` and fold into the 
 
 `SQL_QUERY_DESCRIPTION` in `src/llm/tools.rs` includes the sentence "ALWAYS prefix spatial functions with ST_" — without it the LLM calls `POINT(...)` against DuckDB and fails.
 
-Speech: audio streams to the OpenAI Realtime API (`gpt-4o-mini-transcribe`) while holding space (operator) or tab (ATC, auto-prefixed `[atc] `). Mic capture is `cpal` + a linear resampler to 24 kHz PCM16; the WebSocket client lives in `src/transcribe/realtime_ws.rs`; the state machine in `src/transcribe/ptt.rs`. Press/Repeat/Release is detected via Kitty keyboard enhancement flags when the terminal supports them, with a ~180 ms repeat-gap fallback elsewhere. Disable with `--no-voice` or run with no `OPENAI_API_KEY`.
+Speech: audio streams to Deepgram (Nova 3) over WebSocket while holding space (operator) or tab (ATC, auto-prefixed `[atc] `). Mic capture is `cpal` + a linear resampler to 16 kHz mono PCM16 sent as raw binary frames; the WebSocket client is `src/transcribe/deepgram_ws.rs`; the state machine is `src/transcribe/ptt.rs`. Each PTT hold opens a fresh WS — Nova 3's `keyterm` query params are bound at connect time, so per-hold vocabulary (nearby airport names/ICAOs, current-airport ATC facility labels, runway idents, taxiway names, phase-specific phraseology) is rebuilt on every Start via `src/transcribe/keyterms.rs`. Press/Repeat/Release is detected via Kitty keyboard enhancement flags when the terminal supports them, with a ~180 ms repeat-gap fallback elsewhere. Disable with `--no-voice` or run with no `DEEPGRAM_API_KEY`.
 
 ## Testing notes
 

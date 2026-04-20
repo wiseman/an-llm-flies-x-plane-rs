@@ -430,7 +430,7 @@ fn synthesize_touchdown_zone_ft(_length_ft: f64) -> f64 {
     1200.0
 }
 
-fn ensure_runway_conn(ctx: &ToolContext) -> Result<()> {
+pub fn ensure_runway_conn(ctx: &ToolContext) -> Result<()> {
     let Some(dir) = &ctx.apt_dat_cache_dir else {
         return Err(anyhow!(
             "apt.dat parquet cache is not configured (set --apt-dat-path or place apt.dat at the standard X-Plane 12 location)"

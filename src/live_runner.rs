@@ -554,11 +554,19 @@ pub fn run_live_xplane(base_config: ConfigBundle, runtime: LiveRunConfig) -> Res
             );
         })?;
         let ptt = if runtime.voice_enabled {
-            match std::env::var("OPENAI_API_KEY").ok() {
+            match std::env::var("DEEPGRAM_API_KEY").ok() {
                 Some(key) if !key.is_empty() => {
-                    match crate::transcribe::PttController::spawn(key, Some(bus.clone())) {
+                    match crate::transcribe::PttController::spawn(
+                        key,
+                        Some(bus.clone()),
+                        pilot_arc.clone(),
+                        tool_ctx.clone(),
+                        tool_ctx.bridge.clone(),
+                    ) {
                         Ok(c) => {
-                            bus.push_log("voice: ptt ready (hold space / tab)".to_string());
+                            bus.push_log(
+                                "voice: ptt ready (deepgram, hold space / tab)".to_string(),
+                            );
                             Some(Arc::new(c))
                         }
                         Err(e) => {
@@ -568,7 +576,7 @@ pub fn run_live_xplane(base_config: ConfigBundle, runtime: LiveRunConfig) -> Res
                     }
                 }
                 _ => {
-                    bus.push_log("voice: disabled (no OPENAI_API_KEY)".to_string());
+                    bus.push_log("voice: disabled (no DEEPGRAM_API_KEY)".to_string());
                     None
                 }
             }

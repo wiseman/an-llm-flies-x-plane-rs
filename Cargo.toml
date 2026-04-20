@@ -30,7 +30,6 @@ ureq = { version = "2", features = ["json"] }
 tungstenite = { version = "0.23", features = ["rustls-tls-native-roots"] }
 cpal = "0.15"
 rubato = "0.15"
-base64 = "0.22"
 url = "2"
 duckdb = { version = "1", features = ["bundled", "json"] }
 serde_yaml_ng = "0.10"

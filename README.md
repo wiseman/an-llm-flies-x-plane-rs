@@ -16,7 +16,7 @@ The live backend talks to X-Plane through the built-in web API and uses X-Plane'
 
 The pilot runs as a standalone executable — no Rust toolchain required. Grab the latest release from [GitHub Releases](https://github.com/wiseman/an-llm-flies-x-plane-rs/releases/latest), extract the archive, and run `./sim-pilot` (or `sim-pilot.exe` on Windows).
 
-By default the executable connects to a running X-Plane 12 (web API on port 8086) and needs an `OPENAI_API_KEY` in a `.env` file. To run the offline deterministic simulator with no X-Plane and no API key, pass `--backend simple`:
+By default the executable connects to a running X-Plane 12 (web API on port 8086) and needs an `OPENAI_API_KEY` in a `.env` file (plus an optional `DEEPGRAM_API_KEY` for voice transcription). To run the offline deterministic simulator with no X-Plane and no API key, pass `--backend simple`:
 
 ```bash
 ./sim-pilot --backend simple --crosswind-kt 10
@@ -37,7 +37,7 @@ Live-mode DuckDB uses the spatial extension. The first run that touches the `sql
 
 ### Live X-Plane (default)
 
-Requires X-Plane 12 running with the built-in web API enabled on port 8086, and an `OPENAI_API_KEY` (a `.env` file in the working directory is read at startup).
+Requires X-Plane 12 running with the built-in web API enabled on port 8086, and an `OPENAI_API_KEY` (a `.env` file in the working directory is read at startup). For push-to-talk voice transcription, also set `DEEPGRAM_API_KEY`.
 
 ```bash
 cargo run --release --                                      # default: --backend xplane
@@ -101,7 +101,7 @@ Slash commands (typed into the INPUT pane and submitted with Enter):
 | `/mode normal`      | Switch the pilot persona to normal mode. Injected as a `[MODE_SWITCH]` user message in conversation history; the system prompt prefix stays byte-stable so prompt caching is preserved. |
 | `/mode realistic`   | Switch to realistic mode (real-world ATC phraseology, readbacks, procedural discipline). Same delivery as above. |
 
-Voice transcription streams to the OpenAI Realtime API (`gpt-4o-mini-transcribe`) over WebSocket. Disable with `--no-voice` or by not providing an `OPENAI_API_KEY`.
+Push-to-talk transcription requires `DEEPGRAM_API_KEY` in `.env`. Disable with `--no-voice` or by omitting the key.
 
 ### Outputs
 
