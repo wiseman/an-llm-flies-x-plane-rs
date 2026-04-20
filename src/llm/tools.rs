@@ -710,7 +710,7 @@ pub fn tool_engage_takeoff(ctx: &ToolContext, args: &Map<String, Value>) -> Stri
     // just happening to be pointed in its direction. Position check
     // catches the "I forgot to taxi/line up" case where the old
     // heading-only guard was a false positive.
-    {
+    let (start_along_ft, usable_length_ft) = {
         let pilot = ctx.pilot.lock();
         let Some(snap) = pilot.latest_snapshot.as_ref() else {
             return "error: no aircraft state yet — call get_status first so the control loop publishes a snapshot".to_string();
@@ -747,16 +747,38 @@ pub fn tool_engage_takeoff(ctx: &ToolContext, args: &Map<String, Value>) -> Stri
                 snap.state.gs_kt
             );
         }
+        let start_along = along.max(0.0);
+        (start_along, length - start_along)
+    };
+
+    // Guard against intersection departures with insufficient remaining
+    // runway. 1000 ft is a generous C172-at-sea-level floor; below this
+    // there's no realistic chance of reaching Vr with margin, so refuse
+    // rather than let the profile roll off the end. (Density-altitude
+    // aware limit is a follow-up.)
+    const MIN_USABLE_LENGTH_FT: f64 = 1000.0;
+    if usable_length_ft < MIN_USABLE_LENGTH_FT {
+        return format!(
+            "error: only {:.0} ft of runway {} available from current position (min {:.0} ft). \
+             Not enough room to accelerate to Vr. Taxi back to a position with more runway ahead.",
+            usable_length_ft, runway_ident, MIN_USABLE_LENGTH_FT
+        );
     }
 
     let new_config = ctx.config.lock().clone();
     let runway_frame = ctx.pilot.lock().runway_frame.clone();
-    let profile = Box::new(TakeoffProfile::new(new_config, runway_frame));
+    let profile = Box::new(TakeoffProfile::new_with_usable_length(
+        new_config,
+        runway_frame,
+        usable_length_ft,
+        start_along_ft,
+    ));
     let displaced = ctx.pilot.lock().engage_profile(profile);
     format!(
-        "engaged takeoff {} runway {}{}",
+        "engaged takeoff {} runway {} ({:.0} ft usable ahead){}",
         airport,
         runway_ident,
+        usable_length_ft,
         format_displaced(&displaced)
     )
 }
@@ -1211,6 +1233,10 @@ pub fn tool_engage_line_up(ctx: &ToolContext, args: &Map<String, Value>) -> Stri
         Ok(s) => s.to_string(),
         Err(e) => return format!("error: {}", e),
     };
+    let intersection = args
+        .get("intersection")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
     let (start_lat, start_lon) = match (
         args.get("start_lat").and_then(|v| v.as_f64()),
         args.get("start_lon").and_then(|v| v.as_f64()),
@@ -1264,7 +1290,6 @@ pub fn tool_engage_line_up(ctx: &ToolContext, args: &Map<String, Value>) -> Stri
 
     let georef = bridge.georef();
     let aircraft_pos_ft = geodetic_offset_ft(start_lat, start_lon, georef);
-    let threshold_ft = geodetic_offset_ft(thr_lat, thr_lon, georef);
 
     // Install the resolved runway into PilotCore. Without this, engage_
     // takeoff's alignment guard compares the aircraft heading against
@@ -1276,6 +1301,33 @@ pub fn tool_engage_line_up(ctx: &ToolContext, args: &Map<String, Value>) -> Stri
         Ok((rwy, field_elev)) => install_runway_in_pilot_core(ctx, &airport, rwy, field_elev),
         Err(e) => return format!("error: {}", e),
     }
+
+    // Entry point: either the runway threshold (default) or the
+    // on-runway side of a named intersection (e.g. taxiway C / rwy 19).
+    // Heading stays the runway course in either case — the aircraft
+    // still has to face down the runway for takeoff.
+    let entry_point_ft = match intersection.as_deref() {
+        None => geodetic_offset_ft(thr_lat, thr_lon, georef),
+        Some(taxiway) => {
+            if let Err(e) = ensure_runway_conn(ctx) {
+                return format!("error: {}", e);
+            }
+            let guard = ctx.runway_conn.lock().unwrap();
+            let conn = guard.as_ref().unwrap();
+            let graph = match taxi_route::load_graph(conn, &airport) {
+                Ok(g) => g,
+                Err(e) => return format!("error: {}", e),
+            };
+            let x = match taxi_route::resolve_runway_intersection(
+                conn, &graph, &airport, &runway, taxiway,
+            ) {
+                Ok(x) => x,
+                Err(e) => return format!("error: {}", e),
+            };
+            geodetic_offset_ft(x.on_runway_lat, x.on_runway_lon, georef)
+        }
+    };
+    let threshold_ft = entry_point_ft;
 
     // Short-circuit if we're already aligned on the runway centerline.
     // Otherwise the fresh line-up route drags the aircraft back toward
@@ -1321,10 +1373,15 @@ pub fn tool_engage_line_up(ctx: &ToolContext, args: &Map<String, Value>) -> Stri
     let displaced = ctx.pilot.lock().engage_profile(profile);
 
     let approach_dist = (threshold_ft - aircraft_pos_ft).length();
+    let at_clause = intersection
+        .as_deref()
+        .map(|t| format!(" at {}", t))
+        .unwrap_or_default();
     format!(
-        "engaged line_up {} runway {} — crossing {:.0} ft, final heading {:.0}°{}",
+        "engaged line_up {} runway {}{} — crossing {:.0} ft, final heading {:.0}°{}",
         airport,
         runway,
+        at_clause,
         approach_dist,
         heading_deg,
         format_displaced(&displaced)
@@ -1371,6 +1428,10 @@ pub fn tool_engage_taxi(ctx: &ToolContext, args: &Map<String, Value>) -> String 
         .and_then(|v| v.as_array())
         .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
         .unwrap_or_default();
+    let intersection = args
+        .get("intersection")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
 
     let (start_lat, start_lon) = match (
         args.get("start_lat").and_then(|v| v.as_f64()),
@@ -1409,12 +1470,14 @@ pub fn tool_engage_taxi(ctx: &ToolContext, args: &Map<String, Value>) -> String 
             Ok(id) => id,
             Err(e) => return format!("error: {}", e),
         };
-        let dest = match taxi_route::resolve_destination(
-            conn,
-            &graph,
-            &airport,
-            &TaxiDestination::Runway(&destination_runway),
-        ) {
+        let dest_spec = match intersection.as_deref() {
+            Some(taxiway) => TaxiDestination::RunwayIntersection {
+                runway: &destination_runway,
+                taxiway,
+            },
+            None => TaxiDestination::Runway(&destination_runway),
+        };
+        let dest = match taxi_route::resolve_destination(conn, &graph, &airport, &dest_spec) {
             Ok(d) => d,
             Err(e) => return format!("error: {}", e),
         };
@@ -1466,6 +1529,12 @@ pub fn tool_engage_taxi(ctx: &ToolContext, args: &Map<String, Value>) -> String 
         "engaged taxi {} — {} legs, {:.0} m",
         plan.airport_ident, leg_count, plan.total_distance_m
     );
+    if let Some(twy) = &intersection {
+        summary.push_str(&format!(
+            " (to hold short of {} at {})",
+            destination_runway, twy
+        ));
+    }
     if let Some(v) = released_brake_ratio {
         summary.push_str(&format!(" (released parking brake, ratio was {:.2})", v));
     }
@@ -1967,6 +2036,10 @@ pub fn tool_schemas() -> Vec<Value> {
                     "type": "string",
                     "description": "Runway to line up on. Either end ident works (e.g. '12' or '30')."
                 },
+                "intersection": {
+                    "type": ["string", "null"],
+                    "description": "Taxiway name of an intersection-departure entry point (e.g. 'C' for 'cleared for takeoff runway 19 at Charlie'). Null = line up at the runway's full-length threshold."
+                },
                 "start_lat": {
                     "type": ["number", "null"],
                     "description": "Starting latitude. If null, the current aircraft position from X-Plane is used."
@@ -1976,7 +2049,7 @@ pub fn tool_schemas() -> Vec<Value> {
                     "description": "Starting longitude. If null, the current aircraft position from X-Plane is used."
                 }
             }),
-            &["airport_ident", "runway_ident", "start_lat", "start_lon"],
+            &["airport_ident", "runway_ident", "intersection", "start_lat", "start_lon"],
         ),
         schema(
             "engage_taxi",
@@ -1995,6 +2068,10 @@ pub fn tool_schemas() -> Vec<Value> {
                     "items": {"type": "string"},
                     "description": "Ordered list of taxiway names from the clearance, e.g. ['A', 'D']. Pass [] to let the planner pick the shortest route."
                 },
+                "intersection": {
+                    "type": ["string", "null"],
+                    "description": "When ATC clears an intersection departure ('hold short of 19 at Charlie'), pass the taxiway name here (e.g. 'C'). The planner routes to the hold-short at that specific intersection instead of the full-length threshold. Null = hold short of the full-length threshold."
+                },
                 "start_lat": {
                     "type": ["number", "null"],
                     "description": "Starting latitude. If null, the current aircraft position from X-Plane is used."
@@ -2004,7 +2081,7 @@ pub fn tool_schemas() -> Vec<Value> {
                     "description": "Starting longitude. If null, the current aircraft position from X-Plane is used."
                 }
             }),
-            &["airport_ident", "destination_runway", "via_taxiways", "start_lat", "start_lon"],
+            &["airport_ident", "destination_runway", "via_taxiways", "intersection", "start_lat", "start_lon"],
         ),
         schema(
             "plan_taxi_route",

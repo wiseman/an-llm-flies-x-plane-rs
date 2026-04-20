@@ -92,6 +92,14 @@ pub enum TaxiDestination<'a> {
     /// Resolve to the taxi node nearest the runway's threshold. For a
     /// runway printed as "13/31" either end's ident ("13" or "31") works.
     Runway(&'a str),
+    /// Resolve to the hold-short node at the specific taxiway/runway
+    /// intersection — e.g. ("19", "C") for "hold short of 19 at Charlie"
+    /// at KEMT. Useful for intersection-departure clearances where the
+    /// full-length threshold is the wrong target.
+    RunwayIntersection {
+        runway: &'a str,
+        taxiway: &'a str,
+    },
     /// Nearest taxi node to a raw lat/lon (e.g. a gate).
     Coord(f64, f64),
     /// Explicit node id, when the caller already knows the destination.
@@ -225,7 +233,180 @@ pub fn resolve_destination(
             airport_ident,
             runway_ident,
         ),
+        TaxiDestination::RunwayIntersection { runway, taxiway } => {
+            resolve_runway_intersection_hold_short(
+                conn,
+                graph,
+                airport_ident,
+                runway,
+                taxiway,
+            )
+        }
     }
+}
+
+/// Resolved intersection of a taxiway with a runway. `on_runway_node` is
+/// the endpoint sitting on the runway centerline (takeoff-roll start
+/// point for an intersection departure); `hold_short_node` is the
+/// corresponding off-runway endpoint.
+#[derive(Debug, Clone, Copy)]
+pub struct RunwayIntersection {
+    pub on_runway_node: i64,
+    pub on_runway_lat: f64,
+    pub on_runway_lon: f64,
+    pub hold_short_node: i64,
+    pub hold_short_lat: f64,
+    pub hold_short_lon: f64,
+}
+
+/// Find the edge named `taxiway` that crosses the active zone of
+/// `runway_ident`, and split its endpoints into "on runway" vs
+/// "hold short" by perpendicular distance to the runway centerline
+/// (read from the `runways` view). Used by both
+/// `resolve_runway_intersection_hold_short` (for engage_taxi) and
+/// the line-up handler (for the takeoff-roll anchor).
+pub fn resolve_runway_intersection(
+    conn: &Connection,
+    graph: &TaxiGraph,
+    airport_ident: &str,
+    runway_ident: &str,
+    taxiway: &str,
+) -> Result<RunwayIntersection> {
+    // 1. Look up the runway's two threshold endpoints so we have a line
+    //    segment to measure perpendicular distance against.
+    let forms = runway_query_forms(runway_ident);
+    let (le_lat, le_lon, he_lat, he_lon): (f64, f64, f64, f64) = conn
+        .query_row(
+            "SELECT le_latitude_deg, le_longitude_deg, \
+                    he_latitude_deg, he_longitude_deg \
+             FROM runways \
+             WHERE airport_ident = ? \
+               AND (le_ident = ? OR le_ident = ? OR he_ident = ? OR he_ident = ?) \
+               AND closed = 0 \
+             LIMIT 1",
+            [
+                airport_ident,
+                forms[0].as_str(),
+                forms[1].as_str(),
+                forms[0].as_str(),
+                forms[1].as_str(),
+            ],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .with_context(|| {
+            format!(
+                "runway {:?} not found at airport {}",
+                runway_ident, airport_ident
+            )
+        })?;
+
+    // 2. Among edges named `taxiway`, pick one whose active-zone list
+    //    names this runway. That's the crossing edge — one endpoint is
+    //    on the runway, the other is the hold-short.
+    let crossing: &TaxiEdge = graph
+        .edges
+        .iter()
+        .find(|e| {
+            e.name.eq_ignore_ascii_case(taxiway) && edge_conflicts_with_runway(e, runway_ident)
+        })
+        .ok_or_else(|| {
+            anyhow!(
+                "no edge named {:?} crosses runway {:?} at {} \
+                 (apt.dat has no 1204 active-zone annotation for that intersection)",
+                taxiway,
+                runway_ident,
+                airport_ident
+            )
+        })?;
+
+    let from_node = graph
+        .nodes
+        .get(&crossing.from_node)
+        .ok_or_else(|| anyhow!("crossing edge from_node missing"))?;
+    let to_node = graph
+        .nodes
+        .get(&crossing.to_node)
+        .ok_or_else(|| anyhow!("crossing edge to_node missing"))?;
+
+    // 3. On-runway = closer to the runway centerline segment.
+    let d_from = point_to_segment_m(
+        from_node.latitude_deg,
+        from_node.longitude_deg,
+        le_lat,
+        le_lon,
+        he_lat,
+        he_lon,
+    );
+    let d_to = point_to_segment_m(
+        to_node.latitude_deg,
+        to_node.longitude_deg,
+        le_lat,
+        le_lon,
+        he_lat,
+        he_lon,
+    );
+    let (on_runway, hold_short) = if d_from <= d_to {
+        (from_node, to_node)
+    } else {
+        (to_node, from_node)
+    };
+
+    Ok(RunwayIntersection {
+        on_runway_node: on_runway.node_id,
+        on_runway_lat: on_runway.latitude_deg,
+        on_runway_lon: on_runway.longitude_deg,
+        hold_short_node: hold_short.node_id,
+        hold_short_lat: hold_short.latitude_deg,
+        hold_short_lon: hold_short.longitude_deg,
+    })
+}
+
+fn resolve_runway_intersection_hold_short(
+    conn: &Connection,
+    graph: &TaxiGraph,
+    airport_ident: &str,
+    runway_ident: &str,
+    taxiway: &str,
+) -> Result<DestinationResolution> {
+    let x = resolve_runway_intersection(conn, graph, airport_ident, runway_ident, taxiway)?;
+    // Full runway forbidden-edge set — same as `resolve_runway_hold_short`
+    // — so Dijkstra won't sneak across any other intersection to reach
+    // this hold-short.
+    let forbidden_edges: HashSet<usize> = graph
+        .edges
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| edge_conflicts_with_runway(e, runway_ident))
+        .map(|(i, _)| i)
+        .collect();
+    Ok(DestinationResolution {
+        node: x.hold_short_node,
+        forbidden_edges,
+        face_toward_latlon: Some((x.on_runway_lat, x.on_runway_lon)),
+    })
+}
+
+/// Perpendicular distance in meters from (plat, plon) to the great-circle
+/// segment between (alat, alon) and (blat, blon), using a local flat-earth
+/// approximation. Accurate to sub-meter at taxi-network scales.
+fn point_to_segment_m(plat: f64, plon: f64, alat: f64, alon: f64, blat: f64, blon: f64) -> f64 {
+    let m_per_deg_lat = 111_320.0;
+    let m_per_deg_lon = 111_320.0 * alat.to_radians().cos();
+    let ax = (alon - plon) * m_per_deg_lon;
+    let ay = (alat - plat) * m_per_deg_lat;
+    let bx = (blon - plon) * m_per_deg_lon;
+    let by = (blat - plat) * m_per_deg_lat;
+    let dx = bx - ax;
+    let dy = by - ay;
+    let len_sq = dx * dx + dy * dy;
+    if len_sq < 1e-9 {
+        return (ax * ax + ay * ay).sqrt();
+    }
+    let t = ((-ax) * dx + (-ay) * dy) / len_sq;
+    let t = t.clamp(0.0, 1.0);
+    let cx = ax + t * dx;
+    let cy = ay + t * dy;
+    (cx * cx + cy * cy).sqrt()
 }
 
 /// "Taxi to runway X" = hold short of X. Picks a node on the approach

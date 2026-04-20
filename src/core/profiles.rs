@@ -337,15 +337,42 @@ pub struct TakeoffProfile {
     pub config: ConfigBundle,
     pub runway_frame: RunwayFrame,
     pub phase: FlightPhase,
+    /// Along-track distance ahead of the aircraft at engage time —
+    /// i.e. how much pavement is actually available for the takeoff roll.
+    /// For a full-length departure this is `runway_frame.runway.length_ft`;
+    /// for an intersection departure (e.g. "runway 19 at Charlie" at KEMT)
+    /// it's the remaining distance from the intersection to the far end.
+    /// Surfaced in debug output and drives the late-acceleration abort
+    /// heuristic in `contribute`.
+    pub usable_length_ft: f64,
     mode_manager: ModeManager,
     safety_monitor: SafetyMonitor,
     lateral_guidance: L1PathFollower,
     pattern_stub: PatternGeometry,
     route_stub: RouteManager,
+    /// Along-track position at engage time — used as the zero-point for
+    /// "how far have we rolled" in debug/abort math, since the aircraft
+    /// may be partway down the runway for an intersection departure.
+    start_along_ft: f64,
 }
 
 impl TakeoffProfile {
     pub fn new(config: ConfigBundle, runway_frame: RunwayFrame) -> Self {
+        let usable = runway_frame.runway.length_ft;
+        Self::new_with_usable_length(config, runway_frame, usable, 0.0)
+    }
+
+    /// Intersection-departure constructor. `usable_length_ft` is the
+    /// runway distance from the aircraft's current position to the far
+    /// end (full-length ≈ threshold to threshold minus current
+    /// along-track). `start_along_ft` is the current along-track so the
+    /// debug line can compute "rolled / remaining" honestly.
+    pub fn new_with_usable_length(
+        config: ConfigBundle,
+        runway_frame: RunwayFrame,
+        usable_length_ft: f64,
+        start_along_ft: f64,
+    ) -> Self {
         let pattern_stub = build_pattern_geometry(
             &runway_frame,
             config.pattern.downwind_offset_ft,
@@ -359,6 +386,8 @@ impl TakeoffProfile {
             pattern_stub,
             route_stub: RouteManager::new(vec![]),
             phase: FlightPhase::Preflight,
+            usable_length_ft,
+            start_along_ft,
             config,
             runway_frame,
         }
@@ -453,6 +482,36 @@ impl GuidanceProfile for TakeoffProfile {
         };
         let guidance = self.safety_monitor.apply_limits(guidance, self.phase);
         ProfileTick::contribution_only(guidance_to_contribution(guidance))
+    }
+
+    fn debug_line(&self, state: &AircraftState) -> Option<String> {
+        // Only interesting during the roll — after rotate the runway
+        // distance is no longer load-bearing.
+        if !matches!(
+            self.phase,
+            FlightPhase::Preflight | FlightPhase::TakeoffRoll
+        ) {
+            return None;
+        }
+        let along = self.runway_frame.to_runway_frame(state.position_ft).x;
+        let rolled = (along - self.start_along_ft).max(0.0);
+        let remaining = (self.usable_length_ft - rolled).max(0.0);
+        let vr = self.config.performance.vr_kt;
+        let mut line = format!(
+            "takeoff: usable={:.0}ft rolled={:.0}ft remaining={:.0}ft ias={:.0}kt vr={:.0}kt",
+            self.usable_length_ft, rolled, remaining, state.ias_kt, vr
+        );
+        // Abort heuristic: if we've consumed ≥70% of usable length and
+        // still aren't within 10% of Vr, something's wrong (headwind
+        // drop, underpower, wrong aircraft weight) and the pilot should
+        // abort rather than force a rotation with no margin.
+        if self.usable_length_ft > 0.0
+            && rolled >= 0.7 * self.usable_length_ft
+            && state.ias_kt < 0.9 * vr
+        {
+            line.push_str(" [ABORT-ADVISED: low speed past 70% of usable runway]");
+        }
+        Some(line)
     }
 }
 

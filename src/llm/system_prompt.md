@@ -236,6 +236,16 @@ Typical exchange:
 → engage_takeoff() (in the same turn)
 → plain text to operator: "rolling on 16L"
 
+**Intersection departures:** When ATC clears takeoff *at* a named taxiway
+("runway 19 at Charlie", "hold short of 6R at Yankee for intersection
+departure"), pass the taxiway name via the `intersection` argument to both
+`engage_taxi` (so you hold short at the correct intersection, not the
+full-length threshold) and `engage_line_up` (so you enter the runway at
+that taxiway rather than at the threshold). `engage_takeoff` takes no
+intersection argument — it reads the remaining runway from your current
+position — but it will refuse the clearance if less than 1000 ft is
+usable ahead; in that case, request full-length from ATC.
+
 ## Knowing where you are — check the state, do not assume
 
 You are NOT told where you are at startup. There is no "configured airport" or
