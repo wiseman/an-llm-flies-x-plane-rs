@@ -44,33 +44,53 @@ pub fn build_keyterms(
     let snapshot: Option<StatusSnapshot> = pilot.lock().latest_snapshot.clone();
     let aircraft = pilot.lock().config.performance.aircraft.clone();
 
-    let mut terms = DedupList::new();
+    // Two-tier output so the 100-term cap drops the least-specific
+    // entries first. Hand-curated baseline, proper-noun phrases, and
+    // identifiers (ICAOs, runway/taxiway names) are high-priority and
+    // go out first. Component words split out of multi-word labels
+    // (e.g. "Whiteman" from "Whiteman Tower") are lower-priority backup
+    // — useful when the compound phrase mishears but not worth
+    // crowding out a more specific term.
+    let mut high = DedupList::new();
+    let mut low = DedupList::new();
 
     for t in static_baseline(atc_mode) {
-        terms.push(t.to_string());
+        high.push(t.to_string());
     }
     if !aircraft.is_empty() {
-        terms.push(aircraft);
+        high.push(aircraft);
     }
 
     if let Some(snap) = snapshot.as_ref() {
         for t in phase_terms(snap.phase) {
-            terms.push(t.to_string());
+            high.push(t.to_string());
         }
     }
 
     // Fail-soft on the whole database path.
-    if let Err(e) = append_database_terms(&mut terms, snapshot.as_ref(), bridge, ctx) {
+    if let Err(e) = append_database_terms(&mut high, &mut low, snapshot.as_ref(), bridge, ctx) {
         if let Some(bus) = &ctx.bus {
             bus.push_log(format!("voice: keyterm db skipped ({e})"));
         }
     }
 
-    terms.into_vec(MAX_TERMS)
+    merge_tiers(high, low, MAX_TERMS)
+}
+
+fn merge_tiers(high: DedupList, low: DedupList, cap: usize) -> Vec<String> {
+    let mut out = DedupList::new();
+    for t in high.items {
+        out.push(t);
+    }
+    for t in low.items {
+        out.push(t);
+    }
+    out.into_vec(cap)
 }
 
 fn append_database_terms(
-    terms: &mut DedupList,
+    high: &mut DedupList,
+    low: &mut DedupList,
     snapshot: Option<&StatusSnapshot>,
     bridge: Option<&dyn ToolBridge>,
     ctx: &ToolContext,
@@ -93,10 +113,8 @@ fn append_database_terms(
     if let (Some(lat), Some(lon)) = (lat, lon) {
         if let Ok(rows) = query_nearby_airports(conn, lat, lon) {
             for (ident, name) in rows {
-                terms.push(ident);
-                for w in split_terms(&name) {
-                    terms.push(w);
-                }
+                high.push(ident);
+                push_phrase_and_words(high, low, &name);
             }
         }
     }
@@ -108,19 +126,17 @@ fn append_database_terms(
     if let Some(airport) = airport {
         if let Ok(labels) = query_comm_labels(conn, &airport) {
             for label in labels {
-                for w in split_terms(&label) {
-                    terms.push(w);
-                }
+                push_phrase_and_words(high, low, &label);
             }
         }
         if let Ok(idents) = query_runway_idents(conn, &airport) {
             for r in idents {
-                terms.push(r);
+                high.push(r);
             }
         }
         if let Ok(names) = query_taxiway_names(conn, &airport) {
             for n in names {
-                terms.push(n);
+                high.push(n);
             }
         }
     }
@@ -207,11 +223,42 @@ fn query_taxiway_names(conn: &duckdb::Connection, airport: &str) -> Result<Vec<S
     Ok(out)
 }
 
-fn split_terms(label: &str) -> impl Iterator<Item = String> + '_ {
-    label
+/// Split a label into its compound-phrase form (high priority) and its
+/// component-word backups (low priority).
+///
+/// Deepgram's `keyterm` parameter biases multi-word phrases as
+/// first-class entries (see docs: "Use an encoded space to combine
+/// multiple keyterms into a single space-delimited value"), so
+/// "SoCal Approach" as a single keyterm is more valuable than two
+/// separate "SoCal" and "Approach" entries. The component words are
+/// still useful backup when the compound mishears, but they're the
+/// first thing we drop when we hit the term cap.
+///
+/// Phrases keep short connector words ("El" in "El Monte") because
+/// they're part of the proper noun. Component-word backups still
+/// filter sub-3-char fillers to avoid over-biasing common speech.
+/// Single-word labels go straight to `high` (no backup tier).
+fn push_phrase_and_words(high: &mut DedupList, low: &mut DedupList, label: &str) {
+    let all_words: Vec<&str> = label
         .split(|c: char| !c.is_alphanumeric())
-        .filter(|w| w.chars().count() >= MIN_WORD_LEN)
-        .map(|w| w.to_string())
+        .filter(|w| !w.is_empty())
+        .collect();
+    match all_words.len() {
+        0 => {}
+        1 => {
+            if all_words[0].chars().count() >= MIN_WORD_LEN {
+                high.push(all_words[0].to_string());
+            }
+        }
+        _ => {
+            high.push(all_words.join(" "));
+            for w in all_words {
+                if w.chars().count() >= MIN_WORD_LEN {
+                    low.push(w.to_string());
+                }
+            }
+        }
+    }
 }
 
 fn static_baseline(atc_mode: bool) -> &'static [&'static str] {
@@ -289,21 +336,70 @@ impl DedupList {
 mod tests {
     use super::*;
 
-    #[test]
-    fn split_terms_filters_short_words_and_punctuation() {
-        let out: Vec<String> = split_terms("SoCal Approach/Departure").collect();
-        assert!(out.contains(&"SoCal".to_string()));
-        assert!(out.contains(&"Approach".to_string()));
-        assert!(out.contains(&"Departure".to_string()));
+    /// Returns (high, low) tiers.
+    fn run_push(label: &str) -> (Vec<String>, Vec<String>) {
+        let mut h = DedupList::new();
+        let mut l = DedupList::new();
+        push_phrase_and_words(&mut h, &mut l, label);
+        (h.into_vec(100), l.into_vec(100))
     }
 
     #[test]
-    fn split_terms_drops_two_char_fillers() {
-        let out: Vec<String> = split_terms("Port of Los Angeles").collect();
-        assert!(!out.contains(&"of".to_string()));
-        assert!(out.contains(&"Port".to_string()));
-        assert!(out.contains(&"Los".to_string()));
-        assert!(out.contains(&"Angeles".to_string()));
+    fn multi_word_label_puts_phrase_in_high_and_component_words_in_low() {
+        let (high, low) = run_push("SoCal Approach");
+        assert_eq!(high, vec!["SoCal Approach".to_string()]);
+        assert!(low.contains(&"SoCal".to_string()));
+        assert!(low.contains(&"Approach".to_string()));
+    }
+
+    #[test]
+    fn phrase_keeps_short_connectors_low_tier_still_filters_them() {
+        // "El Monte" → phrase goes high (keep "El"); solo "El" is
+        // dropped from low because it's sub-MIN_WORD_LEN.
+        let (high, low) = run_push("El Monte");
+        assert_eq!(high, vec!["El Monte".to_string()]);
+        assert_eq!(low, vec!["Monte".to_string()]);
+    }
+
+    #[test]
+    fn single_word_label_goes_only_to_high() {
+        let (high, low) = run_push("ATIS");
+        assert_eq!(high, vec!["ATIS".to_string()]);
+        assert!(low.is_empty());
+    }
+
+    #[test]
+    fn merge_puts_high_first_and_caps_low_first() {
+        let mut h = DedupList::new();
+        h.push("A".to_string());
+        h.push("B".to_string());
+        h.push("C".to_string());
+        let mut l = DedupList::new();
+        l.push("X".to_string());
+        l.push("Y".to_string());
+        // Cap 4 → keep all of high (3), plus one of low.
+        let out = merge_tiers(h, l, 4);
+        assert_eq!(out, vec!["A", "B", "C", "X"]);
+    }
+
+    #[test]
+    fn merge_dedups_low_against_high() {
+        let mut h = DedupList::new();
+        h.push("SoCal Approach".to_string());
+        h.push("SoCal".to_string()); // already promoted somewhere
+        let mut l = DedupList::new();
+        l.push("SoCal".to_string()); // dup — should be skipped
+        l.push("Approach".to_string());
+        let out = merge_tiers(h, l, 100);
+        // "SoCal" appears once (from high), not twice.
+        assert_eq!(
+            out,
+            vec![
+                "SoCal Approach".to_string(),
+                "SoCal".to_string(),
+                "Approach".to_string(),
+            ]
+        );
     }
 
     #[test]
