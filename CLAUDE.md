@@ -2,12 +2,6 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## Project origin
-
-This is a **Rust port of the Python `xplane-pilot` project** at `~/src/xplane-pilot/` (package: `sim_pilot`). Every module here has a direct counterpart there — file-level doc comments (`//!`) call out which Python file each Rust module mirrors. When in doubt about intent or behavior, the Python source is the reference.
-
-The Python project README has the user-facing overview (what the app does, tool list, LLM flow). The Python `SPEC.md` has the full design brief for the deterministic pilot.
-
 ## Commands
 
 ```bash
@@ -24,7 +18,7 @@ cargo run --release -- --backend simple
 cargo run --release -- --backend simple --crosswind-kt 10 --log-csv output/flight.csv --plots-dir output/plots
 
 # Tests.
-cargo test                                 # full suite (≈201 tests, ~1s wall-clock)
+cargo test                                 # full suite (~350 tests)
 cargo test --lib                           # just the library unit tests
 cargo test --test test_scenario            # single integration test file
 cargo test --test test_mode_transitions downwind_does_not_skip  # single test by name
@@ -40,7 +34,7 @@ cargo build --release
 
 ### Layered control stack (bottom-up)
 
-The design philosophy spelled out in the Python `SPEC.md` still applies here: **the flight control loop is deterministic; the LLM never touches actuators**. Flow is top-down:
+Core principle: **the flight control loop is deterministic; the LLM never touches actuators**. Flow is top-down:
 
 1. **LLM tool-call loop** (`src/llm/`) — `conversation::run_conversation_loop` consumes an `IncomingMessage` from a `crossbeam-channel` and drives the OpenAI Responses API with `tool_schemas()` from `llm/tools.rs`. Each tool handler mutates `PilotCore` state under `parking_lot::Mutex`. The system prompt lives verbatim in `src/llm/system_prompt.md` and is loaded via `include_str!`.
 
@@ -124,16 +118,14 @@ on `SELECT *` when GEOMETRY columns come off disk. Tests live in-module
 
 All aircraft/airport/gain values live in YAML under `config/` and fold into the public `ConfigBundle` via `src/config.rs`. The YAML files are **embedded via `include_str!`** so the binary is self-contained; on-disk overrides go through `load_config_bundle`.
 
-## Behavior parity with the Python reference
+## Miscellaneous notes
 
-When porting behavior changes, check the Python source first: paths are of the form `~/src/xplane-pilot/sim_pilot/<path>.py`. File-level `//!` doc comments in each Rust file name the Python counterpart.
+`SQL_QUERY_DESCRIPTION` in `src/llm/tools.rs` includes the sentence "ALWAYS prefix spatial functions with ST_" — without it the LLM calls `POINT(...)` against DuckDB and fails.
 
-One intentional, documented divergence: `SQL_QUERY_DESCRIPTION` in `src/llm/tools.rs` adds the sentence "ALWAYS prefix spatial functions with ST_" to the otherwise-verbatim Python description — the LLM was observed calling `POINT(...)` against DuckDB and failing. The comment above the constant flags this.
-
-The Python `sim_pilot/speech.py` used batch Whisper. The Rust port instead streams audio to the OpenAI Realtime API (`gpt-4o-mini-transcribe`) while holding space (operator) or tab (ATC, auto-prefixed `[atc] `). Mic capture is `cpal` + a linear resampler to 24 kHz PCM16; the WebSocket client lives in `src/transcribe/realtime_ws.rs`; the state machine in `src/transcribe/ptt.rs`. Press/Repeat/Release is detected via Kitty keyboard enhancement flags when the terminal supports them, with a ~180 ms repeat-gap fallback elsewhere. Disable with `--no-voice` or run with no `OPENAI_API_KEY`.
+Speech: audio streams to the OpenAI Realtime API (`gpt-4o-mini-transcribe`) while holding space (operator) or tab (ATC, auto-prefixed `[atc] `). Mic capture is `cpal` + a linear resampler to 24 kHz PCM16; the WebSocket client lives in `src/transcribe/realtime_ws.rs`; the state machine in `src/transcribe/ptt.rs`. Press/Repeat/Release is detected via Kitty keyboard enhancement flags when the terminal supports them, with a ~180 ms repeat-gap fallback elsewhere. Disable with `--no-voice` or run with no `OPENAI_API_KEY`.
 
 ## Testing notes
 
-- Integration tests under `tests/` mirror the Python `tests/` directory one-to-one (19 test files). `tests/common/mod.rs` provides `default_state()` / `state_with()` helpers analogous to the Python `make_state` factories.
-- End-to-end parity is anchored by `test_scenario.rs::nominal_mission_completes_takeoff_to_rollout` — it runs the full deterministic mission and checks touchdown position / centerline / sink rate / max final bank against the Python baseline (differences of ~5% on touchdown x are expected float-precision drift).
+- Integration tests under `tests/` cover each subsystem (19 test files). `tests/common/mod.rs` provides `default_state()` / `state_with()` helpers for building `AircraftState` fixtures.
+- End-to-end smoke test is `test_scenario.rs::nominal_mission_completes_takeoff_to_rollout` — runs the full deterministic mission and checks touchdown position / centerline / sink rate / max final bank against fixed thresholds.
 - `test_tool_dispatch.rs::spatial_*` exercises DuckDB's spatial extension — first run downloads it from the DuckDB repo; after that it's cached in `~/.duckdb/extensions/` and runs offline.
