@@ -1129,6 +1129,7 @@ fn history_go_forward(
 
 fn is_verbose_line(line: &str) -> bool {
     line.contains("[llm-worker] tool ")
+        || line.contains("[llm-worker] tokens ")
         || line.contains("[heartbeat]")
         || line.contains("voice:")
 }
