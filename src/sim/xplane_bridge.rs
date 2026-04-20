@@ -541,7 +541,22 @@ impl XPlaneWebBridge {
             "req_id": self.next_req_id(),
             "type": "dataref_set_values",
             "params": { "datarefs": writes }
-        }))
+        }))?;
+        // Eagerly mirror the written values into the local cache so a
+        // read in the same tool-handler tick sees the just-written
+        // value, not whatever the last X-Plane delta happened to carry.
+        // The authoritative WS delta arrives ~10-50 ms later and will
+        // overwrite this — for the datarefs we actually write (radio
+        // frequency, parking brake, flap request, etc.) the written
+        // value is exactly what X-Plane then reflects back, so the
+        // eager update is correct by construction.
+        {
+            let mut cache = self.cached_values.lock().unwrap();
+            for (name, value) in updates {
+                cache.insert(name.clone(), *value);
+            }
+        }
+        Ok(())
     }
 
     pub fn close(&self) {
