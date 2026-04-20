@@ -1,6 +1,6 @@
 [package]
 name = "an-llm-flies-xplane"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 description = "An LLM-driven pilot for X-Plane 12. Rust port of the Python sim_pilot project."
 license = "MIT OR Apache-2.0"

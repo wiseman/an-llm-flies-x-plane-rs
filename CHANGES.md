@@ -5,6 +5,27 @@ The format is loosely based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project follows [Semantic Versioning](https://semver.org).
 
+## [0.3.0] — 2026-04-19
+
+### Added
+
+- Principled ATC pattern tools and a "closest runway" SQL template
+  for the airport-data query layer.
+
+### Changed
+
+- Downwind descent now starts abeam the numbers instead of at an
+  arbitrary waypoint further along the leg.
+- Safety-monitor bank ceilings raised: enroute 25° → 45°, pattern
+  20° → 30°.
+- Pitch controller proportional gain lowered to kill the fast
+  oscillation that appeared in climb and downwind.
+- Rotating conversation history grows unbounded: compaction
+  (`MAX_INPUT_CHARS` / `compact_if_needed`) has been removed, so
+  long sessions no longer drop oldest turns.
+- Terse log mode in the TUI now suppresses the
+  `[llm-worker] tokens …` usage lines.
+
 ## [0.2.0] — 2026-04-19
 
 ### Added
