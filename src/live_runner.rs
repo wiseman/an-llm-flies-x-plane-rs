@@ -438,6 +438,19 @@ pub fn run_live_xplane(base_config: ConfigBundle, runtime: LiveRunConfig) -> Res
     let llm_client = {
         let mut c = ResponsesClient::new(runtime.llm_model.clone());
         c.reasoning_effort = runtime.llm_reasoning_effort.clone();
+        // Per-session transcript file alongside the .log/.csv/.kml
+        // artifacts (e.g. output/sim_pilot-20260420-175613.txt). The
+        // client overwrites it on every Responses API call — before
+        // the HTTP request with a `(pending)` response marker and
+        // again after the response arrives. Parent dir is derived
+        // from the log path when present, otherwise defaults to
+        // `output/` in the CWD.
+        let parent = runtime
+            .log_file_path
+            .as_ref()
+            .and_then(|p| p.parent().map(|p| p.to_path_buf()))
+            .unwrap_or_else(|| std::path::PathBuf::from("output"));
+        c.transcript_path = Some(parent.join(format!("{}.txt", runtime.session_stem)));
         Arc::new(c)
     };
     let cache_stats = llm_client.cache_stats.clone();

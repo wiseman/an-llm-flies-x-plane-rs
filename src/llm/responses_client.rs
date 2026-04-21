@@ -4,6 +4,8 @@
 //! thread; there is no async runtime needed.
 
 use std::env;
+use std::fs;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use anyhow::{anyhow, Context, Result};
@@ -66,6 +68,11 @@ pub struct ResponsesClient {
     pub api_base: String,
     pub reasoning_effort: Option<String>,
     pub cache_stats: Arc<CacheStats>,
+    /// When set, each call dumps the request + response (or "(pending)"
+    /// placeholder) to this path, overwriting it. Useful for
+    /// live-tailing the pilot's current round without sifting through
+    /// the scrolling log. `None` = no dump.
+    pub transcript_path: Option<PathBuf>,
 }
 
 impl ResponsesClient {
@@ -76,6 +83,7 @@ impl ResponsesClient {
             api_base: "https://api.openai.com/v1".to_string(),
             reasoning_effort: None,
             cache_stats: Arc::new(CacheStats::default()),
+            transcript_path: None,
         }
     }
 }
@@ -100,6 +108,14 @@ impl ResponsesBackend for ResponsesClient {
         if let Some(effort) = &self.reasoning_effort {
             payload["reasoning"] = json!({ "effort": effort });
         }
+        // Dump the outgoing request with a placeholder response so a
+        // live tail shows "request in flight" while the HTTP call is
+        // open. The post-response write below overwrites this with the
+        // full round once the API returns.
+        if let Some(path) = &self.transcript_path {
+            write_transcript(path, &payload, None);
+        }
+
         let url = format!("{}/responses", self.api_base.trim_end_matches('/'));
         let resp = ureq::post(&url)
             .set("Authorization", &format!("Bearer {}", api_key))
@@ -118,12 +134,36 @@ impl ResponsesBackend for ResponsesClient {
             let output_tokens = usage.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
             self.cache_stats.record(input_tokens, cached_tokens, output_tokens);
         }
+        if let Some(path) = &self.transcript_path {
+            write_transcript(path, &payload, Some(&result));
+        }
         Ok(result)
     }
 
     fn cache_snapshot(&self) -> CacheSnapshot {
         self.cache_stats.snapshot()
     }
+}
+
+/// Best-effort dump of the most recent Responses API round. Writes
+/// the request body pretty-printed, then the response (or `(pending)`
+/// when called before the HTTP call completes). Silently swallows
+/// errors — a broken transcript dump shouldn't take down the pilot.
+fn write_transcript(path: &PathBuf, request: &Value, response: Option<&Value>) {
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let request_str = serde_json::to_string_pretty(request)
+        .unwrap_or_else(|e| format!("(request serialize failed: {e})"));
+    let response_str = match response {
+        Some(r) => serde_json::to_string_pretty(r)
+            .unwrap_or_else(|e| format!("(response serialize failed: {e})")),
+        None => "(pending — HTTP request in flight)".to_string(),
+    };
+    let body = format!(
+        "=== REQUEST ===\n{request_str}\n\n=== RESPONSE ===\n{response_str}\n"
+    );
+    let _ = fs::write(path, body);
 }
 
 pub fn extract_output_text(response_payload: &Value) -> String {
