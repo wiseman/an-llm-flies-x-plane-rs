@@ -334,6 +334,7 @@ fn engage_takeoff_refuses_when_not_on_runway() {
         field_elevation_ft: None,
         debug_lines: Vec::new(),
         completed_profiles: Vec::new(),
+        profile_mode_line_suffixes: Vec::new(),
     });
     let r = dispatch_tool(
         &call(
@@ -727,6 +728,7 @@ fn seed_snapshot(ctx: &ToolContext, flap_index: i32, on_ground: bool) {
         field_elevation_ft: None,
         debug_lines: Vec::new(),
         completed_profiles: Vec::new(),
+        profile_mode_line_suffixes: Vec::new(),
     });
 }
 
@@ -1224,11 +1226,13 @@ fn engage_line_up_builds_two_leg_route_to_runway_threshold() {
     let dir = TempDir::new().unwrap();
     build_taxi_fixture_parquet(dir.path());
     // Georef anchors at runway 09 threshold so the expected end-pose
-    // offsets are easy to reason about.
+    // offsets are easy to reason about. Aircraft is parked ~230 ft
+    // from the threshold — realistic hold-short distance, under the
+    // engage_line_up 300 ft approach guard.
     let bridge = FakeBridge::new(
         &[
-            ("sim/flightmodel/position/latitude", 37.000800),
-            ("sim/flightmodel/position/longitude", -121.998500),
+            ("sim/flightmodel/position/latitude", 37.000400),
+            ("sim/flightmodel/position/longitude", -121.998200),
         ],
         37.000100,
         -121.997500,
@@ -1243,8 +1247,8 @@ fn engage_line_up_builds_two_leg_route_to_runway_threshold() {
             json!({
                 "airport_ident": "KTEST",
                 "runway_ident": "09",
-                "start_lat": 37.000800,
-                "start_lon": -121.998500,
+                "start_lat": 37.000400,
+                "start_lon": -121.998200,
             }),
         ),
         &ctx,
@@ -1252,8 +1256,11 @@ fn engage_line_up_builds_two_leg_route_to_runway_threshold() {
     assert!(!r.starts_with("error"), "got: {}", r);
     assert!(r.contains("engaged line_up KTEST"), "got: {}", r);
     assert!(r.contains("runway 09"), "got: {}", r);
-    // Verify the taxi profile is engaged (replaces the idle trio).
-    assert_eq!(ctx.pilot.lock().list_profile_names(), vec!["taxi"]);
+    // Verify the line_up profile is engaged (replaces the idle trio).
+    // The underlying implementation is still TaxiProfile, but it
+    // reports itself as "line_up" so the LLM / TUI / heartbeat can
+    // distinguish this from a mid-airport taxi.
+    assert_eq!(ctx.pilot.lock().list_profile_names(), vec!["line_up"]);
 }
 
 #[test]

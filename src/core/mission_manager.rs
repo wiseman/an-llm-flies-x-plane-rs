@@ -50,6 +50,12 @@ pub struct StatusSnapshot {
     /// moment an automated sequence finishes (e.g. taxi arrives at the
     /// hold-short), instead of making it wait for the idle heartbeat.
     pub completed_profiles: Vec<String>,
+    /// Parallel to `active_profiles`: a short, single-line
+    /// human-readable summary of what the profile is doing right now
+    /// (taxi leg progress, pattern leg, etc.). `None` entries mean
+    /// "nothing extra to show." Used only for display — the heartbeat
+    /// explicitly ignores this because it churns with state changes.
+    pub profile_mode_line_suffixes: Vec<Option<String>>,
 }
 
 pub struct PilotCore {
@@ -209,6 +215,11 @@ impl PilotCore {
             .filter(|p| p.is_complete())
             .map(|p| p.name().to_string())
             .collect();
+        let profile_mode_line_suffixes: Vec<Option<String>> = self
+            .active_profiles
+            .iter()
+            .map(|p| p.mode_line_suffix(&state))
+            .collect();
         let snapshot = StatusSnapshot {
             t_sim: state.t_sim,
             active_profiles: self.list_profile_names(),
@@ -222,6 +233,7 @@ impl PilotCore {
             field_elevation_ft: metadata.as_ref().and_then(|m| m.field_elevation_ft),
             debug_lines,
             completed_profiles,
+            profile_mode_line_suffixes,
         };
         self.latest_snapshot = Some(snapshot);
         (state, commands)

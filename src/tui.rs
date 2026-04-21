@@ -64,7 +64,10 @@ pub fn format_snapshot_display(snapshot: Option<&StatusSnapshot>) -> String {
     let profiles = if snapshot.active_profiles.is_empty() {
         "(none)".to_string()
     } else {
-        snapshot.active_profiles.join(", ")
+        decorate_profiles(
+            &snapshot.active_profiles,
+            &snapshot.profile_mode_line_suffixes,
+        )
     };
     let phase = snapshot
         .phase
@@ -780,6 +783,24 @@ pub fn run_tui(
     outcome
 }
 
+/// Format the active-profile list for the mode line, appending each
+/// profile's optional `mode_line_suffix` in parentheses so the LLM
+/// and operator can see at a glance what the profile is actually
+/// doing (e.g. `taxi  (via A→B · leg 3/8 · 80ft)`). Suffix length
+/// changes every tick — that's fine here because this string never
+/// feeds back into the heartbeat diff.
+fn decorate_profiles(names: &[String], suffixes: &[Option<String>]) -> String {
+    names
+        .iter()
+        .enumerate()
+        .map(|(i, name)| match suffixes.get(i).and_then(|s| s.as_deref()) {
+            Some(s) if !s.is_empty() => format!("{name}  ({s})"),
+            _ => name.clone(),
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// Splice a finalized transcript into `buffer` at the caret so voice
 /// input lands where the user is looking, not tacked onto the end of
 /// the line. Adds an auto-space before/after only when the adjacent
@@ -1290,7 +1311,7 @@ fn render_status_fragments(
     let profiles = if snap.active_profiles.is_empty() {
         "(none)".to_string()
     } else {
-        snap.active_profiles.join(", ")
+        decorate_profiles(&snap.active_profiles, &snap.profile_mode_line_suffixes)
     };
     let phase = snap.phase.map(|p| p.value().to_string()).unwrap_or_else(|| "—".to_string());
 

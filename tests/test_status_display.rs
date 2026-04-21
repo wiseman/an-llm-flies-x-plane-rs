@@ -71,6 +71,7 @@ fn make_snapshot(
         field_elevation_ft: None,
         debug_lines: Vec::new(),
         completed_profiles: Vec::new(),
+        profile_mode_line_suffixes: Vec::new(),
     }
 }
 

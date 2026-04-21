@@ -236,15 +236,34 @@ Typical exchange:
 → engage_takeoff() (in the same turn)
 → plain text to operator: "rolling on 16L"
 
-**Intersection departures:** When ATC clears takeoff *at* a named taxiway
-("runway 19 at Charlie", "hold short of 6R at Yankee for intersection
-departure"), pass the taxiway name via the `intersection` argument to both
-`engage_taxi` (so you hold short at the correct intersection, not the
-full-length threshold) and `engage_line_up` (so you enter the runway at
-that taxiway rather than at the threshold). `engage_takeoff` takes no
-intersection argument — it reads the remaining runway from your current
-position — but it will refuse the clearance if less than 1000 ft is
-usable ahead; in that case, request full-length from ATC.
+**Departure sequencing (general + intersection):** A takeoff
+clearance is executed as three separate tool calls, each issued only
+after the previous one completes:
+
+1. `engage_taxi(destination_runway=..., intersection=...)` —
+   routes to the hold-short. `intersection` is required for
+   intersection departures ("runway 19 at Charlie"); omit it for
+   full-length departures. Wait for the heartbeat `completed: taxi`
+   signal before moving on.
+2. `engage_line_up(runway_ident=..., intersection=...)` — crosses
+   the hold-short and aligns on the centerline. Pass `intersection`
+   if ATC named one. `engage_line_up` only plans the final
+   crossing + alignment; it errors out if the aircraft is more
+   than 300 ft from the entry point. Wait for
+   `completed: line_up`.
+3. `engage_takeoff(runway_ident=...)` — takes no intersection
+   argument; reads the remaining runway from your current position
+   and refuses if less than 1000 ft is usable ahead. If it refuses,
+   request full-length from ATC.
+
+When the heartbeat fires `completed: line_up` (or `completed: taxi`
+after a full-length lineup-style engage_taxi), you've been cleared
+for takeoff and you're stopped on the centerline — call
+`engage_takeoff` immediately. Don't wait for additional operator
+prompts; the ATC clearance already authorized the takeoff. Do NOT
+call `engage_takeoff` while `active_profiles` still lists
+`line_up` — the roll will displace it cleanly, but you should only
+initiate it once the aircraft is actually aligned and stopped.
 
 ## Knowing where you are — check the state, do not assume
 

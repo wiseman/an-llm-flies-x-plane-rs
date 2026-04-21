@@ -1355,6 +1355,37 @@ pub fn tool_engage_line_up(ctx: &ToolContext, args: &Map<String, Value>) -> Stri
         }
     }
 
+    // Distance guard: engage_line_up plans a 2-leg straight route
+    // (aircraft → entry point → 100 ft past). If the aircraft is far
+    // from the entry point, that "straight line" cuts diagonally
+    // across whatever terrain/taxiways sit between — a KWHP log
+    // showed exactly this: the aircraft was parked on A, the LLM
+    // skipped engage_taxi and called engage_line_up at B directly,
+    // and the planner cut a 591-ft diagonal from A straight to the
+    // B/12 entry point. Require the aircraft to be within taxi-graph
+    // proximity of the hold-short before handing off the final
+    // crossing+alignment to this tool.
+    {
+        let approach_ft = (entry_point_ft - aircraft_pos_ft).length();
+        const LINE_UP_MAX_APPROACH_FT: f64 = 300.0;
+        if approach_ft > LINE_UP_MAX_APPROACH_FT {
+            let taxi_hint = match intersection.as_deref() {
+                Some(taxiway) => format!(
+                    "call engage_taxi(destination_runway={:?}, intersection={:?}) first so you reach the hold-short by taxiway, then retry engage_line_up",
+                    runway, taxiway
+                ),
+                None => format!(
+                    "call engage_taxi(destination_runway={:?}) first so you reach the runway's hold-short by taxiway, then retry engage_line_up",
+                    runway
+                ),
+            };
+            return format!(
+                "error: aircraft is {:.0} ft from the runway {} entry point (max {:.0} ft). engage_line_up only plans the final hold-short crossing + alignment; it won't pathfind across the airport. {}",
+                approach_ft, runway, LINE_UP_MAX_APPROACH_FT, taxi_hint
+            );
+        }
+    }
+
     // Final line-up pose: 100 ft past the pavement end along the runway
     // course. Enough for the aircraft to stop with nose aligned and wheels
     // clear of the hold-short line; leaves a full runway ahead for the
@@ -1369,7 +1400,7 @@ pub fn tool_engage_line_up(ctx: &ToolContext, args: &Map<String, Value>) -> Stri
     ];
     let names = vec!["(entering runway)".to_string(), format!("rwy {}", runway)];
 
-    let profile = Box::new(TaxiProfile::new(legs_ft, names));
+    let profile = Box::new(TaxiProfile::new_line_up(legs_ft, names));
     let displaced = ctx.pilot.lock().engage_profile(profile);
 
     let approach_dist = (threshold_ft - aircraft_pos_ft).length();
@@ -1499,22 +1530,45 @@ pub fn tool_engage_taxi(ctx: &ToolContext, args: &Map<String, Value>) -> String 
     let aircraft_pos_ft = geodetic_offset_ft(start_lat, start_lon, georef);
     let (legs_ft, names, pullout_ft) =
         build_taxi_legs_with_pullout(aircraft_pos_ft, &plan.legs, georef);
-    // Terminal pose target: the hold-short node with heading pointed at
-    // the runway. Replaces the older "face-runway orientation leg"
-    // approach — a leg is a line to follow, but hold-short is a specific
-    // stop-and-face-direction state. The TaxiProfile's pose phase
-    // (lateral_mode = TaxiPose) handles the approach-then-pivot dance
-    // properly: steer to the point, creep-pivot to the heading, stop.
+    // Terminal pose target: stop at the hold-short node aligned with
+    // the last leg's direction. An earlier version of this code aimed
+    // the aircraft *at* the runway via `face_toward_latlon`, but that
+    // fell over whenever the approach heading differed from the face-
+    // runway heading by more than ~90° — the nose wheel controller
+    // can't rotate a stationary aircraft, so the pose phase would
+    // oscillate forever, the profile never marked itself complete,
+    // and `active_profiles` kept reporting "taxi" indefinitely. Real
+    // pilots don't pivot at the hold-short anyway — the turn onto
+    // the runway happens during engage_line_up. We still want a pose
+    // (rather than coasting past the last leg) so the aircraft stops
+    // *at* the hold-short rather than rolling through it. Log the
+    // runway-facing heading for diagnostics so we can still see how
+    // far off the approach was.
     let mut final_pose: Option<crate::types::TaxiPose> = None;
-    if let (Some((flat, flon)), Some(last)) = (face_toward_latlon, legs_ft.last().copied()) {
-        let runway_point_ft = geodetic_offset_ft(flat, flon, georef);
-        let to_runway = runway_point_ft - last.end_ft;
-        if to_runway.length() > 1.0 {
-            let heading = crate::types::vector_to_heading(to_runway);
+    let mut face_runway_note: Option<String> = None;
+    if let Some(last) = legs_ft.last().copied() {
+        let approach = last.end_ft - last.start_ft;
+        if approach.length() > 1.0 {
+            let approach_heading = crate::types::vector_to_heading(approach);
             final_pose = Some(crate::types::TaxiPose {
                 position_ft: last.end_ft,
-                heading_deg: heading,
+                heading_deg: approach_heading,
             });
+            if let Some((flat, flon)) = face_toward_latlon {
+                let runway_point_ft = geodetic_offset_ft(flat, flon, georef);
+                let to_runway = runway_point_ft - last.end_ft;
+                if to_runway.length() > 1.0 {
+                    let runway_heading = crate::types::vector_to_heading(to_runway);
+                    let delta = crate::types::wrap_degrees_180(
+                        runway_heading - approach_heading,
+                    )
+                    .abs();
+                    face_runway_note = Some(format!(
+                        "approach heading {:.0}° (runway bearing {:.0}°, Δ={:.0}°)",
+                        approach_heading, runway_heading, delta
+                    ));
+                }
+            }
         }
     }
     let pose_appended = final_pose.is_some();
@@ -1543,6 +1597,9 @@ pub fn tool_engage_taxi(ctx: &ToolContext, args: &Map<String, Value>) -> String 
     }
     if pose_appended {
         summary.push_str(" +pose-target");
+        if let Some(note) = face_runway_note {
+            summary.push_str(&format!(" ({note})"));
+        }
     }
     if !plan.taxiway_sequence.is_empty() {
         summary.push_str(&format!(" via {}", plan.taxiway_sequence.join(" -> ")));

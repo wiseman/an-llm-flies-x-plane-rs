@@ -102,6 +102,15 @@ pub trait GuidanceProfile: Send {
     fn debug_line(&self, _state: &AircraftState) -> Option<String> {
         None
     }
+
+    /// Short, single-line suffix appended to the profile's name in the
+    /// TUI mode line (e.g. "taxi  via A→B · leg 3/8 · 80ft"). Default:
+    /// no suffix. Must not include profile-change signals — the
+    /// heartbeat diffs active profile names, not these summaries, so
+    /// suffix churn is fine.
+    fn mode_line_suffix(&self, _state: &AircraftState) -> Option<String> {
+        None
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1246,7 +1255,23 @@ impl GuidanceProfile for RouteFollowProfile {
 /// leg list and `src/control/{ground_speed,nose_wheel}.rs` for the two
 /// low-level controllers `commands_from_guidance` runs when it sees the
 /// `TaxiFollow` / `Taxi` modes this profile raises.
+/// Whether this `TaxiProfile` instance was engaged as a ground taxi
+/// (destination = hold-short) or as a runway line-up (destination =
+/// on-runway entry point + alignment pose). The distinction only
+/// affects the profile's reported `name()`, which surfaces into
+/// `active_profiles` / `completed_profiles` and the heartbeat.
+/// Downstream consumers (LLM, TUI, logs) read the name to decide
+/// "what's the aircraft currently doing?" — a line-up looks like
+/// a taxi from the guidance side but means something different at
+/// the mission level.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaxiProfileMode {
+    Taxi,
+    LineUp,
+}
+
 pub struct TaxiProfile {
+    pub mode: TaxiProfileMode,
     pub legs_ft: Vec<StraightLeg>,
     pub taxiway_names: Vec<String>,
     pub current_idx: usize,
@@ -1279,7 +1304,24 @@ pub struct TaxiProfile {
 
 impl TaxiProfile {
     pub fn new(legs_ft: Vec<StraightLeg>, taxiway_names: Vec<String>) -> Self {
+        Self::with_mode(TaxiProfileMode::Taxi, legs_ft, taxiway_names)
+    }
+
+    /// Construct a taxi profile that presents itself as `line_up` in
+    /// status/active_profiles output. Used by `engage_line_up` so the
+    /// LLM can tell at a glance whether the active ground profile is
+    /// an en-route taxi or a final runway line-up.
+    pub fn new_line_up(legs_ft: Vec<StraightLeg>, taxiway_names: Vec<String>) -> Self {
+        Self::with_mode(TaxiProfileMode::LineUp, legs_ft, taxiway_names)
+    }
+
+    fn with_mode(
+        mode: TaxiProfileMode,
+        legs_ft: Vec<StraightLeg>,
+        taxiway_names: Vec<String>,
+    ) -> Self {
         Self {
+            mode,
             legs_ft,
             taxiway_names,
             current_idx: 0,
@@ -1305,6 +1347,28 @@ impl TaxiProfile {
     pub fn with_final_pose(mut self, pose: crate::types::TaxiPose) -> Self {
         self.final_pose = Some(pose);
         self
+    }
+
+    /// Dedup'd taxiway-name sequence for the mode-line summary. Skips
+    /// synthetic/descriptive names (empty strings, "(connector)",
+    /// "(entering runway)") so the displayed route matches what ATC
+    /// actually called.
+    fn route_summary(&self) -> Option<String> {
+        let mut out: Vec<&str> = Vec::new();
+        for n in &self.taxiway_names {
+            let n = n.as_str();
+            if n.is_empty() || n.starts_with('(') {
+                continue;
+            }
+            if out.last().map_or(true, |last| *last != n) {
+                out.push(n);
+            }
+        }
+        if out.is_empty() {
+            None
+        } else {
+            Some(out.join("→"))
+        }
     }
 
     fn current_leg(&self) -> Option<StraightLeg> {
@@ -1463,7 +1527,12 @@ impl TaxiProfile {
 }
 
 impl GuidanceProfile for TaxiProfile {
-    fn name(&self) -> &'static str { "taxi" }
+    fn name(&self) -> &'static str {
+        match self.mode {
+            TaxiProfileMode::Taxi => "taxi",
+            TaxiProfileMode::LineUp => "line_up",
+        }
+    }
     fn owns(&self) -> BTreeSet<Axis> {
         let mut s = BTreeSet::new();
         s.insert(Axis::Lateral);
@@ -1499,6 +1568,43 @@ impl GuidanceProfile for TaxiProfile {
 
     fn is_complete(&self) -> bool {
         self.finished
+    }
+
+    fn mode_line_suffix(&self, state: &AircraftState) -> Option<String> {
+        let route = self.route_summary();
+        let tail = if self.in_pose_phase() {
+            let pose = self.final_pose.unwrap();
+            let d = (pose.position_ft - state.position_ft).length();
+            let phase = if self.finished {
+                "parked"
+            } else if d < self.pose_pivot_radius_ft {
+                "align"
+            } else {
+                "approach"
+            };
+            format!("{phase} · {:.0}ft", d)
+        } else if let Some(leg) = self.current_leg() {
+            let name = self
+                .taxiway_names
+                .get(self.current_idx)
+                .map(String::as_str)
+                .filter(|s| !s.is_empty())
+                .unwrap_or("→");
+            let dist = (state.position_ft - leg.end_ft).length();
+            format!(
+                "leg {}/{} {} · {:.0}ft",
+                self.current_idx + 1,
+                self.legs_ft.len(),
+                name,
+                dist
+            )
+        } else {
+            "finished".to_string()
+        };
+        Some(match route {
+            Some(r) => format!("via {r} · {tail}"),
+            None => tail,
+        })
     }
 
     fn debug_line(&self, state: &AircraftState) -> Option<String> {

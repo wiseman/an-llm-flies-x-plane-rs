@@ -205,6 +205,48 @@ fn engage_line_up_at_intersection_uses_on_runway_point_not_threshold() {
     );
 }
 
+// ---------- line-up distance guard ----------
+
+#[test]
+fn engage_line_up_rejects_when_aircraft_is_far_from_entry_point() {
+    // Park the aircraft at node 38 — the west-ramp end of taxiway A,
+    // ~1700 ft from the B/19 intersection (node 35). engage_line_up
+    // intersection=B should refuse rather than plan a straight-line
+    // diagonal across the ramp + taxiway onto the runway.
+    let cache = kemt_cache();
+    let bridge = FakeBridge::new(KEMT_LAT, KEMT_LON);
+    // Node 38 lat/lon from the fixture.
+    bridge.set(
+        xplane_pilot::sim::datarefs::LATITUDE_DEG.name,
+        34.081092,
+    );
+    bridge.set(
+        xplane_pilot::sim::datarefs::LONGITUDE_DEG.name,
+        -118.037669,
+    );
+    let ctx = make_ctx(bridge.clone(), &cache);
+
+    let r = xplane_pilot::llm::tools::dispatch_tool(
+        &serde_json::json!({
+            "name": "engage_line_up",
+            "call_id": "c1",
+            "arguments": serde_json::json!({
+                "airport_ident": "KEMT",
+                "runway_ident": "19",
+                "intersection": "B",
+                "start_lat": null,
+                "start_lon": null,
+            }).to_string(),
+        }),
+        &ctx,
+    );
+    assert!(r.starts_with("error:"), "expected error, got: {r}");
+    assert!(
+        r.contains("engage_taxi") && r.contains("intersection"),
+        "error should tell the LLM to call engage_taxi with intersection first: {r}"
+    );
+}
+
 // ---------- TakeoffProfile usable length & debug line ----------
 
 #[test]
