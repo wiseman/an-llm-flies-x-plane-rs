@@ -66,6 +66,12 @@ pub enum FlightPhase {
     Roundout,
     Flare,
     Rollout,
+    /// Between Rollout and TaxiClear: the aircraft has left the landing
+    /// runway's surface and is on the exit taxiway but not yet past the
+    /// hold-short line. Rollout still owns brakes/rudder; once fully
+    /// clear, PatternFlyProfile hands off and the phase advances to
+    /// TaxiClear.
+    RunwayExit,
     TaxiClear,
     GoAround,
 }
@@ -88,6 +94,7 @@ impl FlightPhase {
             FlightPhase::Roundout => "roundout",
             FlightPhase::Flare => "flare",
             FlightPhase::Rollout => "rollout",
+            FlightPhase::RunwayExit => "runway_exit",
             FlightPhase::TaxiClear => "taxi_clear",
             FlightPhase::GoAround => "go_around",
         }
@@ -110,6 +117,7 @@ impl FlightPhase {
             "roundout" => FlightPhase::Roundout,
             "flare" => FlightPhase::Flare,
             "rollout" => FlightPhase::Rollout,
+            "runway_exit" => FlightPhase::RunwayExit,
             "taxi_clear" => FlightPhase::TaxiClear,
             "go_around" => FlightPhase::GoAround,
             _ => return None,
@@ -133,6 +141,7 @@ impl FlightPhase {
             FlightPhase::Roundout,
             FlightPhase::Flare,
             FlightPhase::Rollout,
+            FlightPhase::RunwayExit,
             FlightPhase::TaxiClear,
             FlightPhase::GoAround,
         ]

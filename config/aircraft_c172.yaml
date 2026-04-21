@@ -20,3 +20,5 @@ flare:
   roundout_height_ft: 10
   flare_start_ft: 10
   max_flare_pitch_deg: 9
+post_landing:
+  turnoff_speed_kt: 15

@@ -247,7 +247,43 @@ impl ModeManager {
                 }
             }
             FlightPhase::Rollout => {
+                // Advance to RunwayExit once the aircraft has left the
+                // runway surface laterally. `PatternFlyProfile` now
+                // holds rollout at turnoff speed (not zero), so the
+                // old "gs ≤ 5 kt" guard doesn't fire on its own after a
+                // nominal landing. The LLM calls engage_park once it's
+                // decided where to go; this transition is the clear-
+                // of-runway marker that gates the handoff.
+                //
+                // Thresholds are fixed rather than pulled from a config
+                // RunwayConfig because the pilot doesn't carry runway
+                // width into the runway frame. 75 ft covers the widest
+                // airline-class runways (200 ft wide → half-width 100 ft)
+                // only loosely, but for GA ops on 75-150 ft runways it's
+                // a clean "you're on the taxiway" signal.
+                const RUNWAY_EXIT_OFFSET_FT: f64 = 75.0;
+                let lateral_off = state.runway_y_ft.map(f64::abs).unwrap_or(0.0);
+                if lateral_off > RUNWAY_EXIT_OFFSET_FT {
+                    return FlightPhase::RunwayExit;
+                }
+                // Preserve the old guard as a fallback so deterministic
+                // tests that stop the aircraft on centerline still reach
+                // TaxiClear.
                 if state.gs_kt <= 5.0 {
+                    return FlightPhase::TaxiClear;
+                }
+                return phase;
+            }
+            FlightPhase::RunwayExit => {
+                // Full stop = clear of runway + brakes down. Alternately,
+                // ≥ 150 ft off centerline means we're well onto the
+                // taxiway, even if still creeping forward.
+                const RUNWAY_CLEAR_OFFSET_FT: f64 = 150.0;
+                if state.gs_kt <= 1.0 {
+                    return FlightPhase::TaxiClear;
+                }
+                let lateral_off = state.runway_y_ft.map(f64::abs).unwrap_or(0.0);
+                if lateral_off > RUNWAY_CLEAR_OFFSET_FT {
                     return FlightPhase::TaxiClear;
                 }
                 return phase;

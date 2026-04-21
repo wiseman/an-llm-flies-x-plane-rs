@@ -54,6 +54,20 @@ pub struct FlareConfig {
 }
 
 #[derive(Debug, Clone, Copy, Deserialize)]
+pub struct PostLandingConfig {
+    /// Target ground speed during rollout after touchdown. The pilot
+    /// decelerates to this speed and holds it — the aircraft keeps
+    /// rolling rather than braking to a stop on the runway.
+    pub turnoff_speed_kt: f64,
+}
+
+impl Default for PostLandingConfig {
+    fn default() -> Self {
+        Self { turnoff_speed_kt: 15.0 }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
 pub struct PIDGains {
     pub kp: f64,
     pub kd: f64,
@@ -108,6 +122,7 @@ pub struct ConfigBundle {
     pub controllers: ControllerConfig,
     pub limits: SafetyLimits,
     pub airport: AirportConfig,
+    pub post_landing: PostLandingConfig,
 }
 
 impl ConfigBundle {
@@ -166,6 +181,13 @@ struct RawAircraft {
     vso_landing_kt: f64,
     pattern: RawPattern,
     flare: RawFlare,
+    #[serde(default)]
+    post_landing: Option<RawPostLanding>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawPostLanding {
+    turnoff_speed_kt: f64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -267,6 +289,10 @@ fn load_config_bundle_from(
         flare_start_ft: aircraft.flare.flare_start_ft,
         max_flare_pitch_deg: aircraft.flare.max_flare_pitch_deg,
     };
+    let post_landing = aircraft
+        .post_landing
+        .map(|p| PostLandingConfig { turnoff_speed_kt: p.turnoff_speed_kt })
+        .unwrap_or_default();
 
     let runway = Runway {
         id: Some(airport.runway.id.into_string()),
@@ -305,6 +331,7 @@ fn load_config_bundle_from(
         controllers,
         limits,
         airport: airport_cfg,
+        post_landing,
     })
 }
 

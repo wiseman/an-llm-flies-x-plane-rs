@@ -296,7 +296,7 @@ fn phase_terms(phase: Option<FlightPhase>) -> &'static [&'static str] {
         | Some(Roundout) | Some(Flare) => {
             &["cleared", "land", "final", "traffic", "pattern", "Mayday"]
         }
-        Some(Rollout) | Some(GoAround) | None => &[],
+        Some(Rollout) | Some(RunwayExit) | Some(GoAround) | None => &[],
     }
 }
 

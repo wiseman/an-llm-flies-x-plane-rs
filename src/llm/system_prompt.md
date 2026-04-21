@@ -248,6 +248,38 @@ Other pattern-fly tools (only valid when `pattern_fly` is engaged):
   it again on every approach's BASE or FINAL or the next landing will
   brake to a full stop.
 
+### Post-landing / ground ops
+
+Touchdown no longer brakes the aircraft to a stop on the runway. Rollout
+decelerates to a turnoff speed (config: `post_landing.turnoff_speed_kt`,
+default 15 kt) and holds it — the aircraft keeps rolling until it leaves
+the runway surface. Once the aircraft is clear of the runway laterally
+and stopped, the phase machine advances to `taxi_clear`, sets the
+parking brake, and releases `pattern_fly` to idle. You then pick where
+to go.
+
+Typical sequence:
+
+1. On final (or during rollout), call
+   `list_runway_exits(airport_ident, runway_ident)` to see candidate
+   exit taxiways with their stationing from the landing threshold.
+2. `choose_runway_exit(taxiway_name)` records your preferred exit. The
+   rollout aims to be at turnoff speed by that stationing; if the
+   aircraft is still fast there, it falls back to the next exit.
+3. Clear of the runway the autopilot auto-stops. Now pick a parking spot:
+   `sql_query` against the `parking_spots` view, filtering by airport and
+   matching `categories` against the aircraft class (e.g.
+   `categories LIKE '%props%'` for a C172) or `operation_type =
+   'general_aviation'` for a GA ramp.
+4. `engage_park(airport_ident, parking_name, via_taxiways=[...])` taxis
+   to the spot and stops with the nose aligned to the painted heading.
+   `plan_park_route(...)` previews without engaging. If the parking
+   brake is set when you call `engage_park`, it's released for you.
+
+`engage_park` can also be called during rollout — it will displace
+`pattern_fly` and turn the aircraft off the runway onto the chosen
+taxiway. Useful when ATC gave you a known gate at landing.
+
 ### Radio — required for ATC
 
 ATC and anyone else outside the cockpit can only hear you when you

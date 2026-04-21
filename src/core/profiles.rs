@@ -626,6 +626,13 @@ pub struct PatternFlyProfile {
     /// When set on a tick, PilotCore should swap pattern_fly out for these
     /// three single-axis holds.
     handoff_request: Option<Vec<Box<dyn GuidanceProfile>>>,
+    /// LLM-set preferred runway-exit taxiway for post-landing rollout.
+    /// The rollout logic aims the brake profile to reach turnoff speed by
+    /// the time the aircraft reaches this taxiway's stationing; when the
+    /// wheels are past the hold-short line the profile auto-hands off to
+    /// idle and stops the aircraft clear of the runway. `None` = take the
+    /// first available exit.
+    pub preferred_exit: Option<String>,
 }
 
 impl PatternFlyProfile {
@@ -661,10 +668,18 @@ impl PatternFlyProfile {
             config,
             runway_frame,
             handoff_request: None,
+            preferred_exit: None,
         }
     }
 
     pub fn go_around(&mut self) { self.force_go_around_trigger = true; }
+
+    /// Record (or clear) the preferred runway-exit taxiway for the
+    /// post-landing rollout. `None` = let the rollout pick the first
+    /// available exit.
+    pub fn set_preferred_exit(&mut self, taxiway: Option<String>) {
+        self.preferred_exit = taxiway;
+    }
     pub fn execute_touch_and_go(&mut self) { self.touch_and_go_trigger = true; }
 
     /// Fire the one-shot trigger for a given turn. Once set, the next
@@ -768,18 +783,48 @@ impl PatternFlyProfile {
             | FlightPhase::Final => self.pattern_phase_guidance(state, bank_limit, phase),
             FlightPhase::Roundout => self.roundout_guidance(state, bank_limit),
             FlightPhase::Flare => self.flare_guidance(state, bank_limit),
-            FlightPhase::Rollout | FlightPhase::TaxiClear => GuidanceTargets {
+            FlightPhase::Rollout | FlightPhase::RunwayExit => {
+                // Post-landing brake behavior:
+                // - If the LLM has named a preferred exit via
+                //   `choose_runway_exit`, modulate brakes so the
+                //   aircraft decelerates to `turnoff_speed_kt` and holds
+                //   it. "Does not stop until it clears the runway."
+                // - Otherwise keep the legacy hard-brake so the
+                //   deterministic simple-backend scenarios (no LLM in
+                //   the loop) still converge to TaxiClear at 5 kt.
+                let brakes = if self.preferred_exit.is_some() {
+                    let target = self.config.post_landing.turnoff_speed_kt;
+                    if state.gs_kt > target + 2.0 {
+                        0.75
+                    } else if state.gs_kt > target {
+                        0.35
+                    } else {
+                        0.0
+                    }
+                } else {
+                    0.75
+                };
+                GuidanceTargets {
+                    lateral_mode: LateralMode::RolloutCenterline,
+                    vertical_mode: VerticalMode::PitchHold,
+                    target_bank_deg: Some(0.0),
+                    target_heading_deg: Some(self.runway_frame.runway.course_deg),
+                    target_pitch_deg: Some(0.0),
+                    throttle_limit: Some((0.0, 0.0)),
+                    brakes,
+                    ..Default::default()
+                }
+            }
+            FlightPhase::TaxiClear => GuidanceTargets {
                 lateral_mode: LateralMode::RolloutCenterline,
                 vertical_mode: VerticalMode::PitchHold,
                 target_bank_deg: Some(0.0),
                 target_heading_deg: Some(self.runway_frame.runway.course_deg),
                 target_pitch_deg: Some(0.0),
                 throttle_limit: Some((0.0, 0.0)),
-                // Back off from 1.0 -- live runs showed tire smoke
-                // (skid) at full stick, which gives less deceleration
-                // than threshold braking AND makes visual/noise cues
-                // bad. 0.75 stays above the locked-tire regime while
-                // still getting ~0.25 g of deceleration.
+                // Full brake on arrival — we're clear of the runway and
+                // need to stop. Hand-off to idle happens in `contribute()`
+                // so the LLM takes over with a stopped aircraft.
                 brakes: 0.75,
                 ..Default::default()
             },
@@ -1179,6 +1224,27 @@ impl GuidanceProfile for PatternFlyProfile {
                 Box::new(SpeedHoldProfile::new(self.config.performance.vy_kt)),
             ]);
         }
+        // Post-landing hand-off: once the aircraft is in TaxiClear
+        // (clear of the runway and stopped), release the three-axis
+        // pattern profile so the LLM can engage a taxi/park profile
+        // without displacing us. Guard on `previous_phase != TaxiClear`
+        // so we only queue the hand-off on the *first* tick of TaxiClear.
+        //
+        // Only fires when the LLM has opted into the new post-landing
+        // flow via `choose_runway_exit` — deterministic simple-backend
+        // scenarios (no LLM) keep the legacy "pattern_fly stays engaged
+        // through TaxiClear" behavior so `ScenarioRunner` can still read
+        // the phase via `pattern_metadata`.
+        if self.phase == FlightPhase::TaxiClear
+            && previous_phase != FlightPhase::TaxiClear
+            && self.preferred_exit.is_some()
+        {
+            hand_off = Some(vec![
+                Box::new(IdleLateralProfile),
+                Box::new(IdleVerticalProfile),
+                Box::new(IdleSpeedProfile::new(0.0)),
+            ]);
+        }
         if let Some(queued) = self.handoff_request.take() {
             hand_off = Some(queued);
         }
@@ -1393,6 +1459,30 @@ impl TaxiProfile {
         self.current_idx >= self.legs_ft.len() && self.final_pose.is_some()
     }
 
+    /// Total remaining taxi distance in feet: aircraft → end of current
+    /// leg, plus the full length of every subsequent leg, plus the final
+    /// pose approach from the last leg's end when one is set.
+    fn remaining_distance_ft(&self, state: &AircraftState) -> f64 {
+        if self.finished {
+            return 0.0;
+        }
+        if self.in_pose_phase() {
+            let pose = self.final_pose.unwrap();
+            return (pose.position_ft - state.position_ft).length();
+        }
+        let Some(current) = self.current_leg() else {
+            return 0.0;
+        };
+        let mut total = (state.position_ft - current.end_ft).length();
+        for leg in &self.legs_ft[self.current_idx + 1..] {
+            total += (leg.end_ft - leg.start_ft).length();
+        }
+        if let (Some(pose), Some(last)) = (self.final_pose, self.legs_ft.last()) {
+            total += (pose.position_ft - last.end_ft).length();
+        }
+        total
+    }
+
     /// Target ground speed given the upcoming geometry and the aircraft's
     /// current alignment with the active leg:
     /// - if heading error > 45°, creep at ~2 kt so the nose wheel can
@@ -1576,6 +1666,7 @@ impl GuidanceProfile for TaxiProfile {
 
     fn mode_line_suffix(&self, state: &AircraftState) -> Option<String> {
         let route = self.route_summary();
+        let total_remaining = self.remaining_distance_ft(state);
         let tail = if self.in_pose_phase() {
             let pose = self.final_pose.unwrap();
             let d = (pose.position_ft - state.position_ft).length();
@@ -1594,13 +1685,14 @@ impl GuidanceProfile for TaxiProfile {
                 .map(String::as_str)
                 .filter(|s| !s.is_empty())
                 .unwrap_or("→");
-            let dist = (state.position_ft - leg.end_ft).length();
+            let leg_remaining = (state.position_ft - leg.end_ft).length();
             format!(
-                "leg {}/{} {} · {:.0}ft",
+                "leg {}/{} {} · {:.0}ft / {:.0}ft total",
                 self.current_idx + 1,
                 self.legs_ft.len(),
                 name,
-                dist
+                leg_remaining,
+                total_remaining,
             )
         } else {
             "finished".to_string()

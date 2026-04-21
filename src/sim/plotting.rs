@@ -37,6 +37,7 @@ fn phase_color(phase: FlightPhase) -> &'static str {
         FlightPhase::Roundout => "#db2777",
         FlightPhase::Flare => "#c026d3",
         FlightPhase::Rollout => "#4338ca",
+        FlightPhase::RunwayExit => "#3730a3",
         FlightPhase::TaxiClear => "#334155",
         FlightPhase::GoAround => "#b91c1c",
         FlightPhase::Preflight => "#94a3b8",

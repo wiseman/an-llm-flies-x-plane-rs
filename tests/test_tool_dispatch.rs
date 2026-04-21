@@ -1429,3 +1429,235 @@ fn spatial_least_of_both_ends_picks_closer_high_numbered_threshold() {
     let dist_m: f64 = fields[3].parse().unwrap();
     assert!(dist_m < 100.0, "dist_m was {}", dist_m);
 }
+
+// ---------- engage_park / plan_park_route ----------
+
+fn build_park_fixture_parquet(dir: &std::path::Path) -> PathBuf {
+    // Synthetic KTEST with a taxi network and two 1300 parking spots:
+    //   - "Gate A4": near node 5, heading 90 (east)
+    //   - "GA Tie-Down 1": near node 4, heading 270 (west)
+    //
+    //   n10 -- connector -- n1 == A ==> n2 == D ==> n3 (rwy 09 thr)
+    //                                       \== C ==> n4 (Tie-Down)
+    //                                       \== B ==> n5 (Gate A4)
+    let extra = vec![
+        "1 0 0 0 KTEST KTEST Test Airport\n\
+         100 22.86 1 0 0.25 0 2 0 \
+         09 37.000100 -121.997500 0.00 0 0 0 0 0 \
+         27 37.000100 -121.987500 0.00 0 0 0 0 0\n\
+         1201 37.000200 -122.001000 both 1\n\
+         1201 37.000200 -121.999500 both 2\n\
+         1201 37.000100 -121.997500 both 3\n\
+         1201 37.000300 -121.998500 both 4\n\
+         1201 37.000100 -121.999000 both 5\n\
+         1201 37.000500 -122.002000 both 10\n\
+         1202 10 1 twoway taxiway_E \n\
+         1202 1 2 twoway taxiway_E A\n\
+         1202 2 3 twoway taxiway_E D\n\
+         1202 2 4 twoway taxiway_E C\n\
+         1202 2 5 twoway taxiway_E B\n\
+         1300 37.000100 -121.998950 90.0 gate jets|turboprops|props Gate A4\n\
+         1301 C airline UAL\n\
+         1300 37.000310 -121.998490 270.0 tie_down props|helos GA Tie-Down 1\n"
+            .to_string(),
+    ];
+    build_fake_parquet(dir, &extra)
+}
+
+#[test]
+fn sql_query_parking_spots_view_is_visible() {
+    let dir = TempDir::new().unwrap();
+    build_park_fixture_parquet(dir.path());
+    let (ctx, _) = make_ctx_with_parquet(dir.path());
+    let r = dispatch_tool(
+        &call(
+            "sql_query",
+            json!({"query":
+                "SELECT name, kind, categories, operation_type, airlines \
+                 FROM parking_spots \
+                 WHERE airport_ident = 'KTEST' \
+                 ORDER BY name"}),
+        ),
+        &ctx,
+    );
+    let lines: Vec<&str> = r.lines().collect();
+    assert_eq!(lines[0], "name\tkind\tcategories\toperation_type\tairlines");
+    assert!(lines.iter().any(|l| l.starts_with("GA Tie-Down 1\ttie_down")));
+    let gate_line = lines.iter().find(|l| l.starts_with("Gate A4")).unwrap();
+    assert!(gate_line.contains("jets|turboprops|props"));
+    assert!(gate_line.contains("airline"));
+    assert!(gate_line.contains("UAL"));
+}
+
+#[test]
+fn plan_park_route_returns_parking_coordinates_and_heading() {
+    let dir = TempDir::new().unwrap();
+    build_park_fixture_parquet(dir.path());
+    let (ctx, _) = make_ctx_with_parquet(dir.path());
+    let r = dispatch_tool(
+        &call(
+            "plan_park_route",
+            json!({
+                "airport_ident": "KTEST",
+                "parking_name": "Gate A4",
+                "via_taxiways": [],
+                "start_lat": 37.000500,
+                "start_lon": -122.002000,
+            }),
+        ),
+        &ctx,
+    );
+    assert!(!r.starts_with("error"), "got: {}", r);
+    assert!(r.contains("taxi plan KTEST"));
+    assert!(r.contains("parking: \"Gate A4\""));
+    assert!(r.contains("heading 90"));
+}
+
+#[test]
+fn plan_park_route_unknown_spot_errors() {
+    let dir = TempDir::new().unwrap();
+    build_park_fixture_parquet(dir.path());
+    let (ctx, _) = make_ctx_with_parquet(dir.path());
+    let r = dispatch_tool(
+        &call(
+            "plan_park_route",
+            json!({
+                "airport_ident": "KTEST",
+                "parking_name": "Nonexistent Gate",
+                "via_taxiways": [],
+                "start_lat": 37.000500,
+                "start_lon": -122.002000,
+            }),
+        ),
+        &ctx,
+    );
+    assert!(r.starts_with("error"), "expected error, got: {}", r);
+    assert!(r.contains("parking spot"));
+}
+
+#[test]
+fn engage_park_swaps_in_taxi_profile_and_clears_pattern() {
+    let dir = TempDir::new().unwrap();
+    build_park_fixture_parquet(dir.path());
+    let (ctx, _bridge) = make_ctx_with_parquet(dir.path());
+    // Engage pattern_fly first so we can verify engage_park displaces it.
+    let p = PatternFlyProfile::new(
+        load_default_config_bundle(),
+        xplane_pilot::guidance::runway_geometry::RunwayFrame::new(
+            xplane_pilot::types::Runway {
+                id: Some("36".to_string()),
+                threshold_ft: Vec2::new(0.0, 0.0),
+                course_deg: 360.0,
+                length_ft: 5000.0,
+                touchdown_zone_ft: 1200.0,
+                displaced_threshold_ft: 0.0,
+                traffic_side: xplane_pilot::types::TrafficSide::Left,
+            },
+        ),
+    );
+    ctx.pilot.lock().engage_profile(Box::new(p));
+    assert!(ctx.pilot.lock().has_profile("pattern_fly"));
+
+    let r = dispatch_tool(
+        &call(
+            "engage_park",
+            json!({
+                "airport_ident": "KTEST",
+                "parking_name": "Gate A4",
+                "via_taxiways": [],
+                "start_lat": 37.000500,
+                "start_lon": -122.002000,
+            }),
+        ),
+        &ctx,
+    );
+    assert!(!r.starts_with("error"), "got: {}", r);
+    assert!(r.contains("engaged park KTEST"));
+    assert!(r.contains("Gate A4"));
+    assert!(r.contains("heading 90"));
+    let names = ctx.pilot.lock().list_profile_names();
+    assert!(names.contains(&"taxi".to_string()), "profiles = {:?}", names);
+    assert!(!names.contains(&"pattern_fly".to_string()));
+}
+
+#[test]
+fn choose_runway_exit_records_preference_on_pattern_profile() {
+    let dir = TempDir::new().unwrap();
+    build_fake_parquet(dir.path(), &[]);
+    let (ctx, _bridge) = make_ctx_with_parquet(dir.path());
+    dispatch_tool(
+        &call(
+            "engage_pattern_fly",
+            json!({
+                "airport_ident": "KSEA",
+                "runway_ident": "16L",
+                "side": "left",
+                "start_phase": "takeoff_roll",
+            }),
+        ),
+        &ctx,
+    );
+    let r = dispatch_tool(
+        &call("choose_runway_exit", json!({"taxiway_name": "A5"})),
+        &ctx,
+    );
+    assert!(r.contains("A5"), "got: {}", r);
+    assert!(r.contains("preferred"), "got: {}", r);
+
+    let cleared = dispatch_tool(
+        &call("choose_runway_exit", json!({"taxiway_name": null})),
+        &ctx,
+    );
+    assert!(cleared.contains("cleared"), "got: {}", cleared);
+}
+
+#[test]
+fn choose_runway_exit_errors_when_pattern_fly_not_active() {
+    let dir = TempDir::new().unwrap();
+    build_fake_parquet(dir.path(), &[]);
+    let (ctx, _bridge) = make_ctx_with_parquet(dir.path());
+    let r = dispatch_tool(
+        &call("choose_runway_exit", json!({"taxiway_name": "A5"})),
+        &ctx,
+    );
+    assert!(r.starts_with("error"), "got: {}", r);
+    assert!(r.contains("pattern_fly"));
+}
+
+#[test]
+fn list_runway_exits_enumerates_annotated_taxiways() {
+    // Two taxiways cross rwy 09: A5 (near threshold) and A7 (farther
+    // down). Both have 1204 "departure:09" entries.
+    let dir = TempDir::new().unwrap();
+    let extra = vec![
+        "1 0 0 0 KEXIT KEXIT Test Exit Airport\n\
+         100 22.86 1 0 0.25 0 2 0 \
+         09 37.000100 -121.997500 0.00 0 0 0 0 0 \
+         27 37.000100 -121.987500 0.00 0 0 0 0 0\n\
+         1201 37.000200 -121.996500 both 1\n\
+         1201 37.000100 -121.996500 both 2\n\
+         1201 37.000200 -121.994500 both 3\n\
+         1201 37.000100 -121.994500 both 4\n\
+         1202 1 2 twoway taxiway_E A5\n\
+         1204 departure 09\n\
+         1202 3 4 twoway taxiway_E A7\n\
+         1204 departure 09\n"
+            .to_string(),
+    ];
+    build_fake_parquet(dir.path(), &extra);
+    let (ctx, _) = make_ctx_with_parquet(dir.path());
+    let r = dispatch_tool(
+        &call(
+            "list_runway_exits",
+            json!({"airport_ident": "KEXIT", "runway_ident": "09"}),
+        ),
+        &ctx,
+    );
+    assert!(!r.starts_with("error"), "got: {}", r);
+    assert!(r.contains("A5"), "output: {}", r);
+    assert!(r.contains("A7"), "output: {}", r);
+    // A5 (threshold-adjacent) must come before A7 (farther along).
+    let a5_pos = r.find("A5").unwrap();
+    let a7_pos = r.find("A7").unwrap();
+    assert!(a5_pos < a7_pos, "A5 should precede A7 by stationing:\n{}", r);
+}
