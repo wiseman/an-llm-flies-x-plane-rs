@@ -894,15 +894,6 @@ pub fn tool_takeoff_checklist(ctx: &ToolContext, _args: &Map<String, Value>) -> 
     lines.join("\n")
 }
 
-pub fn tool_engage_approach(_ctx: &ToolContext, args: &Map<String, Value>) -> String {
-    let runway = args.get("runway_id").and_then(|v| v.as_str()).unwrap_or("");
-    format!("error: engage_approach not yet implemented (requested runway={})", runway)
-}
-
-pub fn tool_engage_route_follow(_ctx: &ToolContext, _args: &Map<String, Value>) -> String {
-    "error: engage_route_follow not yet implemented".to_string()
-}
-
 pub fn tool_disengage_profile(ctx: &ToolContext, args: &Map<String, Value>) -> String {
     let name = match arg_str(args, "name") {
         Ok(s) => s.to_string(),
@@ -1857,8 +1848,6 @@ pub fn dispatch_tool(call: &Value, ctx: &ToolContext) -> String {
         "engage_pattern_fly" => tool_engage_pattern_fly(ctx, &map),
         "engage_takeoff" => tool_engage_takeoff(ctx, &map),
         "takeoff_checklist" => tool_takeoff_checklist(ctx, &map),
-        "engage_approach" => tool_engage_approach(ctx, &map),
-        "engage_route_follow" => tool_engage_route_follow(ctx, &map),
         "disengage_profile" => tool_disengage_profile(ctx, &map),
         "list_profiles" => tool_list_profiles(ctx, &map),
         "extend_pattern_leg" => tool_extend_pattern_leg(ctx, &map),
@@ -1972,18 +1961,6 @@ pub fn tool_schemas() -> Vec<Value> {
         schema(
             "takeoff_checklist",
             "Return a takeoff-readiness checklist with each item marked [OK], [ACTION], [ERROR], or [REMINDER]. Reads live state (parking brake, flaps, gear, on-ground, active profiles). Call this before engage_takeoff and address every [ACTION] item — the most common miss is a set parking brake, which will also cause engage_takeoff to refuse.",
-            json!({}),
-            &[],
-        ),
-        schema(
-            "engage_approach",
-            "Engage a final-approach profile for the given runway. Not yet implemented.",
-            json!({"runway_id": {"type": "string", "description": "Runway identifier, e.g. '16L'."}}),
-            &["runway_id"],
-        ),
-        schema(
-            "engage_route_follow",
-            "Engage route-follow guidance along a list of waypoints. Not yet implemented.",
             json!({}),
             &[],
         ),

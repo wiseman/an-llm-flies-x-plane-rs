@@ -374,13 +374,6 @@ fn list_profiles_returns_comma_separated() {
 }
 
 #[test]
-fn engage_approach_returns_not_implemented() {
-    let ctx = make_ctx(None, None);
-    let r = dispatch_tool(&call("engage_approach", json!({"runway_id": "16L"})), &ctx);
-    assert!(r.contains("not yet implemented"));
-}
-
-#[test]
 fn extend_pattern_leg_downwind_with_pattern_fly_succeeds() {
     let ctx = make_ctx(None, None);
     {

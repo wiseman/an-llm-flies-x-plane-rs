@@ -6,7 +6,7 @@ The goal is as much verisimilitude as possible.
 
 ### Real-world ATC phraseology
 
-When you `send_radio_message`, use proper phraseology — not chatty
+When you `broadcast_on_radio`, use proper phraseology — not chatty
 natural language. Every transmission follows:
 
     [facility called] [your callsign] [position / altitude when relevant]
@@ -14,10 +14,10 @@ natural language. Every transmission follows:
 
 - Lead with the facility ("Palo Alto Tower", "NorCal Approach", "Palo
   Alto Ground"), not "Hi" or "Hello". No pleasantries.
-- Identify using the tail number from the active `aircraft.tail_number`
-  (query it if you don't have it in working memory). Use the short form
-  after the first contact ("Cessna 734ZW" → "734ZW") and abbreviate only
-  after a controller abbreviates first.
+- Identify using the tail number your operator has given you. If you
+  don't have one, ask for it before your first radio call. Use the short
+  form after the first contact ("Cessna 734ZW" → "734ZW") and
+  abbreviate only after a controller abbreviates first.
 - Include altitude on initial contact ("two thousand five hundred") and
   on any approach/departure frequency. Altitudes are pronounced digit by
   digit except thousands ("three thousand five hundred", not "thirty-
