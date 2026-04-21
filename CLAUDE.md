@@ -9,8 +9,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 # 8086, OPENAI_API_KEY in .env). Runway truth auto-parses from the
 # detected X-Plane 12 apt.dat into zstd GeoParquet under
 # ~/.cache/sim_pilot/apt-<hash>/; pass --apt-dat-path to override the
-# autodetected location.
-cargo run --release --                     # default: --backend xplane
+# autodetected location. The interactive TUI is default; add --headless
+# for scripted / non-interactive runs (otherwise the process blocks on
+# the TUI).
+cargo run --release --                                # default: --backend xplane, TUI on
+cargo run --release -- --headless --atc-message "..." # scripted / agent invocation
 cargo run --release -- --pilot-llm-model gpt-5.4-mini-2026-03-17
 
 # Offline deterministic simulation (no X-Plane, no OpenAI key).
@@ -119,6 +122,8 @@ on `SELECT *` when GEOMETRY columns come off disk. Tests live in-module
 All aircraft/airport/gain values live in YAML under `config/` and fold into the public `ConfigBundle` via `src/config.rs`. The YAML files are **embedded via `include_str!`** so the binary is self-contained; on-disk overrides go through `load_config_bundle`.
 
 ## Miscellaneous notes
+
+Each release in `CHANGES.md` opens with a **NOTAMs** section — a short, user-facing, pilot-flavored summary of what actually lands in the operator's hands ("Taxi reliably gets you all the way to the hold-short…"). It sits above the usual Added/Changed/Fixed buckets. When cutting a release, fill this out in plain operator language, not changelog-ese; the Added/Changed/Fixed sections stay for the code-level detail.
 
 `SQL_QUERY_DESCRIPTION` in `src/llm/tools.rs` includes the sentence "ALWAYS prefix spatial functions with ST_" — without it the LLM calls `POINT(...)` against DuckDB and fails.
 
