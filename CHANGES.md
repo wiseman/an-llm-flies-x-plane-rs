@@ -5,6 +5,71 @@ The format is loosely based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project follows [Semantic Versioning](https://semver.org).
 
+## [0.4.0] — 2026-04-20
+
+### NOTAMs
+
+- Taxi reliably gets you all the way to the hold-short, including the
+  final 90° swing onto the runway heading.
+- Intersection departures work end-to-end — "taxi to runway 19 at
+  Charlie, cleared for takeoff at Charlie" does the right thing.
+- The pilot actually transmits on the radio in realistic mode
+  (previously called a tool that didn't exist).
+- Realistic mode asks the operator for a tail number on its first
+  radio call when it doesn't have one, instead of failing silently.
+- Just run the binary — the TUI is default now, no flag needed. Pass
+  `--headless` for scripted runs.
+- The taxi mode line shows where you're going (`A → B`), not just the
+  current leg.
+- Voice transcription catches multi-word facility and taxiway names
+  more reliably.
+
+### Added
+
+- Per-session Responses API transcript dump — every round (request +
+  response) is written to `output/<session>.txt` so you can tail what
+  the pilot is actually sending/receiving without scrolling the main
+  log.
+- Intersection-departure support — `engage_taxi` and `engage_line_up`
+  accept an `intersection=` argument for "runway 19 at Charlie"-style
+  clearances. `engage_takeoff` reads remaining runway from current
+  position and refuses below 1000 ft usable ahead.
+- Route summary in the taxi mode line — the full routed path
+  (`A → B`) is surfaced instead of only the current leg name.
+
+### Changed
+
+- **Breaking**: `--interactive-atc` removed. The interactive TUI is
+  now the default; pass `--headless` to run with stdout echo and
+  scripted `--atc-message` strings. The TUI covers operator input,
+  voice PTT, and the log/radio panes, so the old name never made
+  sense.
+- System prompt rewritten. Consolidated duplicate rules
+  (facts / where-you-are / iterate / no-menus → one Core principles
+  section), moved the airspace dictionary next to heartbeat
+  mechanics, flattened the tool reference, trimmed VFR regs, reduced
+  CAPS inflation. Base prompt is now neutral of "sim vs real"
+  framing — the realistic overlay still layers on phraseology and
+  readback discipline when you want it.
+- Deepgram keyterms pass compound phrases ("Whiteman Tower") at a
+  higher tier than their component words, improving recognition of
+  full facility names and multi-word taxiway IDs.
+- X-Plane bridge eagerly updates cached dataref values on write, so a
+  `get_status` on the same tick reflects what you just set.
+- Dropped `engage_approach` / `engage_route_follow` stubs from the
+  tool schema — they were advertised, disclaimed, and only returned
+  errors.
+
+### Fixed
+
+- Hold-short taxi stalls on live X-Plane. The final turn onto the
+  hold-short used to leave the aircraft with brakes on, rudder hard
+  over, heading 40°+ off target, and no motion — a C172's nose wheel
+  can't pivot a stationary aircraft with differential braking alone.
+  The align phase now creeps at `pose_creep_speed_kt` until heading
+  is in tolerance, plus related sequencing fixes for the taxi →
+  line-up handoff.
+
 ## [0.3.0] — 2026-04-19
 
 ### Added
