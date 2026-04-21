@@ -1355,7 +1355,7 @@ fn render_status_fragments(
             phase_style,
         ));
     }
-    header.push(Span::styled(profiles, Style::default().fg(Color::DarkGray)));
+    header.push(Span::styled(profiles, Style::default().fg(Color::Gray)));
     lines.push(Line::from(header));
     lines.push(Line::from(Span::styled(
         " ".to_string() + &"─".repeat(64),
