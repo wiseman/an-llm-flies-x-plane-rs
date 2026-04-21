@@ -1463,9 +1463,13 @@ impl TaxiProfile {
     /// Pose-phase target speed. Three regimes:
     ///
     /// - **Parked** (both tolerances met): 0.
-    /// - **Align** (inside `pose_pivot_radius_ft`): 0. The differential
-    ///   brake + nose-wheel pair pivots the aircraft in place; forward
-    ///   motion would just drag it off the target.
+    /// - **Align** (inside `pose_pivot_radius_ft`, heading not yet in
+    ///   tolerance): `pose_creep_speed_kt`. A C172's nose-wheel steering
+    ///   has no yaw authority at zero ground speed, and live X-Plane's
+    ///   differential braking alone will not rotate a stationary
+    ///   aircraft — so we hold a slow creep to let the nose wheel bite.
+    ///   If we overshoot the position tolerance we'll re-enter the
+    ///   approach regime below and re-approach.
     /// - **Approach** (farther): ramps with distance up to cruise, BUT
     ///   throttled by how badly the aircraft is off the bearing to the
     ///   target. At ≥ 45° off we creep; at ≥ 20° we use turn speed.
@@ -1480,7 +1484,7 @@ impl TaxiProfile {
             return 0.0;
         }
         if d < self.pose_pivot_radius_ft {
-            return 0.0;
+            return self.pose_creep_speed_kt;
         }
         let bearing_to_target = crate::types::vector_to_heading(to_target);
         let approach_hdg_err =
