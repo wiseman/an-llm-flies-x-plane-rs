@@ -1,0 +1,58 @@
+name: deadstick_kwhp_12
+
+# One-line elevator pitch: what is this testing?
+goal: |
+  Can the pilot fly an engine-out C172 to a landing at or near KWHP
+  runway 12 starting from a glide-slope-capturable position on the
+  extended centerline?
+
+description: |
+  C172 about 3 nm NW of KWHP on the extended centerline of runway 12, in
+  the air at ~2000 ft MSL (~1000 ft AGL) at best-glide speed, engines off.
+  There is plenty of altitude to make the runway if the pilot flies
+  pitch-for-best-glide and manages energy.
+
+# Everything under `setup.flight_init` goes verbatim into the
+# POST /api/v3/flight `data` body (X-Plane 12.4+ web API). `setup.datarefs`
+# writes happen after the flight loads; `setup.pause=true` pauses X-Plane
+# around the dataref writes.
+setup:
+  settle_s: 6.0
+  pause: false
+
+  flight_init:
+    aircraft:
+      path: "Aircraft/Laminar Research/Cessna 172 SP/Cessna_172SP.acf"
+    lle_air_start:
+      latitude: 34.27568
+      longitude: -118.45540
+      elevation_in_meters: 610.0     # ~2000 ft MSL (field elev 1005 ft)
+      heading_true: 118.0
+      speed_in_meters_per_second: 33.4   # ~65 kt best-glide
+      pitch_in_degrees: -3.0
+    engine_status:
+      all_engines:
+        running: false
+
+  datarefs:
+    sim/cockpit2/controls/flap_handle_request_ratio: 0.333
+    sim/cockpit2/controls/gear_handle_down: 1.0
+    sim/cockpit2/controls/parking_brake_ratio: 0.0
+
+pilot:
+  engage_profile: idle
+  atc_messages:
+    - "Whiteman traffic, Cessna 1234 three mile final runway 12, engine out, will attempt deadstick landing."
+  extra_args:
+    - --pilot-llm-model
+    - gpt-5.4-mini-2026-03-17
+
+# Stop-recording criteria. Harness does NOT judge pass/fail — it just
+# decides when to kill sim_pilot and write the report. The harness also
+# enforces its own hard 300 s ceiling on top of whatever is set here.
+termination:
+  terminate_on_crash: true
+  terminate_on_stopped: true
+  stopped_ground_speed_kt: 5.0
+  stopped_hold_s: 5.0
+  timeout_s: 300.0

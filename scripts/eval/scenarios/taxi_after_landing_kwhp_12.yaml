@@ -1,0 +1,70 @@
+name: taxi_after_landing_kwhp_12
+
+goal: |
+  After a normal landing on KWHP runway 12, does the pilot cleanly
+  exit the runway onto a taxiway and taxi to a GA parking spot?
+
+description: |
+  C172 on a stabilized approach 2 nm NW of KWHP rwy 12: 1000 ft AGL
+  (2005 ft MSL), 75 kt IAS, on the extended centerline, engines
+  running. This gives the pilot enough time to read the clearance,
+  engage pattern_fly on final, fly the approach and land normally.
+
+  The real test is what happens post-touchdown:
+
+    - Does pattern_fly's rollout bring the aircraft to turnoff speed?
+    - Does the pilot call list_runway_exits + choose_runway_exit, OR
+      engage_park during rollout with a destination in mind?
+    - Does the turn-off onto the taxiway happen cleanly?
+    - Does engage_park's planner produce a plausible route, and does
+      ground-speed control stop the aircraft with the nose aligned
+      to the parking spot's painted heading?
+
+  Setup note: X-Plane has been observed to auto-pause after a
+  flight_init POST. The harness unconditionally unpauses after setup
+  to keep the sim running regardless of `setup.pause`.
+
+setup:
+  settle_s: 4.0
+  pause: false
+
+  flight_init:
+    aircraft:
+      path: "Aircraft/Laminar Research/Cessna 172 SP/Cessna_172SP.acf"
+    # ~2 nm NW of the runway 12 threshold on the extended centerline,
+    # at 1000 ft AGL (2005 ft MSL = 611.1 m), runway heading, 75 kt
+    # approach speed (38.6 m/s), 2° nose-down.
+    lle_air_start:
+      latitude: 34.27440
+      longitude: -118.45000
+      elevation_in_meters: 611.1
+      heading_true: 118.0
+      speed_in_meters_per_second: 38.6
+      pitch_in_degrees: -2.0
+    engine_status:
+      all_engines:
+        running: true
+
+  datarefs:
+    # Approach config. Don't override throttle — let the engine-start
+    # sequence settle with X-Plane's default.
+    sim/cockpit2/controls/flap_handle_request_ratio: 0.667   # flaps 20
+    sim/cockpit2/controls/gear_handle_down: 1.0
+    sim/cockpit2/controls/parking_brake_ratio: 0.0
+    sim/cockpit2/engine/actuators/mixture_ratio_all: 1.0
+
+pilot:
+  engage_profile: idle
+  atc_messages:
+    - "Whiteman Tower, Cessna 1234, two mile final runway 12 with the numbers."
+    - "[atc] Cessna 1234, Whiteman Tower, cleared to land runway 12, wind calm. After landing, exit any available taxiway, taxi to general aviation parking."
+  extra_args:
+    - --pilot-llm-model
+    - gpt-5.4-mini-2026-03-17
+
+termination:
+  terminate_on_crash: true
+  terminate_on_stopped: true
+  stopped_ground_speed_kt: 2.0
+  stopped_hold_s: 10.0
+  timeout_s: 300.0

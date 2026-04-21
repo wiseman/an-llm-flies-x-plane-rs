@@ -33,7 +33,7 @@ use crate::sim::datarefs::{
     LONGITUDE_DEG, PARKING_BRAKE_RATIO,
 };
 use crate::sim::xplane_bridge::{geodetic_offset_ft, GeoReference};
-use crate::types::{heading_to_vector, FlightPhase, Runway, StraightLeg, TrafficSide};
+use crate::types::{heading_to_vector, FlightPhase, Runway, StraightLeg, TrafficSide, Vec2};
 
 pub const SQL_QUERY_MAX_ROWS: usize = 50;
 
@@ -304,7 +304,33 @@ pub fn airspace_source(ctx: &ToolContext) -> Option<AirspaceSource> {
 /// could go unreported). State-change heartbeats still fire regardless.
 const SLEEP_MAX_SUPPRESS_IDLE_S: f64 = 600.0;
 
+/// Epsilon below which we treat the aircraft as stationary. gs_kt comes
+/// from the dynamics estimator and can carry a sliver of sensor noise
+/// even when the aircraft is parked, so the cutoff is a small positive
+/// number rather than zero.
+const SLEEP_STATIONARY_GS_KT: f64 = 0.5;
+
 pub fn tool_sleep(ctx: &ToolContext, args: &Map<String, Value>) -> String {
+    // Refuse to sleep while the aircraft is moving AND no non-idle
+    // profile is flying it. `sleep` yields the turn and relies on the
+    // active profiles to keep flying — with only `idle_*` profiles
+    // engaged, dozing off just lets the aircraft coast uncontrolled.
+    // Once a real profile (pattern_fly, taxi, park, takeoff, any hold)
+    // owns the aircraft, sleep is the right thing to do even at speed.
+    let snapshot = ctx.pilot.lock().latest_snapshot.clone();
+    if let Some(snap) = snapshot {
+        let only_idle = snap
+            .active_profiles
+            .iter()
+            .all(|n| n.starts_with("idle_"));
+        if only_idle && snap.state.gs_kt > SLEEP_STATIONARY_GS_KT {
+            return format!(
+                "error: aircraft is moving at {:.1} kt groundspeed with only idle profiles active — sleep is only allowed when a control profile is flying the aircraft, or when stationary. Engage a control profile (engage_pattern_fly / engage_park / engage_taxi) or bring the aircraft to a stop before sleeping.",
+                snap.state.gs_kt,
+            );
+        }
+    }
+
     let requested = args.get("suppress_idle_heartbeat_s").and_then(|v| v.as_f64());
     if let Some(secs) = requested {
         let clamped = secs.clamp(0.0, SLEEP_MAX_SUPPRESS_IDLE_S);
@@ -977,7 +1003,7 @@ pub fn tool_extend_pattern_leg(ctx: &ToolContext, args: &Map<String, Value>) -> 
             }
         ),
         Some(Err(msg)) => format!("error: {}", msg),
-        None => "error: pattern_fly profile is not active".to_string(),
+        None => "error: pattern_fly profile is not active; call engage_pattern_fly first".to_string(),
     }
 }
 
@@ -994,7 +1020,7 @@ pub fn tool_execute_pattern_turn(ctx: &ToolContext, args: &Map<String, Value>) -
     };
     match with_pattern_profile(ctx, |p| p.execute_turn(leg)) {
         Some(_) => format!("turn to {} triggered", leg.as_str()),
-        None => "error: pattern_fly profile is not active".to_string(),
+        None => "error: pattern_fly profile is not active; call engage_pattern_fly first".to_string(),
     }
 }
 
@@ -1030,21 +1056,21 @@ pub fn tool_set_pattern_clearance(ctx: &ToolContext, args: &Map<String, Value>) 
             (_, true) => format!("{} clearance granted", gate.as_str()),
             (_, false) => format!("{} clearance revoked — ATC will call", gate.as_str()),
         },
-        None => "error: pattern_fly profile is not active".to_string(),
+        None => "error: pattern_fly profile is not active; call engage_pattern_fly first".to_string(),
     }
 }
 
 pub fn tool_go_around(ctx: &ToolContext, _args: &Map<String, Value>) -> String {
     match with_pattern_profile(ctx, |p| p.go_around()) {
         Some(_) => "go_around triggered".to_string(),
-        None => "error: pattern_fly profile is not active".to_string(),
+        None => "error: pattern_fly profile is not active; call engage_pattern_fly first".to_string(),
     }
 }
 
 pub fn tool_execute_touch_and_go(ctx: &ToolContext, _args: &Map<String, Value>) -> String {
     match with_pattern_profile(ctx, |p| p.execute_touch_and_go()) {
         Some(_) => "touch-and-go armed; landing will transition to takeoff_roll instead of rollout".to_string(),
-        None => "error: pattern_fly profile is not active".to_string(),
+        None => "error: pattern_fly profile is not active; call engage_pattern_fly first".to_string(),
     }
 }
 
@@ -1944,36 +1970,94 @@ pub fn tool_choose_runway_exit(ctx: &ToolContext, args: &Map<String, Value>) -> 
         Some(Value::String(s)) => Some(s.clone()),
         Some(other) => return format!("error: taxiway_name must be a string or null, got {other}"),
     };
+
+    // Must have pattern_fly engaged to set a preference. Check first so
+    // the error message is unambiguous (validation-before-engage would
+    // give confusing "runway not found" errors for a pilot who hasn't
+    // even engaged a profile yet).
+    if !ctx.pilot.lock().has_profile("pattern_fly") {
+        return "error: pattern_fly profile is not active; call engage_pattern_fly first".to_string();
+    }
+
+    // Validate the name against the real exit list for the active
+    // runway. Without this, list_runway_exits could return ["A", "12/30"]
+    // and the LLM would happily call choose_runway_exit("E") — the
+    // profile would silently accept the bogus name and the rollout
+    // controller would never find the exit. Errors from the exit lookup
+    // (e.g. runway not present in apt.dat cache) fall through — the
+    // preference is best-effort in that case.
+    if let Some(name) = &taxiway {
+        let (airport, runway) = {
+            let cfg = ctx.config.lock();
+            (cfg.airport.airport.clone(), cfg.airport.runway.id.clone())
+        };
+        if let (Some(airport), Some(runway)) = (airport, runway) {
+            if let Ok(exits) = runway_exits_for(ctx, &airport, &runway) {
+                if !exits.is_empty() && !exits.iter().any(|(n, _)| n == name) {
+                    let valid: Vec<String> = exits.iter().map(|(n, _)| n.clone()).collect();
+                    return format!(
+                        "error: unknown exit {:?} at {} runway {}; valid: {:?}",
+                        name, airport, runway, valid
+                    );
+                }
+            }
+        }
+    }
+
     let display = taxiway
         .as_deref()
         .map(|t| format!("preferred runway exit set to {:?}", t))
         .unwrap_or_else(|| "preferred runway exit cleared".to_string());
     match with_pattern_profile(ctx, |p| p.set_preferred_exit(taxiway)) {
         Some(_) => display,
-        None => "error: pattern_fly profile is not active".to_string(),
+        None => "error: pattern_fly profile is not active; call engage_pattern_fly first".to_string(),
     }
 }
 
-pub fn tool_list_runway_exits(ctx: &ToolContext, args: &Map<String, Value>) -> String {
-    let airport = match arg_str(args, "airport_ident") {
-        Ok(s) => s.to_string(),
-        Err(e) => return format!("error: {}", e),
-    };
-    let runway = match arg_str(args, "runway_ident") {
-        Ok(s) => s.to_string(),
-        Err(e) => return format!("error: {}", e),
-    };
+/// Shared core of list_runway_exits / choose_runway_exit validation.
+/// Returns (name, stationing_ft) pairs sorted by stationing, along with
+/// the runway's overall length. Errors as a String so either caller can
+/// surface it verbatim.
+fn runway_exits_for(
+    ctx: &ToolContext,
+    airport: &str,
+    runway: &str,
+) -> std::result::Result<Vec<(String, f64)>, String> {
+    let (_length_ft, exits) = runway_exits_with_length(ctx, airport, runway)?;
+    Ok(exits)
+}
 
+/// Geometry + exits packet returned by the shared runway-exit
+/// helper. The caller can project an arbitrary lat/lon onto the runway
+/// centerline (via `geodetic_offset_ft(.., georef).dot(forward)`) to
+/// compare positions against the exit stationings.
+struct RunwayExitInfo {
+    length_ft: f64,
+    georef: GeoReference,
+    forward: Vec2,
+    exits: Vec<(String, f64)>,
+}
+
+fn runway_exits_with_length(
+    ctx: &ToolContext,
+    airport: &str,
+    runway: &str,
+) -> std::result::Result<(f64, Vec<(String, f64)>), String> {
+    runway_exits_detail(ctx, airport, runway).map(|d| (d.length_ft, d.exits))
+}
+
+fn runway_exits_detail(
+    ctx: &ToolContext,
+    airport: &str,
+    runway: &str,
+) -> std::result::Result<RunwayExitInfo, String> {
     if let Err(e) = ensure_runway_conn(ctx) {
-        return format!("error: {}", e);
+        return Err(e.to_string());
     }
     let guard = ctx.runway_conn.lock().unwrap();
     let conn = guard.as_ref().unwrap();
 
-    // Landing-threshold endpoint + runway course for the named end, so we
-    // can project each exit's taxi node onto the runway centerline to
-    // recover its stationing.
-    let forms = taxi_route::runway_query_forms(&runway);
+    let forms = taxi_route::runway_query_forms(runway);
     let thresh: Result<(f64, f64, f64, f64), _> = conn.query_row(
         "SELECT \
              CASE WHEN le_ident = ? OR le_ident = ? THEN le_latitude_deg  ELSE he_latitude_deg  END, \
@@ -1989,14 +2073,14 @@ pub fn tool_list_runway_exits(ctx: &ToolContext, args: &Map<String, Value>) -> S
             forms[0].as_str(), forms[1].as_str(),
             forms[0].as_str(), forms[1].as_str(),
             forms[0].as_str(), forms[1].as_str(),
-            airport.as_str(),
+            airport,
             forms[0].as_str(), forms[1].as_str(), forms[0].as_str(), forms[1].as_str(),
         ],
         |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
     );
     let (thr_lat, thr_lon, course, length_ft) = match thresh {
         Ok(v) => v,
-        Err(e) => return format!("error: runway {:?} not found at {}: {}", runway, airport, e),
+        Err(e) => return Err(format!("runway {:?} not found at {}: {}", runway, airport, e)),
     };
 
     let georef = GeoReference {
@@ -2005,15 +2089,13 @@ pub fn tool_list_runway_exits(ctx: &ToolContext, args: &Map<String, Value>) -> S
     };
     let forward = heading_to_vector(course, 1.0);
 
-    // Walk every taxi edge whose 1204 active_zones name this runway, and
-    // project each endpoint onto the runway centerline to get stationing.
-    let graph = match taxi_route::load_graph(conn, &airport) {
+    let graph = match taxi_route::load_graph(conn, airport) {
         Ok(g) => g,
-        Err(e) => return format!("error: {}", e),
+        Err(e) => return Err(e.to_string()),
     };
     let mut filtered: Vec<(String, f64)> = Vec::new();
     for e in &graph.edges {
-        if !taxi_route::edge_conflicts_with_runway(e, &runway) {
+        if !taxi_route::edge_conflicts_with_runway(e, runway) {
             continue;
         }
         if e.name.is_empty() {
@@ -2031,24 +2113,74 @@ pub fn tool_list_runway_exits(ctx: &ToolContext, args: &Map<String, Value>) -> S
         }
         filtered.push((e.name.clone(), stationing));
     }
-    // Dedup by name, keeping the smallest stationing (the closest-to-
-    // threshold appearance of each named taxiway crossing).
     filtered.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.partial_cmp(&b.1).unwrap()));
     filtered.dedup_by(|a, b| a.0 == b.0);
     filtered.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+    Ok(RunwayExitInfo {
+        length_ft,
+        georef,
+        forward,
+        exits: filtered,
+    })
+}
 
-    if filtered.is_empty() {
+pub fn tool_list_runway_exits(ctx: &ToolContext, args: &Map<String, Value>) -> String {
+    let airport = match arg_str(args, "airport_ident") {
+        Ok(s) => s.to_string(),
+        Err(e) => return format!("error: {}", e),
+    };
+    let runway = match arg_str(args, "runway_ident") {
+        Ok(s) => s.to_string(),
+        Err(e) => return format!("error: {}", e),
+    };
+    let detail = match runway_exits_detail(ctx, &airport, &runway) {
+        Ok(v) => v,
+        Err(e) => return format!("error: {}", e),
+    };
+    if detail.exits.is_empty() {
         return format!(
             "no taxiway exits annotated for runway {} at {} in apt.dat",
             runway, airport
         );
     }
+
+    // Project the aircraft's current lat/lon onto the runway centerline
+    // to annotate each exit with its distance relative to where the
+    // aircraft is right now. Without this the LLM has no signal for
+    // which exits are ahead vs already passed, and has been observed
+    // picking exits that were already behind the aircraft.
+    let current_st = ctx.bridge.as_deref().and_then(|b| {
+        let lat = b.get_dataref_value(LATITUDE_DEG.name)?;
+        let lon = b.get_dataref_value(LONGITUDE_DEG.name)?;
+        let p = geodetic_offset_ft(lat, lon, detail.georef);
+        Some(p.x * detail.forward.x + p.y * detail.forward.y)
+    });
+
     let mut out = format!(
         "exits for {} runway {} (length {:.0} ft, threshold at 0):\n",
-        airport, runway, length_ft
+        airport, runway, detail.length_ft
     );
-    for (name, st) in &filtered {
-        out.push_str(&format!("  {}\t{:.0} ft\n", name, st));
+    if let Some(cur) = current_st {
+        out.push_str(&format!(
+            "aircraft currently at {:.0} ft along-track on runway centerline.\n",
+            cur
+        ));
+    }
+    for (name, st) in &detail.exits {
+        match current_st {
+            Some(cur) => {
+                let delta = st - cur;
+                let note = if delta > 50.0 {
+                    format!("{:.0} ft ahead", delta)
+                } else if delta < -50.0 {
+                    format!("{:.0} ft behind — already passed", -delta)
+                } else {
+                    "abeam".to_string()
+                };
+                out.push_str(&format!("  {}\t{:.0} ft\t({})\n", name, st, note));
+            }
+            None => out.push_str(&format!("  {}\t{:.0} ft\n", name, st)),
+        }
     }
     out
 }

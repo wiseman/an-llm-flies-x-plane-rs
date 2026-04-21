@@ -547,6 +547,30 @@ pub fn run_live_xplane(base_config: ConfigBundle, runtime: LiveRunConfig) -> Res
 
     let control_stop = Arc::new(AtomicBool::new(false));
 
+    // Install a SIGINT/SIGTERM handler that sets the same stop flags the
+    // TUI/headless drain path already uses. This way `kill -TERM <pid>`
+    // and Ctrl-C in a headless terminal both trigger the normal cleanup
+    // sequence (control loop exits → track KML is finalized → bridge
+    // closes → bus closes) instead of tearing down mid-write.
+    // A second signal arms a hard-exit fallback so a hung shutdown can
+    // still be killed by the operator.
+    {
+        let control_stop = control_stop.clone();
+        let llm_stop = llm_stop.clone();
+        let bus = bus.clone();
+        let armed = Arc::new(AtomicBool::new(false));
+        let _ = ctrlc::set_handler(move || {
+            if armed.swap(true, Ordering::AcqRel) {
+                // Second signal — user wants out now.
+                bus.push_log("[shutdown] second signal received, exiting hard".to_string());
+                std::process::exit(130);
+            }
+            bus.push_log("[shutdown] signal received, draining...".to_string());
+            control_stop.store(true, Ordering::Release);
+            llm_stop.store(true, Ordering::Release);
+        });
+    }
+
     if runtime.interactive {
         let pilot_for_loop = pilot_arc.clone();
         let bridge_for_loop = bridge.clone();

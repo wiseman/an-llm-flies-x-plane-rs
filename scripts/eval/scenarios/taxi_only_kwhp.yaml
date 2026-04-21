@@ -1,0 +1,58 @@
+name: taxi_only_kwhp
+
+goal: |
+  After clearing the runway onto taxiway A at KWHP, does the pilot
+  plan and execute a taxi to a GA parking spot?
+
+description: |
+  C172 spawned stationary on taxiway A at KWHP, just off the runway 12
+  landing threshold, engine running. This scenario isolates the taxi-
+  to-parking behavior from approach / landing / runway-exit: the pilot
+  has no landing to fly, no rollout to manage, no exit to pick — the
+  only job is to figure out where to taxi and call engage_park.
+
+  Why a separate scenario: the combined "land + exit + taxi" test
+  kept failing at different stages (hallucinated parking names,
+  long-float landings past all exits, pilot skipping engage_park).
+  Isolating the taxi part gives a clean signal on the taxi planner
+  and the pilot's post-exit tool usage.
+
+setup:
+  settle_s: 2.0
+  pause: false
+
+  flight_init:
+    aircraft:
+      path: "Aircraft/Laminar Research/Cessna 172 SP/Cessna_172SP.acf"
+    # Taxiway A node 37 (34.26372, -118.41756) — just off runway 12's
+    # landing threshold. Facing south-east along taxiway A.
+    lle_ground_start:
+      latitude: 34.26372
+      longitude: -118.41756
+      heading_true: 160.0
+
+  # lle_ground_start spawns engines off, but writing mixture + a little
+  # throttle below reliably spools the engine up to idle RPM without a
+  # dedicated starter command.
+  datarefs:
+    sim/cockpit2/controls/flap_handle_request_ratio: 0.0
+    sim/cockpit2/controls/gear_handle_down: 1.0
+    sim/cockpit2/controls/parking_brake_ratio: 0.0
+    sim/cockpit2/engine/actuators/mixture_ratio_all: 1.0
+    sim/cockpit2/engine/actuators/throttle_ratio_all: 0.15
+
+pilot:
+  engage_profile: idle
+  atc_messages:
+    - "[atc] Cessna 1234, Whiteman Ground, cleared to taxi to Ramp Parking via Alpha."
+    - "You just cleared runway 12 onto taxiway Alpha at KWHP. Engine is running, parking brake is off. Your clearance is to taxi to 'Ramp Parking' — call engage_park(airport_ident='KWHP', parking_name='Ramp Parking') to begin taxiing."
+  extra_args:
+    - --pilot-llm-model
+    - gpt-5.4-mini-2026-03-17
+
+termination:
+  terminate_on_crash: true
+  terminate_on_stopped: true
+  stopped_ground_speed_kt: 2.0
+  stopped_hold_s: 10.0
+  timeout_s: 300.0

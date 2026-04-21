@@ -821,6 +821,63 @@ fn sleep_returns_string() {
 }
 
 #[test]
+fn sleep_refuses_when_moving_with_only_idle_profiles() {
+    let ctx = make_ctx(None, None);
+    seed_snapshot(&ctx, 0, true);
+    // Overwrite gs_kt to simulate the aircraft rolling. The default
+    // profile set is idle_* only, so this should trip the guard.
+    {
+        let mut pilot = ctx.pilot.lock();
+        let snap = pilot.latest_snapshot.as_mut().unwrap();
+        snap.state.gs_kt = 12.3;
+    }
+    let r = dispatch_tool(&call("sleep", json!({})), &ctx);
+    assert!(r.starts_with("error:"), "expected refusal, got {}", r);
+    assert!(r.contains("12.3"));
+    assert!(r.contains("engage"));
+}
+
+#[test]
+fn sleep_allows_when_moving_with_non_idle_profile_active() {
+    // Once pattern_fly / taxi / park / takeoff is flying the aircraft
+    // it's fine to sleep — the autopilot is doing its job.
+    let ctx = make_ctx(None, None);
+    seed_snapshot(&ctx, 0, true);
+    {
+        let mut pilot = ctx.pilot.lock();
+        let snap = pilot.latest_snapshot.as_mut().unwrap();
+        snap.state.gs_kt = 65.0;
+        snap.active_profiles = vec!["pattern_fly".to_string()];
+    }
+    let r = dispatch_tool(&call("sleep", json!({})), &ctx);
+    assert!(!r.starts_with("error:"), "expected sleep to succeed with pattern_fly active, got {}", r);
+    assert!(r.contains("sleeping"));
+}
+
+#[test]
+fn sleep_allows_when_aircraft_is_stationary() {
+    let ctx = make_ctx(None, None);
+    seed_snapshot(&ctx, 0, true);
+    // gs_kt defaults to 0.0 in seed_snapshot — leave it.
+    let r = dispatch_tool(&call("sleep", json!({})), &ctx);
+    assert!(!r.starts_with("error:"), "expected sleep to succeed, got {}", r);
+    assert!(r.contains("sleeping"));
+}
+
+#[test]
+fn sleep_allows_at_tiny_sensor_noise_below_epsilon() {
+    let ctx = make_ctx(None, None);
+    seed_snapshot(&ctx, 0, true);
+    {
+        let mut pilot = ctx.pilot.lock();
+        let snap = pilot.latest_snapshot.as_mut().unwrap();
+        snap.state.gs_kt = 0.3; // below the 0.5 kt epsilon
+    }
+    let r = dispatch_tool(&call("sleep", json!({})), &ctx);
+    assert!(!r.starts_with("error:"), "expected sleep to succeed below epsilon, got {}", r);
+}
+
+#[test]
 fn sleep_with_suppress_arg_is_noop_without_pump() {
     // In tests the ToolContext has no heartbeat_pump; the sleep handler must
     // still accept the new arg and return a sensible string instead of panicking.
@@ -1609,6 +1666,51 @@ fn choose_runway_exit_records_preference_on_pattern_profile() {
         &ctx,
     );
     assert!(cleared.contains("cleared"), "got: {}", cleared);
+}
+
+#[test]
+fn choose_runway_exit_rejects_unknown_exit_with_valid_list() {
+    // At KEXIT rwy 09 the fake parquet defines taxiways A5 (near
+    // threshold) and A7 (farther down). Asking for "Z" should surface
+    // an error including the two valid names so the LLM can retry.
+    let dir = TempDir::new().unwrap();
+    let extra = vec![
+        "1 0 0 0 KEXIT KEXIT Test Exit Airport\n\
+         100 45.72 1 0 0.00 1 2 0 09 45.0 -122.0 0 0 1 0 0 0 27 45.0 -122.001 0 0 1 0 0 0\n\
+         1201 45.001 -122.0005 both 100 gate1\n\
+         1201 45.0005 -122.0005 both 101 gateA5\n\
+         1201 45.00025 -122.0005 both 102 gateA7\n\
+         1202 100 101 twoway taxi A5\n\
+         1204 departure 09,27\n\
+         1204 arrival 09,27\n\
+         1202 101 102 twoway taxi A7\n\
+         1204 departure 09,27\n\
+         1204 arrival 09,27\n\
+         1300 45.0005 -122.0007 90.0 gate jets|turboprops Gate 1\n"
+            .to_string(),
+    ];
+    build_fake_parquet(dir.path(), &extra);
+    let (ctx, _bridge) = make_ctx_with_parquet(dir.path());
+    dispatch_tool(
+        &call(
+            "engage_pattern_fly",
+            json!({
+                "airport_ident": "KEXIT",
+                "runway_ident": "09",
+                "side": "left",
+                "start_phase": "takeoff_roll",
+            }),
+        ),
+        &ctx,
+    );
+    let r = dispatch_tool(
+        &call("choose_runway_exit", json!({"taxiway_name": "Z"})),
+        &ctx,
+    );
+    assert!(r.starts_with("error"), "got: {}", r);
+    assert!(r.contains("\"Z\""), "got: {}", r);
+    assert!(r.contains("A5"), "valid list missing A5: {}", r);
+    assert!(r.contains("A7"), "valid list missing A7: {}", r);
 }
 
 #[test]
