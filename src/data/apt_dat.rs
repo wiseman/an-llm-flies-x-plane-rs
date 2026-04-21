@@ -10,6 +10,8 @@
 //! - row 1302 (airport identification metadata — ICAO / IATA / FAA /
 //!   datum_lat / datum_lon)
 //! - rows 1050..=1056 (comm frequencies: ATIS, UNICOM, CD, GND, TWR, APP, DEP)
+//! - row 1300 (startup/parking locations — gate, tie-down, hangar, misc)
+//!   plus optional 1301 operation metadata
 //!
 //! apt.dat's row 100 does not store per-end heading, runway length, or
 //! per-end elevation. These are derived from the two end coordinates
@@ -125,6 +127,35 @@ pub struct ParsedActiveZone {
     pub runways: String,
 }
 
+/// A startup / parking location (apt.dat row 1300) plus any attached 1301
+/// operation metadata. apt.dat only pairs one 1301 with the preceding 1300
+/// — so we fold the 1301 fields directly onto the spot instead of keeping
+/// a separate struct.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ParsedParkingSpot {
+    pub airport_ident: String,
+    pub latitude_deg: f64,
+    pub longitude_deg: f64,
+    /// True heading the aircraft should face when parked, in degrees.
+    pub heading_true_deg: f64,
+    /// Kind token: "gate", "tie_down", "hangar", or "misc".
+    pub kind: String,
+    /// Pipe-separated categories from apt.dat, preserved raw:
+    /// e.g. "heavy|jets|turboprops|props|helos". Empty string if absent.
+    pub categories: String,
+    /// Free-form spot name ("Ramp 1", "Gate A4", "GA Tie-Down 3").
+    pub name: String,
+    /// ICAO airline-operations category from 1301 (single token like "A",
+    /// "B" through "F", or a pipe list). None when no 1301 follows.
+    pub icao_category: Option<String>,
+    /// Operation type from 1301: "none", "general_aviation", "airline",
+    /// "cargo", or "military". None when no 1301 follows.
+    pub operation_type: Option<String>,
+    /// Comma-separated 3-letter airline codes from 1301 (free-form, may be
+    /// empty even when 1301 is present).
+    pub airlines: Option<String>,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct ParsedAptDat {
     pub airports: Vec<ParsedAirport>,
@@ -132,6 +163,7 @@ pub struct ParsedAptDat {
     pub comms: Vec<ParsedComm>,
     pub taxi_nodes: Vec<ParsedTaxiNode>,
     pub taxi_edges: Vec<ParsedTaxiEdge>,
+    pub parking_spots: Vec<ParsedParkingSpot>,
 }
 
 pub fn parse<R: BufRead>(reader: R) -> Result<ParsedAptDat> {
@@ -140,6 +172,8 @@ pub fn parse<R: BufRead>(reader: R) -> Result<ParsedAptDat> {
     // Index of the last 1202 edge pushed, so any 1204 rows that follow can
     // attach to it. Reset between airports.
     let mut last_edge_idx: Option<usize> = None;
+    // Index of the last 1300 parking spot pushed, for 1301 attachment.
+    let mut last_parking_idx: Option<usize> = None;
 
     for (i, line) in reader.lines().enumerate() {
         let line = line.with_context(|| format!("reading line {}", i + 1))?;
@@ -161,6 +195,7 @@ pub fn parse<R: BufRead>(reader: R) -> Result<ParsedAptDat> {
                 }
                 cur = parse_airport_header(rest);
                 last_edge_idx = None;
+                last_parking_idx = None;
             }
             "100" => {
                 if let Some(a) = cur.as_ref() {
@@ -203,6 +238,21 @@ pub fn parse<R: BufRead>(reader: R) -> Result<ParsedAptDat> {
                     if let Some(zone) = parse_active_zone(rest) {
                         out.taxi_edges[idx].active_zones.push(zone);
                     }
+                }
+            }
+            "1300" => {
+                if let Some(a) = cur.as_ref() {
+                    if let Some(spot) = parse_parking_spot(rest, &a.ident) {
+                        out.parking_spots.push(spot);
+                        last_parking_idx = Some(out.parking_spots.len() - 1);
+                    } else {
+                        last_parking_idx = None;
+                    }
+                }
+            }
+            "1301" => {
+                if let Some(idx) = last_parking_idx {
+                    apply_1301(rest, &mut out.parking_spots[idx]);
                 }
             }
             _ => {}
@@ -365,6 +415,48 @@ fn parse_taxi_edge(rest: &str, airport_ident: &str) -> Option<ParsedTaxiEdge> {
     })
 }
 
+fn parse_parking_spot(rest: &str, airport_ident: &str) -> Option<ParsedParkingSpot> {
+    // 1300 <lat> <lon> <heading_true> <type> <categories> <name ...>
+    // `categories` is a single pipe-separated token (no whitespace), so
+    // splitn(6, ws) keeps `name` — which may contain whitespace — intact.
+    let mut parts = rest.splitn(6, char::is_whitespace).filter(|s| !s.is_empty());
+    let lat: f64 = parts.next()?.parse().ok()?;
+    let lon: f64 = parts.next()?.parse().ok()?;
+    let heading: f64 = parts.next()?.parse().ok()?;
+    let kind = parts.next()?.to_string();
+    let categories = parts.next().unwrap_or("").to_string();
+    let name = parts.next().unwrap_or("").trim().to_string();
+    Some(ParsedParkingSpot {
+        airport_ident: airport_ident.to_string(),
+        latitude_deg: lat,
+        longitude_deg: lon,
+        heading_true_deg: heading.rem_euclid(360.0),
+        kind,
+        categories,
+        name,
+        icao_category: None,
+        operation_type: None,
+        airlines: None,
+    })
+}
+
+fn apply_1301(rest: &str, spot: &mut ParsedParkingSpot) {
+    // 1301 <icao_aircraft_category> <operation_type> [airline_codes ...]
+    let mut parts = rest.splitn(3, char::is_whitespace).filter(|s| !s.is_empty());
+    if let Some(cat) = parts.next() {
+        spot.icao_category = Some(cat.to_string());
+    }
+    if let Some(op) = parts.next() {
+        spot.operation_type = Some(op.to_string());
+    }
+    if let Some(airlines) = parts.next() {
+        let trimmed = airlines.trim();
+        if !trimmed.is_empty() {
+            spot.airlines = Some(trimmed.to_string());
+        }
+    }
+}
+
 fn parse_active_zone(rest: &str) -> Option<ParsedActiveZone> {
     // 1204 <kind> <runway1,runway2,...>
     let mut parts = rest.splitn(2, char::is_whitespace);
@@ -504,6 +596,9 @@ A
 1204 departure 10L,28R
 1204 ils 28R
 1202 3 1 oneway taxiway_F Z
+1300 37.615930 -122.371120 295.9 gate jets|turboprops|props Gate A4
+1301 D airline UAL,DAL
+1300 37.616120 -122.370450 115.1 tie_down props|helos GA Tie-Down 1
 99
 ";
 
@@ -639,6 +734,53 @@ A
             .find(|e| e.airport_ident == "KSFO" && e.name == "A")
             .unwrap();
         assert!(edge_a.active_zones.is_empty());
+    }
+
+    #[test]
+    fn parses_parking_spots_with_and_without_1301() {
+        let data = parse_fixture();
+        let ksfo: Vec<_> = data
+            .parking_spots
+            .iter()
+            .filter(|p| p.airport_ident == "KSFO")
+            .collect();
+        assert_eq!(ksfo.len(), 2);
+
+        let gate = &ksfo[0];
+        assert_eq!(gate.name, "Gate A4");
+        assert_eq!(gate.kind, "gate");
+        assert_eq!(gate.categories, "jets|turboprops|props");
+        assert!((gate.heading_true_deg - 295.9).abs() < 1e-6);
+        assert_eq!(gate.icao_category.as_deref(), Some("D"));
+        assert_eq!(gate.operation_type.as_deref(), Some("airline"));
+        assert_eq!(gate.airlines.as_deref(), Some("UAL,DAL"));
+
+        let tie = &ksfo[1];
+        assert_eq!(tie.name, "GA Tie-Down 1");
+        assert_eq!(tie.kind, "tie_down");
+        assert_eq!(tie.categories, "props|helos");
+        assert!(tie.icao_category.is_none());
+        assert!(tie.operation_type.is_none());
+        assert!(tie.airlines.is_none());
+    }
+
+    #[test]
+    fn parking_1301_does_not_leak_across_airports() {
+        // Synthesize: airport A has 1300 without 1301, then airport B starts
+        // and its first row is 1301 — which must NOT attach to airport A's
+        // spot.
+        let fixture = "\
+1     10 0 0 KAAA A
+1302 icao_code KAAA
+1300 10.0 20.0 0 gate jets Spot 1
+
+1     10 0 0 KBBB B
+1301 C airline XXX
+99
+";
+        let data = parse(fixture.as_bytes()).unwrap();
+        assert_eq!(data.parking_spots.len(), 1);
+        assert!(data.parking_spots[0].icao_category.is_none());
     }
 
     #[test]

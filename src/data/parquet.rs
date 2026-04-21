@@ -36,6 +36,7 @@ pub const RUNWAYS_FILE: &str = "runways.parquet";
 pub const COMMS_FILE: &str = "comms.parquet";
 pub const TAXI_NODES_FILE: &str = "taxi_nodes.parquet";
 pub const TAXI_EDGES_FILE: &str = "taxi_edges.parquet";
+pub const PARKING_SPOTS_FILE: &str = "parking_spots.parquet";
 pub const AIRSPACES_FILE: &str = "airspaces.parquet";
 
 pub struct AptDatCache {
@@ -58,16 +59,20 @@ impl AptDatCache {
     pub fn taxi_edges(&self) -> PathBuf {
         self.dir.join(TAXI_EDGES_FILE)
     }
+    pub fn parking_spots(&self) -> PathBuf {
+        self.dir.join(PARKING_SPOTS_FILE)
+    }
     pub fn airspaces(&self) -> PathBuf {
         self.dir.join(AIRSPACES_FILE)
     }
-    pub fn apt_dat_files(&self) -> [PathBuf; 5] {
+    pub fn apt_dat_files(&self) -> [PathBuf; 6] {
         [
             self.airports(),
             self.runways(),
             self.comms(),
             self.taxi_nodes(),
             self.taxi_edges(),
+            self.parking_spots(),
         ]
     }
     pub fn apt_dat_files_exist(&self) -> bool {
@@ -105,7 +110,7 @@ pub fn resolve(apt_dat: &Path, airspace_txt: Option<&Path>) -> Result<AptDatCach
 /// added or removed files) in an incompatible way. Folded into the cache
 /// directory hash, so old caches are transparently ignored and rebuilt
 /// rather than producing SQL errors against stale columns.
-const SCHEMA_VERSION: u64 = 2;
+const SCHEMA_VERSION: u64 = 3;
 
 fn cache_for(apt_dat: &Path) -> Result<AptDatCache> {
     let home = std::env::var_os("HOME")
@@ -196,11 +201,13 @@ fn write_parquets(
     create_comm_table(&conn, &parsed.comms)?;
     create_taxi_node_table(&conn, &parsed.taxi_nodes)?;
     create_taxi_edge_table(&conn, &parsed.taxi_edges)?;
+    create_parking_spot_table(&conn, &parsed.parking_spots)?;
     copy_to_parquet(&conn, "airports", &cache.airports())?;
     copy_to_parquet(&conn, "runways", &cache.runways())?;
     copy_to_parquet(&conn, "comms", &cache.comms())?;
     copy_to_parquet(&conn, "taxi_nodes", &cache.taxi_nodes())?;
     copy_to_parquet(&conn, "taxi_edges", &cache.taxi_edges())?;
+    copy_to_parquet(&conn, "parking_spots", &cache.parking_spots())?;
     if write_airspaces {
         create_airspace_table(&conn, airspaces)?;
         copy_to_parquet(&conn, "airspaces", &cache.airspaces())?;
@@ -401,6 +408,56 @@ fn create_taxi_edge_table(conn: &Connection, edges: &[apt_dat::ParsedTaxiEdge]) 
     Ok(())
 }
 
+fn create_parking_spot_table(
+    conn: &Connection,
+    spots: &[apt_dat::ParsedParkingSpot],
+) -> Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE parking_spots_raw (
+            airport_ident VARCHAR,
+            name VARCHAR,
+            kind VARCHAR,
+            categories VARCHAR,
+            heading_true_deg DOUBLE,
+            latitude_deg DOUBLE,
+            longitude_deg DOUBLE,
+            icao_category VARCHAR,
+            operation_type VARCHAR,
+            airlines VARCHAR
+        );",
+    )?;
+    {
+        let mut app = conn.appender("parking_spots_raw")?;
+        for s in spots {
+            app.append_row(params![
+                s.airport_ident,
+                s.name,
+                s.kind,
+                s.categories,
+                s.heading_true_deg,
+                s.latitude_deg,
+                s.longitude_deg,
+                s.icao_category.as_deref(),
+                s.operation_type.as_deref(),
+                s.airlines.as_deref(),
+            ])?;
+        }
+        app.flush()?;
+    }
+    conn.execute_batch(
+        "CREATE TABLE parking_spots AS
+         SELECT airport_ident, name, kind, categories, heading_true_deg,
+                latitude_deg, longitude_deg,
+                icao_category, operation_type, airlines
+         FROM parking_spots_raw
+         ORDER BY ST_Hilbert(
+                      ST_Point(longitude_deg, latitude_deg),
+                      ST_Extent(ST_MakeEnvelope(-180, -90, 180, 90))
+                  );",
+    )?;
+    Ok(())
+}
+
 fn create_airspace_table(
     conn: &Connection,
     airspaces: &[airspace::ParsedAirspace],
@@ -522,6 +579,9 @@ mod tests {
 
 1     13 0 0 KSFO San Francisco Intl
 100 61.00 1 0 0.0 1 3 0 10L 37.62875970 -122.39343890 0 250 3 0 0 3 28R 37.61353400 -122.35715510 90 100 3 2 1 3
+1300 37.615930 -122.371120 295.9 gate jets|turboprops|props Gate A4
+1301 D airline UAL,DAL
+1300 37.616120 -122.370450 115.1 tie_down props|helos GA Tie-Down 1
 99
 ";
 
@@ -706,6 +766,41 @@ DP 37:30:00 N 122:10:00 W
             .unwrap();
         assert_eq!(airport, "KSEA");
         assert_eq!(zones, "departure:16L");
+    }
+
+    #[test]
+    fn parking_spots_round_trip() {
+        let (_tmp, cache) = build_fixture_cache();
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("INSTALL spatial; LOAD spatial;").unwrap();
+        let n: i64 = conn
+            .query_row(
+                &format!(
+                    "SELECT COUNT(*) FROM read_parquet('{}')",
+                    cache.parking_spots().display()
+                ),
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 2);
+
+        let (name, kind, cats, heading, op): (String, String, String, f64, Option<String>) = conn
+            .query_row(
+                &format!(
+                    "SELECT name, kind, categories, heading_true_deg, operation_type \
+                     FROM read_parquet('{}') WHERE name = 'Gate A4'",
+                    cache.parking_spots().display()
+                ),
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )
+            .unwrap();
+        assert_eq!(name, "Gate A4");
+        assert_eq!(kind, "gate");
+        assert_eq!(cats, "jets|turboprops|props");
+        assert!((heading - 295.9).abs() < 1e-6);
+        assert_eq!(op.as_deref(), Some("airline"));
     }
 
     #[test]
