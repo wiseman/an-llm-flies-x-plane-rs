@@ -66,9 +66,11 @@ struct Cli {
     #[arg(long = "atc-message")]
     atc_message: Vec<String>,
 
-    /// Read ATC/operator messages from the TUI during a live X-Plane run.
+    /// Skip the TUI. The session runs headless, logging to stdout and
+    /// reading any startup messages from `--atc-message`. Useful for
+    /// scripted or non-interactive runs.
     #[arg(long)]
-    interactive_atc: bool,
+    headless: bool,
 
     #[arg(long, default_value_t = 10.0)]
     control_hz: f64,
@@ -303,7 +305,7 @@ fn main() -> Result<()> {
                     llm_model: args.pilot_llm_model,
                     llm_reasoning_effort: args.pilot_llm_reasoning_effort,
                     atc_messages: args.atc_message,
-                    interactive: args.interactive_atc,
+                    interactive: !args.headless,
                     control_hz: args.control_hz,
                     status_interval_s: args.status_interval_s,
                     engage_profile: args.engage_profile,

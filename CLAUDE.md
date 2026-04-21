@@ -11,7 +11,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 # ~/.cache/sim_pilot/apt-<hash>/; pass --apt-dat-path to override the
 # autodetected location.
 cargo run --release --                     # default: --backend xplane
-cargo run --release -- --interactive-atc --pilot-llm-model gpt-5.4-mini-2026-03-17
+cargo run --release -- --pilot-llm-model gpt-5.4-mini-2026-03-17
 
 # Offline deterministic simulation (no X-Plane, no OpenAI key).
 cargo run --release -- --backend simple
@@ -60,7 +60,7 @@ Both backends share `load_default_config_bundle()`, `PilotCore`, `RunwayFrame`, 
 ### Runtime plumbing (live backend)
 
 - **`SimBus`** (`src/bus.rs`) — thread-safe output bus with status (single-line overwrite) / log (scrolling) / radio (ATC transmissions) channels. Optional `FileLog` writes timestamped transcripts to `output/sim_pilot-*.log`.
-- **`tui.rs`** — ratatui-based interactive TUI with four panes (status / log / radio / input). Runs on the main thread when `--interactive-atc` is set; the control loop moves to its own thread. **`Paragraph::line_count` + `.scroll()`** is used to keep the log/radio panes pinned to the bottom when lines wrap (requires ratatui's `unstable-rendered-line-info` feature — called out in `Cargo.toml`).
+- **`tui.rs`** — ratatui-based interactive TUI with four panes (status / log / radio / input). Runs on the main thread by default (pass `--headless` to disable); the control loop moves to its own thread. **`Paragraph::line_count` + `.scroll()`** is used to keep the log/radio panes pinned to the bottom when lines wrap (requires ratatui's `unstable-rendered-line-info` feature — called out in `Cargo.toml`).
 - **`HeartbeatPump`** (`src/live_runner.rs`) — wakes the LLM worker on phase or profile changes and after `heartbeat_interval_s` of idle. Embeds a `build_status_payload` JSON blob in each heartbeat so the LLM doesn't need to call `get_status` just to see state.
 - **`ToolBridge` trait** (`src/llm/tools.rs`) — abstract interface for dataref reads/writes, implemented by `XPlaneWebBridge` and by `FakeBridge` in `tests/test_tool_dispatch.rs`. Tool handlers never see the concrete bridge type.
 

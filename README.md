@@ -40,9 +40,8 @@ Live-mode DuckDB uses the spatial extension. The first run that touches the `sql
 Requires X-Plane 12 running with the built-in web API enabled on port 8086, and an `OPENAI_API_KEY` (a `.env` file in the working directory is read at startup). For push-to-talk voice transcription, also set `DEEPGRAM_API_KEY`.
 
 ```bash
-cargo run --release --                                      # default: --backend xplane
+cargo run --release --                                      # default: --backend xplane, interactive TUI
 cargo run --release -- \
-  --interactive-atc \
   --pilot-llm-model gpt-5.4-mini-2026-03-17
 ```
 
@@ -62,7 +61,7 @@ Common flags:
 
 | Flag                                  | Effect                                                                                                     |
 | ------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
-| `--interactive-atc`                   | Launches the TUI. Without it the session is headless and reads `--atc-message` strings on startup.         |
+| `--headless`                          | Skip the TUI; log to stdout and read startup messages from `--atc-message`. Default is the interactive TUI.|
 | `--apt-dat-path <path>`               | Override the autodetected X-Plane 12 `apt.dat`. Caches to `~/.cache/sim_pilot/apt-<hash>/`.                |
 | `--airspace-txt-path <path>`          | Override the autodetected X-Plane 12 `airspace.txt`. Enables the heartbeat `airspace` awareness field.     |
 | `--heartbeat-interval <s>`            | Idle cadence for the LLM heartbeat pump (default 30 s). The pump also wakes on phase/profile events.       |
