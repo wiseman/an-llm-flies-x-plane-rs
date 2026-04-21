@@ -23,7 +23,8 @@ use crate::core::profiles::{
 };
 use crate::data::airspace_query::{self, AircraftSnapshot, AirspaceSource};
 use crate::data::parquet::{
-    AIRPORTS_FILE, AIRSPACES_FILE, COMMS_FILE, RUNWAYS_FILE, TAXI_EDGES_FILE, TAXI_NODES_FILE,
+    AIRPORTS_FILE, AIRSPACES_FILE, COMMS_FILE, PARKING_SPOTS_FILE, RUNWAYS_FILE, TAXI_EDGES_FILE,
+    TAXI_NODES_FILE,
 };
 use crate::guidance::runway_geometry::RunwayFrame;
 use crate::guidance::taxi_route::{self, TaxiDestination};
@@ -441,7 +442,8 @@ pub fn ensure_runway_conn(ctx: &ToolContext) -> Result<()> {
     let comms = dir.join(COMMS_FILE);
     let taxi_nodes = dir.join(TAXI_NODES_FILE);
     let taxi_edges = dir.join(TAXI_EDGES_FILE);
-    for p in [&airports, &runways, &comms, &taxi_nodes, &taxi_edges] {
+    let parking_spots = dir.join(PARKING_SPOTS_FILE);
+    for p in [&airports, &runways, &comms, &taxi_nodes, &taxi_edges, &parking_spots] {
         if !p.exists() {
             return Err(anyhow!("parquet file missing at {}", p.display()));
         }
@@ -501,12 +503,19 @@ pub fn open_apt_dat_parquet(
                   ST_Point(longitude_deg, latitude_deg) AS point
            FROM read_parquet('{taxi_nodes}');
          CREATE VIEW taxi_edges AS
-           SELECT * FROM read_parquet('{taxi_edges}');",
+           SELECT * FROM read_parquet('{taxi_edges}');
+         CREATE VIEW parking_spots AS
+           SELECT airport_ident, name, kind, categories,
+                  heading_true_deg, latitude_deg, longitude_deg,
+                  icao_category, operation_type, airlines,
+                  ST_Point(longitude_deg, latitude_deg) AS location
+           FROM read_parquet('{parking_spots}');",
         airports = airports.display(),
         runways = runways.display(),
         comms = comms.display(),
         taxi_nodes = dir_join(airports, TAXI_NODES_FILE).display(),
         taxi_edges = dir_join(airports, TAXI_EDGES_FILE).display(),
+        parking_spots = dir_join(airports, PARKING_SPOTS_FILE).display(),
     ))?;
     // The airspaces parquet is opt-in (built only when airspace.txt was
     // located). The view is registered only when the file is present so
@@ -1418,6 +1427,22 @@ fn start_heading_deg(bridge: &Arc<dyn ToolBridge>) -> f64 {
     bridge.get_dataref_value(HEADING_DEG.name).unwrap_or(0.0)
 }
 
+/// Heading in degrees for the plan-only tools, which may or may not have
+/// a bridge. Preference: explicit `start_heading_deg` arg → bridge → 0.
+/// With heading = 0 and no runway directly north-south, the
+/// `forbid_backward_runway_traversals` output may not match the aircraft's
+/// real orientation, but `plan_taxi_route`/`plan_park_route` are previews
+/// only — the real engage-* path reads bridge heading directly.
+fn bridge_heading_or_arg(ctx: &ToolContext, args: &Map<String, Value>) -> f64 {
+    if let Some(h) = args.get("start_heading_deg").and_then(|v| v.as_f64()) {
+        return h;
+    }
+    if let Some(b) = ctx.bridge.as_ref() {
+        return start_heading_deg(b);
+    }
+    0.0
+}
+
 pub fn tool_engage_taxi(ctx: &ToolContext, args: &Map<String, Value>) -> String {
     let bridge = match ctx.bridge.as_ref() {
         Some(b) => b.clone(),
@@ -1504,12 +1529,19 @@ pub fn tool_engage_taxi(ctx: &ToolContext, args: &Map<String, Value>) -> String 
             Err(e) => return format!("error: {}", e),
         };
         let face = dest.face_toward_latlon;
+        let heading_deg = start_heading_deg(&bridge);
+        let allowed: std::collections::HashSet<&str> =
+            via_taxiways.iter().map(|s| s.as_str()).collect();
+        let forbidden_directional = taxi_route::forbid_backward_runway_traversals(
+            &graph, heading_deg, &allowed,
+        );
         let plan = match taxi_route::plan(
             &graph,
             start_node,
             dest.node,
             &via_taxiways,
             &dest.forbidden_edges,
+            &forbidden_directional,
         ) {
             Ok(p) => p,
             Err(e) => return format!("error: {}", e),
@@ -1669,17 +1701,382 @@ pub fn tool_plan_taxi_route(ctx: &ToolContext, args: &Map<String, Value>) -> Str
         Ok(d) => d,
         Err(e) => return format!("error: {}", e),
     };
+    let heading_deg = bridge_heading_or_arg(ctx, args);
+    let allowed: std::collections::HashSet<&str> =
+        via_taxiways.iter().map(|s| s.as_str()).collect();
+    let forbidden_directional = taxi_route::forbid_backward_runway_traversals(
+        &graph, heading_deg, &allowed,
+    );
     let plan = match taxi_route::plan(
         &graph,
         start_node,
         dest.node,
         &via_taxiways,
         &dest.forbidden_edges,
+        &forbidden_directional,
     ) {
         Ok(p) => p,
         Err(e) => return format!("error: {}", e),
     };
     format_taxi_plan(&plan)
+}
+
+pub fn tool_plan_park_route(ctx: &ToolContext, args: &Map<String, Value>) -> String {
+    let airport = match arg_str(args, "airport_ident") {
+        Ok(s) => s.to_string(),
+        Err(e) => return format!("error: {}", e),
+    };
+    let parking_name = match arg_str(args, "parking_name") {
+        Ok(s) => s.to_string(),
+        Err(e) => return format!("error: {}", e),
+    };
+    let via_taxiways: Vec<String> = args
+        .get("via_taxiways")
+        .and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+        .unwrap_or_default();
+    let (start_lat, start_lon) = match resolve_start_latlon(ctx, args) {
+        Ok(v) => v,
+        Err(e) => return format!("error: {}", e),
+    };
+
+    if let Err(e) = ensure_runway_conn(ctx) {
+        return format!("error: {}", e);
+    }
+    let guard = ctx.runway_conn.lock().unwrap();
+    let conn = guard.as_ref().unwrap();
+    let graph = match taxi_route::load_graph(conn, &airport) {
+        Ok(g) => g,
+        Err(e) => return format!("error: {}", e),
+    };
+    if graph.nodes.is_empty() {
+        return format!(
+            "error: airport {} has no taxi network in apt.dat",
+            airport
+        );
+    }
+    let start_node = match taxi_route::nearest_node(&graph, start_lat, start_lon) {
+        Ok(id) => id,
+        Err(e) => return format!("error: {}", e),
+    };
+    let resolved = match taxi_route::resolve_parking_destination(
+        conn, &graph, &airport, &parking_name,
+    ) {
+        Ok(r) => r,
+        Err(e) => return format!("error: {}", e),
+    };
+    let heading_deg = bridge_heading_or_arg(ctx, args);
+    let allowed: std::collections::HashSet<&str> =
+        via_taxiways.iter().map(|s| s.as_str()).collect();
+    let forbidden_directional = taxi_route::forbid_backward_runway_traversals(
+        &graph, heading_deg, &allowed,
+    );
+    let plan = match taxi_route::plan(
+        &graph,
+        start_node,
+        resolved.nearest_node,
+        &via_taxiways,
+        &std::collections::HashSet::new(),
+        &forbidden_directional,
+    ) {
+        Ok(p) => p,
+        Err(e) => return format!("error: {}", e),
+    };
+    let mut out = format_taxi_plan(&plan);
+    out.push_str(&format!(
+        "  parking: {:?} ({}, {:.6},{:.6}, heading {:.0}°T)\n",
+        resolved.spot_name,
+        resolved.spot_kind,
+        resolved.spot_lat,
+        resolved.spot_lon,
+        resolved.spot_heading_true_deg,
+    ));
+    out
+}
+
+pub fn tool_engage_park(ctx: &ToolContext, args: &Map<String, Value>) -> String {
+    let bridge = match ctx.bridge.as_ref() {
+        Some(b) => b.clone(),
+        None => {
+            return "error: no X-Plane bridge available; engage_park needs the georef".to_string();
+        }
+    };
+    let released_brake_ratio = match parking_brake_ratio(ctx) {
+        Some(v) if v >= 0.5 => match bridge
+            .write_dataref_values(&[(PARKING_BRAKE_RATIO.name.to_string(), 0.0)])
+        {
+            Ok(_) => Some(v),
+            Err(e) => return format!("error: releasing parking brake: {}", e),
+        },
+        _ => None,
+    };
+    let airport = match arg_str(args, "airport_ident") {
+        Ok(s) => s.to_string(),
+        Err(e) => return format!("error: {}", e),
+    };
+    let parking_name = match arg_str(args, "parking_name") {
+        Ok(s) => s.to_string(),
+        Err(e) => return format!("error: {}", e),
+    };
+    let via_taxiways: Vec<String> = args
+        .get("via_taxiways")
+        .and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+        .unwrap_or_default();
+    let (start_lat, start_lon) = match resolve_start_latlon(ctx, args) {
+        Ok(v) => v,
+        Err(e) => return format!("error: {}", e),
+    };
+
+    if let Err(e) = ensure_runway_conn(ctx) {
+        return format!("error: {}", e);
+    }
+    let (plan, resolved) = {
+        let guard = ctx.runway_conn.lock().unwrap();
+        let conn = guard.as_ref().unwrap();
+        let graph = match taxi_route::load_graph(conn, &airport) {
+            Ok(g) => g,
+            Err(e) => return format!("error: {}", e),
+        };
+        if graph.nodes.is_empty() {
+            return format!(
+                "error: airport {} has no taxi network in apt.dat",
+                airport
+            );
+        }
+        let start_node = match taxi_route::nearest_node(&graph, start_lat, start_lon) {
+            Ok(id) => id,
+            Err(e) => return format!("error: {}", e),
+        };
+        let resolved = match taxi_route::resolve_parking_destination(
+            conn, &graph, &airport, &parking_name,
+        ) {
+            Ok(r) => r,
+            Err(e) => return format!("error: {}", e),
+        };
+        let heading_deg = start_heading_deg(&bridge);
+        let allowed: std::collections::HashSet<&str> =
+            via_taxiways.iter().map(|s| s.as_str()).collect();
+        let forbidden_directional = taxi_route::forbid_backward_runway_traversals(
+            &graph, heading_deg, &allowed,
+        );
+        let plan = match taxi_route::plan(
+            &graph,
+            start_node,
+            resolved.nearest_node,
+            &via_taxiways,
+            &std::collections::HashSet::new(),
+            &forbidden_directional,
+        ) {
+            Ok(p) => p,
+            Err(e) => return format!("error: {}", e),
+        };
+        (plan, resolved)
+    };
+
+    let georef = bridge.georef();
+    let aircraft_pos_ft = geodetic_offset_ft(start_lat, start_lon, georef);
+    let (mut legs_ft, mut names, pullout_ft) =
+        build_taxi_legs_with_pullout(aircraft_pos_ft, &plan.legs, georef);
+
+    // Append a short lead-in leg from the last taxi-graph node to the
+    // actual 1300 spot coordinates. Parking spots sit off the network, so
+    // without this the aircraft would stop at the nearest taxiway node —
+    // typically 30-60 ft short of the actual gate / tie-down.
+    let spot_pos_ft = geodetic_offset_ft(resolved.spot_lat, resolved.spot_lon, georef);
+    if let Some(last) = legs_ft.last().copied() {
+        let lead_in = spot_pos_ft - last.end_ft;
+        if lead_in.length() > 1.0 {
+            legs_ft.push(StraightLeg {
+                start_ft: last.end_ft,
+                end_ft: spot_pos_ft,
+            });
+            names.push(format!("(to {})", resolved.spot_name));
+        }
+    }
+
+    let final_pose = crate::types::TaxiPose {
+        position_ft: spot_pos_ft,
+        heading_deg: resolved.spot_heading_true_deg,
+    };
+    let leg_count = legs_ft.len();
+    let profile = TaxiProfile::new(legs_ft, names).with_final_pose(final_pose);
+    let displaced = ctx.pilot.lock().engage_profile(Box::new(profile));
+
+    let mut summary = format!(
+        "engaged park {} → {:?} ({}) — {} legs, {:.0} m",
+        plan.airport_ident,
+        resolved.spot_name,
+        resolved.spot_kind,
+        leg_count,
+        plan.total_distance_m
+    );
+    if let Some(v) = released_brake_ratio {
+        summary.push_str(&format!(" (released parking brake, ratio was {:.2})", v));
+    }
+    if let Some(d) = pullout_ft {
+        summary.push_str(&format!(" (pullout: {:.0} ft from start)", d));
+    }
+    summary.push_str(&format!(
+        " +pose-target (heading {:.0}°T)",
+        resolved.spot_heading_true_deg
+    ));
+    if !plan.taxiway_sequence.is_empty() {
+        summary.push_str(&format!(" via {}", plan.taxiway_sequence.join(" -> ")));
+    }
+    if !plan.runway_crossings.is_empty() {
+        let mut seen = std::collections::HashSet::new();
+        let unique: Vec<&str> = plan
+            .runway_crossings
+            .iter()
+            .filter(|z| seen.insert(z.as_str()))
+            .map(String::as_str)
+            .collect();
+        summary.push_str(&format!(" (crossings: {})", unique.join("; ")));
+    }
+    summary.push_str(&format_displaced(&displaced));
+    summary
+}
+
+pub fn tool_choose_runway_exit(ctx: &ToolContext, args: &Map<String, Value>) -> String {
+    let taxiway = match args.get("taxiway_name") {
+        Some(Value::Null) | None => None,
+        Some(Value::String(s)) => Some(s.clone()),
+        Some(other) => return format!("error: taxiway_name must be a string or null, got {other}"),
+    };
+    let display = taxiway
+        .as_deref()
+        .map(|t| format!("preferred runway exit set to {:?}", t))
+        .unwrap_or_else(|| "preferred runway exit cleared".to_string());
+    match with_pattern_profile(ctx, |p| p.set_preferred_exit(taxiway)) {
+        Some(_) => display,
+        None => "error: pattern_fly profile is not active".to_string(),
+    }
+}
+
+pub fn tool_list_runway_exits(ctx: &ToolContext, args: &Map<String, Value>) -> String {
+    let airport = match arg_str(args, "airport_ident") {
+        Ok(s) => s.to_string(),
+        Err(e) => return format!("error: {}", e),
+    };
+    let runway = match arg_str(args, "runway_ident") {
+        Ok(s) => s.to_string(),
+        Err(e) => return format!("error: {}", e),
+    };
+
+    if let Err(e) = ensure_runway_conn(ctx) {
+        return format!("error: {}", e);
+    }
+    let guard = ctx.runway_conn.lock().unwrap();
+    let conn = guard.as_ref().unwrap();
+
+    // Landing-threshold endpoint + runway course for the named end, so we
+    // can project each exit's taxi node onto the runway centerline to
+    // recover its stationing.
+    let forms = taxi_route::runway_query_forms(&runway);
+    let thresh: Result<(f64, f64, f64, f64), _> = conn.query_row(
+        "SELECT \
+             CASE WHEN le_ident = ? OR le_ident = ? THEN le_latitude_deg  ELSE he_latitude_deg  END, \
+             CASE WHEN le_ident = ? OR le_ident = ? THEN le_longitude_deg ELSE he_longitude_deg END, \
+             CASE WHEN le_ident = ? OR le_ident = ? THEN le_heading_degT  ELSE he_heading_degT  END, \
+             length_ft \
+         FROM runways \
+         WHERE airport_ident = ? \
+           AND (le_ident = ? OR le_ident = ? OR he_ident = ? OR he_ident = ?) \
+           AND closed = 0 \
+         LIMIT 1",
+        [
+            forms[0].as_str(), forms[1].as_str(),
+            forms[0].as_str(), forms[1].as_str(),
+            forms[0].as_str(), forms[1].as_str(),
+            airport.as_str(),
+            forms[0].as_str(), forms[1].as_str(), forms[0].as_str(), forms[1].as_str(),
+        ],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+    );
+    let (thr_lat, thr_lon, course, length_ft) = match thresh {
+        Ok(v) => v,
+        Err(e) => return format!("error: runway {:?} not found at {}: {}", runway, airport, e),
+    };
+
+    let georef = GeoReference {
+        threshold_lat_deg: thr_lat,
+        threshold_lon_deg: thr_lon,
+    };
+    let forward = heading_to_vector(course, 1.0);
+
+    // Walk every taxi edge whose 1204 active_zones name this runway, and
+    // project each endpoint onto the runway centerline to get stationing.
+    let graph = match taxi_route::load_graph(conn, &airport) {
+        Ok(g) => g,
+        Err(e) => return format!("error: {}", e),
+    };
+    let mut filtered: Vec<(String, f64)> = Vec::new();
+    for e in &graph.edges {
+        if !taxi_route::edge_conflicts_with_runway(e, &runway) {
+            continue;
+        }
+        if e.name.is_empty() {
+            continue;
+        }
+        let Some(n1) = graph.nodes.get(&e.from_node) else { continue };
+        let Some(n2) = graph.nodes.get(&e.to_node) else { continue };
+        let p1 = geodetic_offset_ft(n1.latitude_deg, n1.longitude_deg, georef);
+        let p2 = geodetic_offset_ft(n2.latitude_deg, n2.longitude_deg, georef);
+        let s1 = p1.x * forward.x + p1.y * forward.y;
+        let s2 = p2.x * forward.x + p2.y * forward.y;
+        let stationing = s1.min(s2).max(0.0);
+        if stationing > length_ft + 500.0 {
+            continue;
+        }
+        filtered.push((e.name.clone(), stationing));
+    }
+    // Dedup by name, keeping the smallest stationing (the closest-to-
+    // threshold appearance of each named taxiway crossing).
+    filtered.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.partial_cmp(&b.1).unwrap()));
+    filtered.dedup_by(|a, b| a.0 == b.0);
+    filtered.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+
+    if filtered.is_empty() {
+        return format!(
+            "no taxiway exits annotated for runway {} at {} in apt.dat",
+            runway, airport
+        );
+    }
+    let mut out = format!(
+        "exits for {} runway {} (length {:.0} ft, threshold at 0):\n",
+        airport, runway, length_ft
+    );
+    for (name, st) in &filtered {
+        out.push_str(&format!("  {}\t{:.0} ft\n", name, st));
+    }
+    out
+}
+
+fn resolve_start_latlon(
+    ctx: &ToolContext,
+    args: &Map<String, Value>,
+) -> Result<(f64, f64)> {
+    let lat = args.get("start_lat").and_then(|v| v.as_f64());
+    let lon = args.get("start_lon").and_then(|v| v.as_f64());
+    match (lat, lon) {
+        (Some(a), Some(b)) => Ok((a, b)),
+        _ => {
+            let bridge = ctx
+                .bridge
+                .as_ref()
+                .ok_or_else(|| anyhow!(
+                    "aircraft position unavailable; pass start_lat and start_lon or connect to X-Plane"
+                ))?;
+            let a = bridge
+                .get_dataref_value(LATITUDE_DEG.name)
+                .ok_or_else(|| anyhow!("aircraft latitude not yet available"))?;
+            let b = bridge
+                .get_dataref_value(LONGITUDE_DEG.name)
+                .ok_or_else(|| anyhow!("aircraft longitude not yet available"))?;
+            Ok((a, b))
+        }
+    }
 }
 
 fn format_taxi_plan(plan: &taxi_route::TaxiPlan) -> String {
@@ -1863,6 +2260,10 @@ pub fn dispatch_tool(call: &Value, ctx: &ToolContext) -> String {
         "sql_query" => tool_sql_query(ctx, &map),
         "plan_taxi_route" => tool_plan_taxi_route(ctx, &map),
         "engage_taxi" => tool_engage_taxi(ctx, &map),
+        "plan_park_route" => tool_plan_park_route(ctx, &map),
+        "engage_park" => tool_engage_park(ctx, &map),
+        "choose_runway_exit" => tool_choose_runway_exit(ctx, &map),
+        "list_runway_exits" => tool_list_runway_exits(ctx, &map),
         "engage_line_up" => tool_engage_line_up(ctx, &map),
         other => format!("error: unknown tool {:?}", other),
     }
@@ -2145,6 +2546,88 @@ pub fn tool_schemas() -> Vec<Value> {
             }),
             &["airport_ident", "destination_runway", "via_taxiways", "start_lat", "start_lon"],
         ),
+        schema(
+            "engage_park",
+            ENGAGE_PARK_DESCRIPTION,
+            json!({
+                "airport_ident": {
+                    "type": "string",
+                    "description": "Airport identifier as stored in apt.dat (e.g. 'KSFO')."
+                },
+                "parking_name": {
+                    "type": "string",
+                    "description": "Exact (case-insensitive) name of the 1300 parking spot, e.g. 'Gate A4', 'Ramp 1', 'GA Tie-Down 3'. Query parking_spots for candidates."
+                },
+                "via_taxiways": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Ordered list of taxiway names if you want a specific routing, e.g. ['B', 'A']. Pass [] for shortest route."
+                },
+                "start_lat": {
+                    "type": ["number", "null"],
+                    "description": "Starting latitude. If null, the current aircraft position from X-Plane is used."
+                },
+                "start_lon": {
+                    "type": ["number", "null"],
+                    "description": "Starting longitude. If null, the current aircraft position from X-Plane is used."
+                }
+            }),
+            &["airport_ident", "parking_name", "via_taxiways", "start_lat", "start_lon"],
+        ),
+        schema(
+            "plan_park_route",
+            PLAN_PARK_ROUTE_DESCRIPTION,
+            json!({
+                "airport_ident": {
+                    "type": "string",
+                    "description": "Airport identifier as stored in apt.dat (e.g. 'KSFO')."
+                },
+                "parking_name": {
+                    "type": "string",
+                    "description": "Exact (case-insensitive) name of the 1300 parking spot."
+                },
+                "via_taxiways": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Ordered list of taxiway names, or [] for shortest route."
+                },
+                "start_lat": {
+                    "type": ["number", "null"],
+                    "description": "Starting latitude. If null, the current aircraft position from X-Plane is used."
+                },
+                "start_lon": {
+                    "type": ["number", "null"],
+                    "description": "Starting longitude. If null, the current aircraft position from X-Plane is used."
+                }
+            }),
+            &["airport_ident", "parking_name", "via_taxiways", "start_lat", "start_lon"],
+        ),
+        schema(
+            "choose_runway_exit",
+            CHOOSE_RUNWAY_EXIT_DESCRIPTION,
+            json!({
+                "taxiway_name": {
+                    "type": ["string", "null"],
+                    "description": "Name of the taxiway exit you want to take, e.g. 'A5'. Pass null to clear the current preference (the rollout will then take the first available exit)."
+                }
+            }),
+            &["taxiway_name"],
+        ),
+        schema(
+            "list_runway_exits",
+            LIST_RUNWAY_EXITS_DESCRIPTION,
+            json!({
+                "airport_ident": {
+                    "type": "string",
+                    "description": "Airport identifier as stored in apt.dat."
+                },
+                "runway_ident": {
+                    "type": "string",
+                    "description": "Runway end ident, e.g. '28L' or '10R'. Exits are matched against 1204 active-zone entries naming this runway."
+                }
+            }),
+            &["airport_ident", "runway_ident"],
+        ),
     ]
 }
 
@@ -2180,6 +2663,44 @@ the pilot's runway-frame feet).
 For clearances where you want to preview the route before committing, \
 call plan_taxi_route first — its output has the same summary plus \
 leg-by-leg waypoints.";
+
+const ENGAGE_PARK_DESCRIPTION: &str = "Taxi to a parking spot and stop with \
+the nose aligned to the spot's painted heading. Internally this plans a \
+taxi route to the taxi-network node nearest the 1300 parking spot, appends \
+a short lead-in leg to the spot's exact lat/lon, and drives TaxiProfile \
+to a final pose at the spot's heading.
+
+Use after rollout has cleared the runway and the aircraft is stopped \
+clear. Requires a live X-Plane bridge (needs the georef to convert the \
+parking lat/lon into runway-frame feet). Displaces any active three-axis \
+profile. If the parking brake is set, it's released automatically.
+
+For candidates, query the `parking_spots` view via sql_query filtered by \
+airport_ident and matching `categories` against your aircraft class \
+(e.g. categories LIKE '%props%' for a single-engine piston, or \
+operation_type = 'general_aviation' for a GA ramp).";
+
+const PLAN_PARK_ROUTE_DESCRIPTION: &str = "Preview the taxi route to a \
+parking spot without engaging the autopilot. Same output shape as \
+plan_taxi_route plus the resolved spot coordinates and heading. Use to \
+sanity-check a route before calling engage_park.";
+
+const CHOOSE_RUNWAY_EXIT_DESCRIPTION: &str = "Record a preferred runway-exit \
+taxiway for the post-landing rollout. The rollout controller slows to \
+turnoff speed by the exit's stationing and, once clear of the hold-short \
+line, the pattern profile auto-releases — the aircraft stops clear of the \
+runway with parking brake set, ready for engage_park.
+
+Call on final (or any time before touchdown) with the taxiway name you \
+want to use, e.g. 'A5'. If the chosen exit is un-makable (aircraft still \
+fast at that stationing), the rollout falls back to the next available \
+exit and logs it. Passing null clears any prior preference.";
+
+const LIST_RUNWAY_EXITS_DESCRIPTION: &str = "List the taxiway exits for a \
+landing runway. Returns each candidate taxiway name plus its approximate \
+stationing in feet from the runway's landing threshold, so you can pick \
+an exit appropriate for your rollout distance. Uses the 1204 active-zone \
+annotations attached to taxi_edges.";
 
 const PLAN_TAXI_ROUTE_DESCRIPTION: &str = "Plan a taxi route across an airport \
 surface. Returns the ordered sequence of waypoint legs (lat/lon pairs plus the \
@@ -2279,6 +2800,20 @@ View: taxi_edges (one row per taxiway segment — apt.dat row 1202)
   name VARCHAR                 -- taxiway name as painted, e.g. 'A', 'A2', 'B' (may be empty for connectors)
   active_zones VARCHAR         -- semicolon-delimited 'kind:runways' entries for runway conflicts (1204 rows),
                                -- e.g. 'departure:10L,28R;ils:28L'. Empty when none.
+
+View: parking_spots (one row per startup/parking location — apt.dat row 1300)
+  airport_ident VARCHAR        -- joins to airports.ident
+  name VARCHAR                 -- free-form ('Gate A4', 'Ramp 1', 'GA Tie-Down 3')
+  kind VARCHAR                 -- 'gate' | 'tie_down' | 'hangar' | 'misc'
+  categories VARCHAR           -- pipe-separated aircraft classes accepted here,
+                               -- e.g. 'heavy|jets|turboprops|props|helos'
+  heading_true_deg DOUBLE      -- true heading aircraft should face when parked
+  latitude_deg DOUBLE
+  longitude_deg DOUBLE
+  icao_category VARCHAR        -- optional 1301 ICAO aircraft category (A..F)
+  operation_type VARCHAR       -- optional 1301: 'none' | 'general_aviation' | 'airline' | 'cargo' | 'military'
+  airlines VARCHAR             -- optional 1301 comma-separated 3-letter airline codes
+  location GEOMETRY            -- POINT(longitude, latitude)
 
 For concrete route planning ('taxi via A, D to 31') prefer the `plan_taxi_route` \
 tool — it handles the Dijkstra and destination resolution for you. Use \
