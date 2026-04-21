@@ -789,15 +789,33 @@ impl PatternFlyProfile {
                 //   `choose_runway_exit`, modulate brakes so the
                 //   aircraft decelerates to `turnoff_speed_kt` and holds
                 //   it. "Does not stop until it clears the runway."
+                // - Near the departure end of the runway (last 500 ft)
+                //   apply full brakes regardless — the aircraft is not
+                //   going to find an exit at this point, so stop on
+                //   the runway rather than rolling off the end.
+                // - If we're below turnoff target but still rolling on
+                //   centerline, keep light braking so the aircraft
+                //   comes to a full stop. Without this, aircraft that
+                //   missed the preferred exit coast indefinitely at
+                //   1–5 kt with the pilot-LLM waiting for control.
                 // - Otherwise keep the legacy hard-brake so the
                 //   deterministic simple-backend scenarios (no LLM in
                 //   the loop) still converge to TaxiClear at 5 kt.
                 let brakes = if self.preferred_exit.is_some() {
                     let target = self.config.post_landing.turnoff_speed_kt;
-                    if state.gs_kt > target + 2.0 {
+                    let length_ft = self.runway_frame.runway.length_ft;
+                    let near_end = state
+                        .runway_x_ft
+                        .map(|x| x > length_ft - 500.0)
+                        .unwrap_or(false);
+                    if near_end && state.gs_kt > 1.0 {
+                        0.75
+                    } else if state.gs_kt > target + 2.0 {
                         0.75
                     } else if state.gs_kt > target {
                         0.35
+                    } else if state.gs_kt > 1.0 {
+                        0.25
                     } else {
                         0.0
                     }
