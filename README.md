@@ -28,7 +28,7 @@ Requires a recent stable Rust toolchain. Always build with `--release` — the l
 
 ```bash
 cargo build --release
-cargo test  --release        # ~320 tests, runs in ~4 seconds
+cargo test  --release        # ~380 tests, runs in ~3 seconds
 ```
 
 Live-mode DuckDB uses the spatial extension. The first run that touches the `sql_query` tool downloads it from the DuckDB repo into `~/.duckdb/extensions/`; after that it's cached and runs offline.
@@ -104,13 +104,14 @@ Push-to-talk transcription requires `DEEPGRAM_API_KEY` in `.env`. Disable with `
 
 ### Outputs
 
-Every live run produces three timestamped artifacts in `output/`, sharing one stem (`sim_pilot-YYYYMMDD-HHMMSS`):
+Every live run produces four timestamped artifacts in `output/`, sharing one stem (`sim_pilot-YYYYMMDD-HHMMSS`):
 
 | File   | When written                                           | Contents                                                                            |
 | ------ | ------------------------------------------------------ | ----------------------------------------------------------------------------------- |
 | `.log` | Streamed live                                          | Full transcript (operator, ATC, LLM, radio, heartbeats, tool dispatch, system).     |
 | `.csv` | Streamed live at 1 Hz, flushed per row (crash-safe)    | Per-second fixes: wall time, t_sim, lat, lon, alt MSL/AGL, heading, track, IAS, GS, VS, phase, on-ground. |
 | `.kml` | Written on clean shutdown                              | Google-Earth `gx:Track` with absolute MSL altitudes — drag into Earth for 3D replay. |
+| `.txt` | Overwritten on every Responses API round               | Latest pilot-LLM request + response JSON — useful for inspecting tool calls, reasoning, and prompt-cache stats between turns. |
 
 ## Tool Catalog
 
@@ -154,9 +155,3 @@ Every live run produces three timestamped artifacts in `output/`, sharing one st
 | `plan_taxi_route`    | Plans a taxi route only, including legs, taxiway sequence, distance, and runway conflict zones.                                 |
 | `sql_query`          | Runs read-only SQL against the apt.dat-derived DuckDB views for airports, runways, comms, taxi network, and optional airspaces. |
 
-### Placeholder Schemas
-
-| Tool                  | Status                                                             |
-| --------------------- | ------------------------------------------------------------------ |
-| `engage_approach`     | Exposed in the schema but currently returns `not yet implemented`. |
-| `engage_route_follow` | Exposed in the schema but currently returns `not yet implemented`. |
