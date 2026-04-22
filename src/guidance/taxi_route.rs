@@ -1,28 +1,5 @@
-//! Taxi-route planner over an airport's apt.dat taxi network. No Python
-//! counterpart (the Python pilot does not taxi).
-//!
-//! Phase 1: planning only — produce a `TaxiPlan` the LLM can return to the
-//! user or feed into a future `engage_taxi` tool. No control-loop
-//! engagement, no nose-wheel steering, no hold-short enforcement.
-//!
-//! ## Routing semantics
-//!
-//! `plan()` runs a constrained Dijkstra where the search state is
-//! `(node_id, stage_index)` and `stage_index` walks the caller's
-//! `via_taxiways` list in order:
-//!
-//! - `stage = -1` (encoded as 0 here, with real stages offset by one)
-//!   means "before the first named taxiway" — the algorithm allows any
-//!   connector edge, which covers the common case of taxiing off a ramp
-//!   onto the first named taxiway.
-//! - `stage = i` (0..len) means "currently on `via_taxiways[i]`" — only
-//!   edges named `via_taxiways[i]` (stay) or `via_taxiways[i+1]`
-//!   (advance) are legal.
-//! - After the last stage, any edge is legal again so the path can exit
-//!   onto the runway hold-short / gate lead-out.
-//!
-//! If `via_taxiways` is empty the search degenerates to plain shortest
-//! path, which is useful for "taxi to runway 31 via the shortest route".
+//! Taxi-route planner over an airport's apt.dat taxi network. See `plan`
+//! for the Dijkstra-over-stages routing contract.
 
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap, HashSet};
@@ -30,7 +7,7 @@ use std::collections::{BinaryHeap, HashMap, HashSet};
 use anyhow::{anyhow, bail, Context, Result};
 use duckdb::Connection;
 
-const EARTH_RADIUS_M: f64 = 6_371_008.8;
+use crate::types::{haversine_m, initial_bearing_deg};
 
 #[derive(Debug, Clone)]
 pub struct TaxiNode {
@@ -656,7 +633,6 @@ fn resolve_runway_hold_short(
             face_toward_latlon: face_toward(*id),
         })
         .collect();
-    let _ = face_toward;
 
     Ok(DestinationResolution {
         node: primary,
@@ -738,18 +714,6 @@ pub fn forbid_backward_runway_traversals(
         }
     }
     out
-}
-
-/// Initial bearing from (lat1, lon1) to (lat2, lon2) in degrees true,
-/// 0..360 (0 = due north).
-fn initial_bearing_deg(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
-    let p1 = lat1.to_radians();
-    let p2 = lat2.to_radians();
-    let dlam = (lon2 - lon1).to_radians();
-    let y = dlam.sin() * p2.cos();
-    let x = p1.cos() * p2.sin() - p1.sin() * p2.cos() * dlam.cos();
-    let b = y.atan2(x).to_degrees();
-    (b + 360.0) % 360.0
 }
 
 /// Constrained shortest-path planner. `via_taxiways` empty → plain
@@ -1011,49 +975,33 @@ fn transition(stage: u8, edge: &TaxiEdge, via: &[String]) -> Option<u8> {
     }
 }
 
-fn haversine_m(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
-    let p1 = lat1.to_radians();
-    let p2 = lat2.to_radians();
-    let dphi = (lat2 - lat1).to_radians();
-    let dlam = (lon2 - lon1).to_radians();
-    let a = (dphi * 0.5).sin().powi(2) + p1.cos() * p2.cos() * (dlam * 0.5).sin().powi(2);
-    2.0 * EARTH_RADIUS_M * a.sqrt().asin()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn mk_taxiway_edge(
+    fn mk_edge(
         from_node: i64,
         to_node: i64,
         name: &str,
+        category: &str,
         active_zones: &str,
     ) -> TaxiEdge {
         TaxiEdge {
             from_node,
             to_node,
             direction: "twoway".into(),
-            category: "taxiway_E".into(),
+            category: category.into(),
             name: name.into(),
             active_zones: active_zones.into(),
         }
     }
 
-    fn mk_runway_edge(
-        from_node: i64,
-        to_node: i64,
-        name: &str,
-        active_zones: &str,
-    ) -> TaxiEdge {
-        TaxiEdge {
-            from_node,
-            to_node,
-            direction: "twoway".into(),
-            category: "runway".into(),
-            name: name.into(),
-            active_zones: active_zones.into(),
-        }
+    fn mk_taxiway_edge(from: i64, to: i64, name: &str, active_zones: &str) -> TaxiEdge {
+        mk_edge(from, to, name, "taxiway_E", active_zones)
+    }
+
+    fn mk_runway_edge(from: i64, to: i64, name: &str, active_zones: &str) -> TaxiEdge {
+        mk_edge(from, to, name, "runway", active_zones)
     }
 
     fn tiny_graph() -> TaxiGraph {
@@ -1128,11 +1076,9 @@ mod tests {
         assert!(plan.runway_crossings.iter().any(|z| z.contains("ils:31")));
     }
 
-    /// A graph shaped like the KWHP failure: start at node 1; runway 31's
-    /// hold-short is node 2; the edge from 2 to 3 is the runway crossing
-    /// (1204 departure 31). Without forbidden edges Dijkstra picks the
-    /// short path 1 → 2 → 3 (20 ft total). With node 2 as the goal and
-    /// the crossing edge forbidden, the path stops at 2 (10 ft).
+    /// 1 --A-- 2 --[runway 31/13 crossing, 1204-active]-- 3. With the
+    /// crossing edge forbidden, a plan for node 2 must stop there; an
+    /// unconstrained plan for node 3 cuts straight across.
     fn hold_short_graph() -> TaxiGraph {
         let mk = |id, lat, lon| TaxiNode {
             node_id: id,
@@ -1190,24 +1136,13 @@ mod tests {
         assert!(err.to_string().contains("no taxi route"));
     }
 
-    /// Regression: at KVNY, the full-length 16L hold-short has two valid
-    /// boundary nodes — one 40.4 m from the threshold (west side of the
-    /// runway) and one 43.3 m from the threshold (east side). The old
-    /// resolver picked the west-side node by a 3 m margin, which then
-    /// required a 4 km detour around the airport (south via P, north via
-    /// A) because the aircraft started on the east ramp and 16L itself
-    /// couldn't be crossed. The new resolver returns both candidates and
-    /// the planner picks whichever is cheapest from the start.
-    ///
-    /// Synthetic graph:
+    /// Two hold-short candidates equidistant from the "threshold" proxy
+    /// but with ~100× different path costs from the start. The planner
+    /// must pick the cheap one.
     ///
     ///     start (1) -- clean(short) -- east_hs (2) --+
     ///                                                 |-- [forbidden] -- rwy_mid (3)
     ///     start (1) -- clean(LONG ) -- west_hs (4) --+
-    ///
-    /// Both hold-short nodes are equidistant to `rwy_mid` (= what the
-    /// resolver uses as the threshold proxy in the real code). The
-    /// connection to `start` differs by ~100× in length.
     #[test]
     fn plan_picks_reachable_hold_short_over_nearer_but_unreachable() {
         let mk = |id, lat, lon| TaxiNode {
@@ -1253,12 +1188,10 @@ mod tests {
         assert_eq!(plan.legs[0].to_node, 2);
     }
 
-    /// Regression: at KWHP the taxiway-B edge crossing runway 12/30 had
-    /// 1204 departure:12,30 on it, and the node on the *runway* side also
-    /// had the runway pavement edge (also 1204:12) as its only other
-    /// neighbour. Picking the "closest" candidate blindly picked the
-    /// runway-side node — unreachable because every adjacent edge was
-    /// forbidden. The boundary filter fixes this.
+    /// A node whose every adjacent edge is forbidden is unreachable —
+    /// it sits *inside* the runway active zone, not on its boundary.
+    /// The picker must skip such nodes even if they're geometrically
+    /// closest.
     #[test]
     fn hold_short_picker_skips_nodes_with_only_forbidden_edges() {
         // Graph: 1 --[clean]-- 2 --[rwy-cross]-- 3 --[rwy-pavement]-- 4.
@@ -1302,11 +1235,10 @@ mod tests {
         assert_eq!(valid, [2].into_iter().collect::<HashSet<_>>());
     }
 
-    /// KWHP-shaped regression: aircraft landed mid-runway; `engage_park`
-    /// used to route it backward along the runway surface to reach a
-    /// taxiway exit on the approach-end side. With
-    /// `forbid_backward_runway_traversals` in place the planner must
-    /// instead continue forward to the departure-end exit.
+    /// An aircraft stopped mid-runway must not be routed backward along
+    /// the runway surface to reach the nearest taxiway exit — the
+    /// planner has to continue forward to the departure-end exit even
+    /// when that's the longer graph path.
     #[test]
     fn backward_runway_traversal_is_forbidden_by_default() {
         // Four nodes on runway 12/30 (roughly east-west), split into
@@ -1346,7 +1278,7 @@ mod tests {
             adj.entry(e.to_node).or_default().push((e.from_node, i));
         }
         let g = TaxiGraph {
-            airport_ident: "KWHP-like".into(),
+            airport_ident: "KTEST-rwy".into(),
             nodes,
             edges,
             adj,

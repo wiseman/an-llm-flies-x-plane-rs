@@ -12,6 +12,7 @@
 //! `IncomingMessage`.
 
 use crate::core::mission_manager::StatusSnapshot;
+use crate::types::FlightPhase;
 #[cfg(test)]
 use crate::types::wrap_degrees_180;
 
@@ -1275,21 +1276,26 @@ fn expand_tabs(line: &str) -> String {
 }
 
 fn colorize_log_line(line: &str) -> Vec<Span<'static>> {
-    let lower = line.to_ascii_lowercase();
-    let style = if lower.contains("error") {
+    let style = if contains_ascii_ignore_case(line, "error") {
         Style::default()
             .fg(Color::LightRed)
             .add_modifier(Modifier::BOLD)
-    } else if lower.contains("[safety]") {
+    } else if line.contains("[safety]") {
         Style::default().fg(Color::Yellow)
-    } else if lower.contains("[heartbeat]") {
+    } else if line.contains("[heartbeat]") {
         Style::default().fg(Color::DarkGray)
-    } else if lower.contains("[llm]") {
+    } else if line.contains("[llm]") {
         Style::default().fg(Color::LightCyan)
     } else {
         Style::default()
     };
     vec![Span::styled(line.to_string(), style)]
+}
+
+fn contains_ascii_ignore_case(haystack: &str, needle: &str) -> bool {
+    let h = haystack.as_bytes();
+    let n = needle.as_bytes();
+    h.len() >= n.len() && h.windows(n.len()).any(|w| w.eq_ignore_ascii_case(n))
 }
 
 /// Produce styled `Line`s for the status pane. Reimplements the lexer logic
@@ -1313,7 +1319,10 @@ fn render_status_fragments(
     } else {
         decorate_profiles(&snap.active_profiles, &snap.profile_mode_line_suffixes)
     };
-    let phase = snap.phase.map(|p| p.value().to_string()).unwrap_or_else(|| "—".to_string());
+    let phase_label = snap
+        .phase
+        .map(|p| p.value().to_string())
+        .unwrap_or_else(|| "—".to_string());
 
     let tgt_hdg = guidance.and_then(|g| g.target_heading_deg.or(g.target_track_deg));
     let tgt_alt_msl = guidance.and_then(|g| g.target_altitude_ft);
@@ -1321,7 +1330,7 @@ fn render_status_fragments(
     let field_elev = state.alt_msl_ft - state.alt_agl_ft;
     let tgt_alt_agl = tgt_alt_msl.map(|a| a - field_elev);
 
-    let phase_style = phase_style(&phase);
+    let phase_style = phase_style(snap.phase);
 
     let mut lines: Vec<Line> = Vec::with_capacity(10);
 
@@ -1345,13 +1354,13 @@ fn render_status_fragments(
         Span::styled(" ▸ ", Style::default().fg(Color::LightGreen)),
     ];
     if has_rwy {
-        header.push(Span::styled(phase.to_uppercase(), phase_style));
+        header.push(Span::styled(phase_label.to_uppercase(), phase_style));
         header.push(Span::raw("  "));
         header.push(Span::styled(rwy_parts.join(" "), Style::default().fg(Color::Gray)));
         header.push(Span::raw("  "));
     } else {
         header.push(Span::styled(
-            format!("{:<24}", phase.to_uppercase()),
+            format!("{:<24}", phase_label.to_uppercase()),
             phase_style,
         ));
     }
@@ -1561,24 +1570,18 @@ fn dev_style(deviation: f64, near: f64, far: f64) -> Style {
     }
 }
 
-fn phase_style(phase: &str) -> Style {
-    match phase {
-        "takeoff_roll" | "rotate" | "rollout" => {
-            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+fn phase_style(phase: Option<FlightPhase>) -> Style {
+    use crate::types::FlightPhase::*;
+    let color = match phase {
+        Some(TakeoffRoll | Rotate | Rollout | Final | Roundout | Flare) => Color::Yellow,
+        Some(InitialClimb | Crosswind | EnrouteClimb | Cruise | Downwind | Base) => {
+            Color::LightGreen
         }
-        "initial_climb" | "crosswind" | "enroute_climb" | "cruise" | "downwind" => {
-            Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD)
-        }
-        "descent" | "pattern_entry" => {
-            Style::default().fg(Color::LightCyan).add_modifier(Modifier::BOLD)
-        }
-        "base" => Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD),
-        "final" | "roundout" | "flare" => {
-            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
-        }
-        "go_around" => Style::default().fg(Color::LightRed).add_modifier(Modifier::BOLD),
-        _ => Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
-    }
+        Some(Descent | PatternEntry) => Color::LightCyan,
+        Some(GoAround) => Color::LightRed,
+        Some(Preflight | RunwayExit | TaxiClear) | None => Color::White,
+    };
+    Style::default().fg(color).add_modifier(Modifier::BOLD)
 }
 
 #[cfg(test)]

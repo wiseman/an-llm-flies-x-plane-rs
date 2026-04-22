@@ -10,6 +10,25 @@ use std::ops::{Add, Mul, Sub};
 pub const NM_TO_FT: f64 = 6076.12;
 pub const KT_TO_FPS: f64 = 1.687_809_857_101_195_7;
 pub const G_FT_S2: f64 = 32.174;
+pub const EARTH_RADIUS_M: f64 = 6_371_008.8;
+
+pub fn haversine_m(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
+    let p1 = lat1.to_radians();
+    let p2 = lat2.to_radians();
+    let dphi = (lat2 - lat1).to_radians();
+    let dlam = (lon2 - lon1).to_radians();
+    let a = (dphi * 0.5).sin().powi(2) + p1.cos() * p2.cos() * (dlam * 0.5).sin().powi(2);
+    2.0 * EARTH_RADIUS_M * a.sqrt().asin()
+}
+
+pub fn initial_bearing_deg(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
+    let p1 = lat1.to_radians();
+    let p2 = lat2.to_radians();
+    let dlam = (lon2 - lon1).to_radians();
+    let x = dlam.sin() * p2.cos();
+    let y = p1.cos() * p2.sin() - p1.sin() * p2.cos() * dlam.cos();
+    x.atan2(y).to_degrees().rem_euclid(360.0)
+}
 
 #[inline]
 pub fn clamp(value: f64, lower: f64, upper: f64) -> f64 {

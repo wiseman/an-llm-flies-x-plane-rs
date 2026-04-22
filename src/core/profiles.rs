@@ -406,11 +406,7 @@ impl TakeoffProfile {
 impl GuidanceProfile for TakeoffProfile {
     fn name(&self) -> &'static str { "takeoff" }
     fn owns(&self) -> BTreeSet<Axis> {
-        let mut s = BTreeSet::new();
-        s.insert(Axis::Lateral);
-        s.insert(Axis::Vertical);
-        s.insert(Axis::Speed);
-        s
+        all_three_axes()
     }
     fn pattern_metadata(&self) -> Option<PatternMetadata> {
         Some(PatternMetadata {
@@ -869,11 +865,8 @@ impl PatternFlyProfile {
         let bank_cmd = clamp(track_error * 1.0, -bank_limit, bank_limit);
         let pattern_alt = self.config.pattern_altitude_msl_ft();
         // Go-around is "committed to climb" — firewall the throttle and
-        // hold it until pattern altitude is captured and PatternFlyProfile
-        // takes over. A previous revision dropped to (0.2, 0.55) once
-        // within 100 ft of pattern alt, which would cut power exactly
-        // when crossing a threshold and produce the same discrete-regime
-        // bouncing as the pattern downwind bug.
+        // hold it until pattern altitude is captured. Dropping throttle
+        // near the capture altitude produces discrete-regime bouncing.
         GuidanceTargets {
             lateral_mode: LateralMode::TrackHold,
             vertical_mode: VerticalMode::Tecs,
@@ -1152,11 +1145,7 @@ impl PatternFlyProfile {
 impl GuidanceProfile for PatternFlyProfile {
     fn name(&self) -> &'static str { "pattern_fly" }
     fn owns(&self) -> BTreeSet<Axis> {
-        let mut s = BTreeSet::new();
-        s.insert(Axis::Lateral);
-        s.insert(Axis::Vertical);
-        s.insert(Axis::Speed);
-        s
+        all_three_axes()
     }
 
     fn contribute(&mut self, state: &AircraftState, _dt: f64) -> ProfileTick {
@@ -1291,11 +1280,7 @@ pub struct ApproachRunwayProfile {
 impl GuidanceProfile for ApproachRunwayProfile {
     fn name(&self) -> &'static str { "approach_runway" }
     fn owns(&self) -> BTreeSet<Axis> {
-        let mut s = BTreeSet::new();
-        s.insert(Axis::Lateral);
-        s.insert(Axis::Vertical);
-        s.insert(Axis::Speed);
-        s
+        all_three_axes()
     }
     fn contribute(&mut self, _state: &AircraftState, _dt: f64) -> ProfileTick {
         // Stub: the Python version raises NotImplementedError. Here we yield
@@ -1312,11 +1297,7 @@ pub struct RouteFollowProfile {
 impl GuidanceProfile for RouteFollowProfile {
     fn name(&self) -> &'static str { "route_follow" }
     fn owns(&self) -> BTreeSet<Axis> {
-        let mut s = BTreeSet::new();
-        s.insert(Axis::Lateral);
-        s.insert(Axis::Vertical);
-        s.insert(Axis::Speed);
-        s
+        all_three_axes()
     }
     fn contribute(&mut self, _state: &AircraftState, _dt: f64) -> ProfileTick {
         ProfileTick::contribution_only(ProfileContribution::default())
@@ -1384,6 +1365,10 @@ pub struct TaxiProfile {
     /// needs some forward motion to bite, so we can't sit at 0 kt while
     /// the heading still needs to rotate.
     pub pose_creep_speed_kt: f64,
+    /// Dedup'd, display-ready route summary ("A→B→C"). Built once at
+    /// construction from `taxiway_names` because `mode_line_suffix` runs
+    /// every tick.
+    route_summary: Option<String>,
 }
 
 impl TaxiProfile {
@@ -1404,6 +1389,7 @@ impl TaxiProfile {
         legs_ft: Vec<StraightLeg>,
         taxiway_names: Vec<String>,
     ) -> Self {
+        let route_summary = Self::build_route_summary(&taxiway_names);
         Self {
             mode,
             legs_ft,
@@ -1420,21 +1406,13 @@ impl TaxiProfile {
             pose_position_tol_ft: 20.0,
             pose_heading_tol_deg: 20.0,
             pose_creep_speed_kt: 2.0,
+            route_summary,
         }
     }
 
-    pub fn with_final_pose(mut self, pose: crate::types::TaxiPose) -> Self {
-        self.final_pose = Some(pose);
-        self
-    }
-
-    /// Dedup'd taxiway-name sequence for the mode-line summary. Skips
-    /// synthetic/descriptive names (empty strings, "(connector)",
-    /// "(entering runway)") so the displayed route matches what ATC
-    /// actually called.
-    fn route_summary(&self) -> Option<String> {
+    fn build_route_summary(taxiway_names: &[String]) -> Option<String> {
         let mut out: Vec<&str> = Vec::new();
-        for n in &self.taxiway_names {
+        for n in taxiway_names {
             let n = n.as_str();
             if n.is_empty() || n.starts_with('(') {
                 continue;
@@ -1448,6 +1426,15 @@ impl TaxiProfile {
         } else {
             Some(out.join("→"))
         }
+    }
+
+    pub fn with_final_pose(mut self, pose: crate::types::TaxiPose) -> Self {
+        self.final_pose = Some(pose);
+        self
+    }
+
+    fn route_summary(&self) -> Option<&str> {
+        self.route_summary.as_deref()
     }
 
     fn current_leg(&self) -> Option<StraightLeg> {
@@ -1641,11 +1628,7 @@ impl GuidanceProfile for TaxiProfile {
         }
     }
     fn owns(&self) -> BTreeSet<Axis> {
-        let mut s = BTreeSet::new();
-        s.insert(Axis::Lateral);
-        s.insert(Axis::Vertical);
-        s.insert(Axis::Speed);
-        s
+        all_three_axes()
     }
     fn contribute(&mut self, state: &AircraftState, _dt: f64) -> ProfileTick {
         if !self.finished {
@@ -1773,4 +1756,10 @@ fn single(axis: Axis) -> BTreeSet<Axis> {
     let mut s = BTreeSet::new();
     s.insert(axis);
     s
+}
+
+fn all_three_axes() -> BTreeSet<Axis> {
+    [Axis::Lateral, Axis::Vertical, Axis::Speed]
+        .into_iter()
+        .collect()
 }

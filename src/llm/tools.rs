@@ -6,7 +6,6 @@
 //! (radio, parking brake, flaps). The SQL query tool uses DuckDB with the
 //! spatial extension loaded so the agent can do real geospatial lookups.
 
-use std::fs;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -268,6 +267,38 @@ fn parking_brake_ratio(ctx: &ToolContext) -> Option<f64> {
     ctx.bridge.as_ref().and_then(|b| b.get_dataref_value(PARKING_BRAKE_RATIO.name))
 }
 
+/// Deduplicate the `plan.runway_crossings` list (preserving first-seen
+/// order) and join with `"; "`. Returns `None` when nothing to report so
+/// the caller can skip the surrounding formatting.
+fn format_unique_crossings(crossings: &[String]) -> Option<String> {
+    if crossings.is_empty() {
+        return None;
+    }
+    let mut seen = std::collections::HashSet::new();
+    let unique: Vec<&str> = crossings
+        .iter()
+        .filter(|z| seen.insert(z.as_str()))
+        .map(String::as_str)
+        .collect();
+    Some(unique.join("; "))
+}
+
+/// Release the parking brake if set. Returns `Some(prior_ratio)` when a
+/// release actually happened, so callers can note it in their summary;
+/// returns `None` when nothing needed doing.
+fn release_parking_brake_if_set(
+    ctx: &ToolContext,
+    bridge: &Arc<dyn ToolBridge>,
+) -> Result<Option<f64>, String> {
+    match parking_brake_ratio(ctx) {
+        Some(v) if v >= 0.5 => bridge
+            .write_dataref_values(&[(PARKING_BRAKE_RATIO.name.to_string(), 0.0)])
+            .map(|_| Some(v))
+            .map_err(|e| format!("releasing parking brake: {}", e)),
+        _ => Ok(None),
+    }
+}
+
 // ---------- individual tool handlers ----------
 
 pub fn tool_get_status(ctx: &ToolContext, _args: &Map<String, Value>) -> String {
@@ -366,6 +397,20 @@ fn arg_i64(args: &Map<String, Value>, key: &str) -> Result<i64> {
     args.get(key)
         .and_then(|v| v.as_i64())
         .ok_or_else(|| anyhow!("missing or non-integer argument {}", key))
+}
+fn arg_string_array(args: &Map<String, Value>, key: &str) -> Vec<String> {
+    args.get(key)
+        .and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+        .unwrap_or_default()
+}
+
+fn radio_dataref(radio: &str) -> Result<&'static str, String> {
+    match radio {
+        "com1" => Ok(COM1_FREQUENCY_HZ_833.name),
+        "com2" => Ok(COM2_FREQUENCY_HZ_833.name),
+        other => Err(format!("unknown radio {:?} (expected com1, com2)", other)),
+    }
 }
 
 pub fn tool_engage_heading_hold(ctx: &ToolContext, args: &Map<String, Value>) -> String {
@@ -490,11 +535,6 @@ pub fn open_apt_dat_parquet(
     // Spatial extension is required — the parquet files carry GEOMETRY
     // columns (WKB) that only decode when spatial is loaded.
     conn.execute_batch("INSTALL spatial; LOAD spatial;")?;
-    // Computed GEOMETRY columns live in the view, not in the parquet — the
-    // current duckdb-rs + DuckDB spatial pairing panics on `SELECT *` when a
-    // GEOMETRY column comes off disk. Running ST_Point at view time avoids
-    // that, costs nothing perf-wise (38k rows), and keeps the schema the
-    // LLM queries (`arp`, `centerline`, `le_threshold`, `he_threshold`).
     // Computed GEOMETRY columns live in the view, not in the parquet — the
     // current duckdb-rs + DuckDB spatial pairing panics on `SELECT *` when a
     // GEOMETRY column comes off disk. Running ST_Point at view time avoids
@@ -631,10 +671,9 @@ fn lookup_runway_for_pattern(
     // so x=0 means "start of usable takeoff pavement" and x=length is
     // "far end of pavement". The displaced landing threshold sits
     // `displaced_ft` inside from x=0 — `touchdown_runway_x_ft()` adds
-    // that offset when computing the landing aim point. Earlier code
-    // baked the displacement into `threshold_ft` itself, which made
-    // takeoff position checks think the aircraft was off the runway
-    // when it was at the pavement end.
+    // that offset when computing the landing aim point. Do not bake the
+    // displacement into `threshold_ft`: takeoff position checks then
+    // think the aircraft is off the runway at the pavement end.
     let pavement_end_ft = geodetic_offset_ft(lat, lon, bridge.georef());
     let field_elev = runway_elev.unwrap_or(0.0);
     let resolved_length = length_ft.unwrap_or(5000.0);
@@ -1098,10 +1137,9 @@ pub fn tool_tune_radio(ctx: &ToolContext, args: &Map<String, Value>) -> String {
     let Some(bridge) = ctx.bridge.as_ref() else {
         return "error: no X-Plane bridge available (running in simple backend?)".to_string();
     };
-    let dref = match radio.as_str() {
-        "com1" => COM1_FREQUENCY_HZ_833.name,
-        "com2" => COM2_FREQUENCY_HZ_833.name,
-        other => return format!("error: unknown radio {:?} (expected com1, com2)", other),
+    let dref = match radio_dataref(&radio) {
+        Ok(d) => d,
+        Err(e) => return format!("error: {}", e),
     };
     let freq_khz = (freq * 1000.0).round() as i64;
     if let Err(e) = bridge.write_dataref_values(&[(dref.to_string(), freq_khz as f64)]) {
@@ -1169,10 +1207,9 @@ pub fn tool_broadcast_on_radio(ctx: &ToolContext, args: &Map<String, Value>) -> 
         Ok(s) => s.to_string(),
         Err(e) => return format!("error: {}", e),
     };
-    let dref = match radio.as_str() {
-        "com1" => COM1_FREQUENCY_HZ_833.name,
-        "com2" => COM2_FREQUENCY_HZ_833.name,
-        _ => return format!("error: unknown radio {:?} (expected com1, com2)", radio),
+    let dref = match radio_dataref(&radio) {
+        Ok(d) => d,
+        Err(e) => return format!("error: {}", e),
     };
     let freq_label = ctx
         .bridge
@@ -1282,19 +1319,9 @@ pub fn tool_engage_line_up(ctx: &ToolContext, args: &Map<String, Value>) -> Stri
         .get("intersection")
         .and_then(|v| v.as_str())
         .map(str::to_string);
-    let (start_lat, start_lon) = match (
-        args.get("start_lat").and_then(|v| v.as_f64()),
-        args.get("start_lon").and_then(|v| v.as_f64()),
-    ) {
-        (Some(lat), Some(lon)) => (lat, lon),
-        _ => {
-            let lat = bridge.get_dataref_value(LATITUDE_DEG.name);
-            let lon = bridge.get_dataref_value(LONGITUDE_DEG.name);
-            match (lat, lon) {
-                (Some(lat), Some(lon)) => (lat, lon),
-                _ => return "error: aircraft position unavailable; pass start_lat and start_lon or wait for a dataref update".to_string(),
-            }
-        }
+    let (start_lat, start_lon) = match resolve_start_latlon(ctx, args) {
+        Ok(v) => v,
+        Err(e) => return format!("error: {}", e),
     };
 
     if let Err(e) = ensure_runway_conn(ctx) {
@@ -1336,12 +1363,9 @@ pub fn tool_engage_line_up(ctx: &ToolContext, args: &Map<String, Value>) -> Stri
     let georef = bridge.georef();
     let aircraft_pos_ft = geodetic_offset_ft(start_lat, start_lon, georef);
 
-    // Install the resolved runway into PilotCore. Without this, engage_
-    // takeoff's alignment guard compares the aircraft heading against
-    // whatever startup-default runway was in the config, not the runway
-    // we're actually lining up on. Live KWHP log showed exactly this —
-    // "aircraft heading 128° is not aligned with runway course 318°"
-    // when the LLM had explicitly asked for runway 12 (course 139°).
+    // Install the resolved runway into PilotCore so engage_takeoff's
+    // alignment guard compares heading against the runway we're lining
+    // up on, not whatever startup-default runway was in the config.
     match lookup_runway_for_pattern(ctx, &airport, &runway, "left") {
         Ok((rwy, field_elev)) => install_runway_in_pilot_core(ctx, &airport, rwy, field_elev),
         Err(e) => return format!("error: {}", e),
@@ -1376,10 +1400,9 @@ pub fn tool_engage_line_up(ctx: &ToolContext, args: &Map<String, Value>) -> Stri
 
     // Short-circuit if we're already aligned on the runway centerline.
     // Otherwise the fresh line-up route drags the aircraft back toward
-    // the threshold from its current on-runway position, which — when
-    // the aircraft is near the far end of the runway — plans a 180°
-    // reverse trip. Live KWHP log showed this exact sequence: "you were
-    // lined up perfectly, then you turned 180°."
+    // the threshold from its current on-runway position — when the
+    // aircraft is near the far end of the runway this plans a 180°
+    // reverse trip.
     {
         let forward = heading_to_vector(heading_deg, 1.0);
         let right = heading_to_vector(heading_deg + 90.0, 1.0);
@@ -1402,14 +1425,11 @@ pub fn tool_engage_line_up(ctx: &ToolContext, args: &Map<String, Value>) -> Stri
 
     // Distance guard: engage_line_up plans a 2-leg straight route
     // (aircraft → entry point → 100 ft past). If the aircraft is far
-    // from the entry point, that "straight line" cuts diagonally
-    // across whatever terrain/taxiways sit between — a KWHP log
-    // showed exactly this: the aircraft was parked on A, the LLM
-    // skipped engage_taxi and called engage_line_up at B directly,
-    // and the planner cut a 591-ft diagonal from A straight to the
-    // B/12 entry point. Require the aircraft to be within taxi-graph
+    // from the entry point, that straight line cuts diagonally across
+    // whatever terrain/taxiways sit between. Require taxi-graph
     // proximity of the hold-short before handing off the final
-    // crossing+alignment to this tool.
+    // crossing+alignment to this tool; otherwise the caller should
+    // engage_taxi to reach the hold-short first.
     {
         let approach_ft = (entry_point_ft - aircraft_pos_ft).length();
         const LINE_UP_MAX_APPROACH_FT: f64 = 300.0;
@@ -1495,17 +1515,9 @@ pub fn tool_engage_taxi(ctx: &ToolContext, args: &Map<String, Value>) -> String 
             return "error: no X-Plane bridge available; engage_taxi needs the georef".to_string();
         }
     };
-    let released_brake_ratio = match parking_brake_ratio(ctx) {
-        Some(v) if v >= 0.5 => {
-            match bridge.write_dataref_values(&[(
-                PARKING_BRAKE_RATIO.name.to_string(),
-                0.0,
-            )]) {
-                Ok(_) => Some(v),
-                Err(e) => return format!("error: releasing parking brake: {}", e),
-            }
-        }
-        _ => None,
+    let released_brake_ratio = match release_parking_brake_if_set(ctx, &bridge) {
+        Ok(v) => v,
+        Err(e) => return format!("error: {}", e),
     };
     let airport = match arg_str(args, "airport_ident") {
         Ok(s) => s.to_string(),
@@ -1515,31 +1527,15 @@ pub fn tool_engage_taxi(ctx: &ToolContext, args: &Map<String, Value>) -> String 
         Ok(s) => s.to_string(),
         Err(e) => return format!("error: {}", e),
     };
-    let via_taxiways: Vec<String> = args
-        .get("via_taxiways")
-        .and_then(|v| v.as_array())
-        .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
-        .unwrap_or_default();
+    let via_taxiways = arg_string_array(args, "via_taxiways");
     let intersection = args
         .get("intersection")
         .and_then(|v| v.as_str())
         .map(str::to_string);
 
-    let (start_lat, start_lon) = match (
-        args.get("start_lat").and_then(|v| v.as_f64()),
-        args.get("start_lon").and_then(|v| v.as_f64()),
-    ) {
-        (Some(lat), Some(lon)) => (lat, lon),
-        _ => {
-            let lat = bridge.get_dataref_value(LATITUDE_DEG.name);
-            let lon = bridge.get_dataref_value(LONGITUDE_DEG.name);
-            match (lat, lon) {
-                (Some(lat), Some(lon)) => (lat, lon),
-                _ => {
-                    return "error: aircraft position unavailable; pass start_lat and start_lon or wait for a dataref update".to_string();
-                }
-            }
-        }
+    let (start_lat, start_lon) = match resolve_start_latlon(ctx, args) {
+        Ok(v) => v,
+        Err(e) => return format!("error: {}", e),
     };
 
     if let Err(e) = ensure_runway_conn(ctx) {
@@ -1607,19 +1603,15 @@ pub fn tool_engage_taxi(ctx: &ToolContext, args: &Map<String, Value>) -> String 
         Err(e) => return format!("error: {}", e),
     };
     // Terminal pose target: stop at the hold-short node aligned with
-    // the last leg's direction. An earlier version of this code aimed
-    // the aircraft *at* the runway via `face_toward_latlon`, but that
-    // fell over whenever the approach heading differed from the face-
-    // runway heading by more than ~90° — the nose wheel controller
-    // can't rotate a stationary aircraft, so the pose phase would
-    // oscillate forever, the profile never marked itself complete,
-    // and `active_profiles` kept reporting "taxi" indefinitely. Real
-    // pilots don't pivot at the hold-short anyway — the turn onto
-    // the runway happens during engage_line_up. We still want a pose
-    // (rather than coasting past the last leg) so the aircraft stops
-    // *at* the hold-short rather than rolling through it. Log the
-    // runway-facing heading for diagnostics so we can still see how
-    // far off the approach was.
+    // the last leg's direction. Do NOT aim the aircraft at the runway
+    // (via `face_toward_latlon`): when the approach heading differs
+    // from the face-runway heading by more than ~90°, the nose-wheel
+    // controller can't rotate a stationary aircraft, so the pose
+    // phase oscillates forever and the profile never completes. The
+    // turn onto the runway happens during engage_line_up. We still
+    // want a pose (rather than coasting past the last leg) so the
+    // aircraft stops *at* the hold-short rather than rolling through
+    // it. Log the runway-facing heading for diagnostics.
     let mut final_pose: Option<crate::types::TaxiPose> = None;
     let mut face_runway_note: Option<String> = None;
     if let Some(last) = legs_ft.last().copied() {
@@ -1680,15 +1672,8 @@ pub fn tool_engage_taxi(ctx: &ToolContext, args: &Map<String, Value>) -> String 
     if !plan.taxiway_sequence.is_empty() {
         summary.push_str(&format!(" via {}", plan.taxiway_sequence.join(" -> ")));
     }
-    if !plan.runway_crossings.is_empty() {
-        let mut seen = std::collections::HashSet::new();
-        let unique: Vec<&str> = plan
-            .runway_crossings
-            .iter()
-            .filter(|z| seen.insert(z.as_str()))
-            .map(String::as_str)
-            .collect();
-        summary.push_str(&format!(" (crossings: {})", unique.join("; ")));
+    if let Some(crossings) = format_unique_crossings(&plan.runway_crossings) {
+        summary.push_str(&format!(" (crossings: {})", crossings));
     }
     summary.push_str(&format_displaced(&displaced));
     summary
@@ -1703,26 +1688,10 @@ pub fn tool_plan_taxi_route(ctx: &ToolContext, args: &Map<String, Value>) -> Str
         Ok(s) => s.to_string(),
         Err(e) => return format!("error: {}", e),
     };
-    let via_taxiways: Vec<String> = args
-        .get("via_taxiways")
-        .and_then(|v| v.as_array())
-        .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
-        .unwrap_or_default();
-    let start_lat = args.get("start_lat").and_then(|v| v.as_f64());
-    let start_lon = args.get("start_lon").and_then(|v| v.as_f64());
-
-    let (start_lat, start_lon) = match (start_lat, start_lon) {
-        (Some(lat), Some(lon)) => (lat, lon),
-        _ => match ctx
-            .bridge
-            .as_ref()
-            .and_then(|b| Some((b.get_dataref_value(LATITUDE_DEG.name)?, b.get_dataref_value(LONGITUDE_DEG.name)?)))
-        {
-            Some(v) => v,
-            None => {
-                return "error: aircraft position unavailable; pass start_lat and start_lon or connect to X-Plane".to_string();
-            }
-        },
+    let via_taxiways = arg_string_array(args, "via_taxiways");
+    let (start_lat, start_lon) = match resolve_start_latlon(ctx, args) {
+        Ok(v) => v,
+        Err(e) => return format!("error: {}", e),
     };
 
     if let Err(e) = ensure_runway_conn(ctx) {
@@ -1784,11 +1753,7 @@ pub fn tool_plan_park_route(ctx: &ToolContext, args: &Map<String, Value>) -> Str
         Ok(s) => s.to_string(),
         Err(e) => return format!("error: {}", e),
     };
-    let via_taxiways: Vec<String> = args
-        .get("via_taxiways")
-        .and_then(|v| v.as_array())
-        .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
-        .unwrap_or_default();
+    let via_taxiways = arg_string_array(args, "via_taxiways");
     let (start_lat, start_lon) = match resolve_start_latlon(ctx, args) {
         Ok(v) => v,
         Err(e) => return format!("error: {}", e),
@@ -1855,14 +1820,9 @@ pub fn tool_engage_park(ctx: &ToolContext, args: &Map<String, Value>) -> String 
             return "error: no X-Plane bridge available; engage_park needs the georef".to_string();
         }
     };
-    let released_brake_ratio = match parking_brake_ratio(ctx) {
-        Some(v) if v >= 0.5 => match bridge
-            .write_dataref_values(&[(PARKING_BRAKE_RATIO.name.to_string(), 0.0)])
-        {
-            Ok(_) => Some(v),
-            Err(e) => return format!("error: releasing parking brake: {}", e),
-        },
-        _ => None,
+    let released_brake_ratio = match release_parking_brake_if_set(ctx, &bridge) {
+        Ok(v) => v,
+        Err(e) => return format!("error: {}", e),
     };
     let airport = match arg_str(args, "airport_ident") {
         Ok(s) => s.to_string(),
@@ -1872,11 +1832,7 @@ pub fn tool_engage_park(ctx: &ToolContext, args: &Map<String, Value>) -> String 
         Ok(s) => s.to_string(),
         Err(e) => return format!("error: {}", e),
     };
-    let via_taxiways: Vec<String> = args
-        .get("via_taxiways")
-        .and_then(|v| v.as_array())
-        .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
-        .unwrap_or_default();
+    let via_taxiways = arg_string_array(args, "via_taxiways");
     let (start_lat, start_lon) = match resolve_start_latlon(ctx, args) {
         Ok(v) => v,
         Err(e) => return format!("error: {}", e),
@@ -1985,15 +1941,8 @@ pub fn tool_engage_park(ctx: &ToolContext, args: &Map<String, Value>) -> String 
     if !plan.taxiway_sequence.is_empty() {
         summary.push_str(&format!(" via {}", plan.taxiway_sequence.join(" -> ")));
     }
-    if !plan.runway_crossings.is_empty() {
-        let mut seen = std::collections::HashSet::new();
-        let unique: Vec<&str> = plan
-            .runway_crossings
-            .iter()
-            .filter(|z| seen.insert(z.as_str()))
-            .map(String::as_str)
-            .collect();
-        summary.push_str(&format!(" (crossings: {})", unique.join("; ")));
+    if let Some(crossings) = format_unique_crossings(&plan.runway_crossings) {
+        summary.push_str(&format!(" (crossings: {})", crossings));
     }
     summary.push_str(&format_displaced(&displaced));
     summary
@@ -2260,15 +2209,8 @@ fn format_taxi_plan(plan: &taxi_route::TaxiPlan) -> String {
             plan.taxiway_sequence.join(" -> ")
         ));
     }
-    if !plan.runway_crossings.is_empty() {
-        let mut seen = std::collections::HashSet::new();
-        let unique: Vec<&str> = plan
-            .runway_crossings
-            .iter()
-            .filter(|z| seen.insert(z.as_str()))
-            .map(String::as_str)
-            .collect();
-        out.push_str(&format!("  runway zones: {}\n", unique.join("; ")));
+    if let Some(crossings) = format_unique_crossings(&plan.runway_crossings) {
+        out.push_str(&format!("  runway zones: {}\n", crossings));
     }
     out.push_str(&format!(
         "  start_node={} destination_node={}\n",
@@ -3137,9 +3079,3 @@ Common queries:
   ORDER BY dist_nm
   LIMIT 5;
 ";
-
-// keep fs import alive for future disk-based config overrides
-#[allow(dead_code)]
-fn _keep_fs_in_scope(_: &dyn Fn() -> std::io::Result<()>) -> Option<fs::File> {
-    None
-}
