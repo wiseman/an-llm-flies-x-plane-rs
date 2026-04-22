@@ -1254,13 +1254,19 @@ pub fn build_taxi_legs_with_pullout(
     aircraft_heading_deg: f64,
     plan_legs: &[taxi_route::TaxiLeg],
     georef: GeoReference,
+    on_runway: bool,
 ) -> Result<(Vec<StraightLeg>, Vec<String>, Option<f64>), String> {
     const PULLOUT_THRESHOLD_FT: f64 = 20.0;
-    // Reject pullouts that require more than ~135° of turn — that means
-    // the first graph node is behind the aircraft, which on a runway is
-    // a backtaxi. `forbid_backward_runway_traversals` doesn't help here
-    // because the pullout lead-in is a synthetic segment, not a graph
-    // edge. 90° is too tight (blocks legitimate perpendicular joins).
+    // On a runway, reject pullouts that require more than ~135° of turn:
+    // that means the first graph node is behind the aircraft, which on
+    // the runway surface is a backtaxi. `forbid_backward_runway_traversals`
+    // doesn't catch this because the pullout lead-in is a synthetic
+    // segment, not a graph edge.
+    //
+    // Off the runway (ramp, taxiway, grass), a big-turn lead-in is just a
+    // pirouette in place — the nose-wheel controller handles it fine and
+    // there's no surface we're traversing backward on. Apply the cap only
+    // when the aircraft is actually on runway pavement.
     const PULLOUT_MAX_TURN_DEG: f64 = 135.0;
 
     let mut legs_ft: Vec<StraightLeg> = plan_legs
@@ -1285,9 +1291,9 @@ pub fn build_taxi_legs_with_pullout(
         pullout_heading_deg - aircraft_heading_deg,
     )
     .abs();
-    if turn_deg > PULLOUT_MAX_TURN_DEG {
+    if on_runway && turn_deg > PULLOUT_MAX_TURN_DEG {
         return Err(format!(
-            "pullout lead-in to first taxi node would require a {:.0}° turn from current heading {:.0}° (max {:.0}°) — aircraft is probably on a runway or facing backward; reposition before engaging",
+            "pullout lead-in to first taxi node would require a {:.0}° turn from current heading {:.0}° while on runway pavement (max {:.0}°) — that would backtaxi down the runway. reposition before engaging",
             turn_deg, aircraft_heading_deg, PULLOUT_MAX_TURN_DEG,
         ));
     }
@@ -1593,11 +1599,17 @@ pub fn tool_engage_taxi(ctx: &ToolContext, args: &Map<String, Value>) -> String 
 
     let georef = bridge.georef();
     let aircraft_pos_ft = geodetic_offset_ft(start_lat, start_lon, georef);
+    let on_runway = {
+        let guard = ctx.runway_conn.lock().unwrap();
+        let conn = guard.as_ref().unwrap();
+        taxi_route::position_on_runway(conn, &airport, start_lat, start_lon)
+    };
     let (legs_ft, names, pullout_ft) = match build_taxi_legs_with_pullout(
         aircraft_pos_ft,
         aircraft_heading_deg,
         &plan.legs,
         georef,
+        on_runway,
     ) {
         Ok(v) => v,
         Err(e) => return format!("error: {}", e),
@@ -1886,11 +1898,17 @@ pub fn tool_engage_park(ctx: &ToolContext, args: &Map<String, Value>) -> String 
 
     let georef = bridge.georef();
     let aircraft_pos_ft = geodetic_offset_ft(start_lat, start_lon, georef);
+    let on_runway = {
+        let guard = ctx.runway_conn.lock().unwrap();
+        let conn = guard.as_ref().unwrap();
+        taxi_route::position_on_runway(conn, &airport, start_lat, start_lon)
+    };
     let (mut legs_ft, mut names, pullout_ft) = match build_taxi_legs_with_pullout(
         aircraft_pos_ft,
         aircraft_heading_deg,
         &plan.legs,
         georef,
+        on_runway,
     ) {
         Ok(v) => v,
         Err(e) => return format!("error: {}", e),

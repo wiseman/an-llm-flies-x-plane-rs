@@ -497,6 +497,57 @@ fn point_to_segment_m(plat: f64, plon: f64, alat: f64, alon: f64, blat: f64, blo
     (cx * cx + cy * cy).sqrt()
 }
 
+/// True when `(lat, lon)` lies on the paved footprint of any runway at
+/// the given airport — perpendicular distance to the centerline segment
+/// no greater than half the runway width. Used by the pullout check in
+/// `build_taxi_legs_with_pullout` to decide whether a big-turn lead-in
+/// risks a runway backtaxi (only possible when the aircraft is actually
+/// on a runway) versus an innocent ramp pirouette.
+///
+/// Returns `false` if the airport has no runways in the parquet view,
+/// or if the query errors. The caller treats that as "not on a runway"
+/// and skips the backtaxi guard — the alternative (refusing every taxi
+/// at an airport with no runway data) is worse than the risk of missing
+/// the guard in an edge case.
+pub fn position_on_runway(
+    conn: &Connection,
+    airport_ident: &str,
+    lat: f64,
+    lon: f64,
+) -> bool {
+    let mut stmt = match conn.prepare(
+        "SELECT le_latitude_deg, le_longitude_deg, \
+                he_latitude_deg, he_longitude_deg, width_ft \
+         FROM runways \
+         WHERE airport_ident = ? AND closed = 0",
+    ) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    let rows = stmt.query_map([airport_ident], |r| {
+        Ok((
+            r.get::<_, f64>(0)?,
+            r.get::<_, f64>(1)?,
+            r.get::<_, f64>(2)?,
+            r.get::<_, f64>(3)?,
+            r.get::<_, f64>(4)?,
+        ))
+    });
+    let rows = match rows {
+        Ok(r) => r,
+        Err(_) => return false,
+    };
+    for row in rows.flatten() {
+        let (le_lat, le_lon, he_lat, he_lon, width_ft) = row;
+        let d_m = point_to_segment_m(lat, lon, le_lat, le_lon, he_lat, he_lon);
+        let half_width_m = width_ft * 0.3048 * 0.5;
+        if d_m <= half_width_m {
+            return true;
+        }
+    }
+    false
+}
+
 /// "Taxi to runway X" = hold short of X. Picks a node on the approach
 /// side of the runway and returns the set of 1202 edges the planner must
 /// not traverse (those with a 1204 active zone naming X). Without the

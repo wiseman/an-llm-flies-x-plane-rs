@@ -1327,11 +1327,118 @@ fn engage_taxi_prepends_pullout_leg_when_far_from_nearest_node() {
         0.0,
         &[], // empty stand-in; we exercise the full path via the dispatch above
         georef,
+        false,
     )
     .expect("empty plan never errors");
     // Empty plan → empty legs list, no pullout.
     assert!(legs.is_empty());
     assert!(pullout.is_none());
+}
+
+/// Off the runway, a pullout lead-in that requires a big turn is just a
+/// slow pirouette on the ramp — the nose-wheel controller handles it
+/// and there's no backtaxi risk. Refusing this scenario strands the
+/// aircraft at the gate whenever it's parked facing into a stall.
+#[test]
+fn engage_taxi_allows_big_pullout_turn_off_runway() {
+    let dir = TempDir::new().unwrap();
+    build_taxi_fixture_parquet(dir.path());
+    // Aircraft sits ~100 m SW of node 10 (the gate), facing SW (200°).
+    // The pullout direction to node 10 is NE (~39°), so the required
+    // turn is ~161° — well past the 135° cap. The position is ~111 m
+    // south of the runway 09 centerline, so it is *not* on runway
+    // pavement.
+    let start_lat = 36.999500;
+    let start_lon = -122.003000;
+    let bridge = FakeBridge::new(
+        &[("sim/flightmodel/position/psi", 200.0)],
+        37.000100,
+        -121.997500,
+    );
+    let ctx = make_ctx(
+        Some(bridge.clone() as Arc<dyn ToolBridge>),
+        Some(dir.path().to_path_buf()),
+    );
+    let r = dispatch_tool(
+        &call(
+            "engage_taxi",
+            json!({
+                "airport_ident": "KTEST",
+                "destination_runway": "09",
+                "via_taxiways": [],
+                "start_lat": start_lat,
+                "start_lon": start_lon,
+            }),
+        ),
+        &ctx,
+    );
+    assert!(
+        !r.starts_with("error"),
+        "off-runway big-turn pullout should succeed, got: {}",
+        r
+    );
+    assert!(r.contains("pullout:"), "expected pullout leg in summary: {}", r);
+}
+
+/// On runway pavement, a big-turn pullout *would* backtaxi down the
+/// runway surface — `forbid_backward_runway_traversals` can't catch it
+/// because the lead-in is a synthetic segment, not a graph edge. The
+/// cap must still fire here.
+#[test]
+fn engage_taxi_rejects_big_pullout_turn_on_runway() {
+    // Dedicated KRWY fixture: runway 09/27 with hold-short nodes north
+    // of each threshold plus a parallel taxiway A. The aircraft starts
+    // mid-runway so nearest-to-aircraft (the 27-end HS, node 2) differs
+    // from the 09 hold-short destination (node 1), giving the planner
+    // a non-empty plan for the pullout check to run against.
+    let dir = TempDir::new().unwrap();
+    let extra = vec![
+        "1 0 0 0 KRWY KRWY Runway Test\n\
+         100 22.86 1 0 0.25 0 2 0 \
+         09 37.000100 -121.997500 0.00 0 0 0 0 0 \
+         27 37.000100 -121.987500 0.00 0 0 0 0 0\n\
+         1201 37.001000 -121.997500 both 1\n\
+         1201 37.001000 -121.987500 both 2\n\
+         1201 37.000500 -122.002000 both 10\n\
+         1202 10 1 twoway taxiway_E B\n\
+         1202 1 2 twoway taxiway_E A\n"
+            .to_string(),
+    ];
+    build_fake_parquet(dir.path(), &extra);
+    // Aircraft mid-runway facing west (270°). Nearest node is node 2 at
+    // bearing ~66° from aircraft — so pullout requires ~156° of turn.
+    // Position sits exactly on the runway centerline, so the on-runway
+    // guard should fire.
+    let start_lat = 37.000100;
+    let start_lon = -121.990000;
+    let bridge = FakeBridge::new(
+        &[("sim/flightmodel/position/psi", 270.0)],
+        37.000100,
+        -121.997500,
+    );
+    let ctx = make_ctx(
+        Some(bridge.clone() as Arc<dyn ToolBridge>),
+        Some(dir.path().to_path_buf()),
+    );
+    let r = dispatch_tool(
+        &call(
+            "engage_taxi",
+            json!({
+                "airport_ident": "KRWY",
+                "destination_runway": "09",
+                "via_taxiways": [],
+                "start_lat": start_lat,
+                "start_lon": start_lon,
+            }),
+        ),
+        &ctx,
+    );
+    assert!(r.starts_with("error"), "on-runway big-turn should reject: {}", r);
+    assert!(
+        r.contains("backtaxi") || r.contains("runway pavement"),
+        "expected backtaxi/runway message, got: {}",
+        r
+    );
 }
 
 #[test]
