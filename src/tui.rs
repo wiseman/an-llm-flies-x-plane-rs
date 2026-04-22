@@ -661,7 +661,7 @@ pub fn run_tui(
             );
 
             let input_title =
-                " INPUT — space/tab hold to talk · enter to send · ↑/↓ history · c-a/e/k edit · ctrl-t log detail · pgup/pgdn/end scroll log · ctrl-c to exit ";
+                " INPUT — space/tab hold to talk · enter to send · ↑/↓ history · c-a/e/k edit · ctrl-t log detail · pgup/pgdn/end scroll log ";
             let ptt_snap: Option<PttSnapshot> = ptt.as_ref().map(|p| p.snapshot());
             let mut spans: Vec<Span> = vec![
                 Span::styled("> ", Style::default().fg(Color::Cyan)),
