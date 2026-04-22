@@ -123,7 +123,9 @@ All aircraft/airport/gain values live in YAML under `config/` and fold into the 
 
 ## Miscellaneous notes
 
-Each release in `CHANGES.md` opens with a **NOTAMs** section — a short, user-facing, pilot-flavored summary of what actually lands in the operator's hands ("Taxi reliably gets you all the way to the hold-short…"). It sits above the usual Added/Changed/Fixed buckets. When cutting a release, fill this out in plain operator language, not changelog-ese; the Added/Changed/Fixed sections stay for the code-level detail.
+Each release in `CHANGES.md` opens with a **NOTAMs** section — a short, user-facing, pilot-flavored summary of what actually lands in the operator's hands ("Taxi reliably gets you all the way to the hold-short…"). It sits above the usual Added/Changed/Fixed buckets. When cutting a release, fill this out in plain operator language, not changelog-ese; the Added/Changed/Fixed sections stay for the code-level detail. Same rule applies to `NOTAMS.md`, which carries the operator-language summary standalone.
+
+Don't name tools, profiles, or phases in NOTAMs (no `engage_park`, `sleep()`, `pattern_fly`, `RunwayExit`, `idle_*`, etc.). Those are implementation detail and belong in Added/Changed/Fixed. NOTAMs describe what the operator *sees and does*, not the code that delivers it. CLI flags the operator actually types (`--headless`, `/mode`) are fine.
 
 `SQL_QUERY_DESCRIPTION` in `src/llm/tools.rs` includes the sentence "ALWAYS prefix spatial functions with ST_" — without it the LLM calls `POINT(...)` against DuckDB and fails.
 

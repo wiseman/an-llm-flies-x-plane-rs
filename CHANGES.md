@@ -10,33 +10,31 @@ project follows [Semantic Versioning](https://semver.org).
 ### NOTAMs
 
 - After landing the pilot actually leaves the runway. Rollout
-  decelerates to a turnoff speed and holds it instead of braking to a
-  dead stop on the centerline; pick an exit with
-  `list_runway_exits` / `choose_runway_exit` and `pattern_fly` hands
-  off to idle once you're clear.
-- The pilot can park. `engage_park(airport_ident, parking_name, …)`
-  taxis to a named gate / tie-down and stops with the nose on the
-  painted heading. Query the new `parking_spots` view for candidates.
-- Taxi routing no longer backtaxis down runways. Hold-short
-  resolution, Dijkstra edge filtering, and the synthetic pullout
-  lead-in all reject backward runway traversals; an off-runway ramp
-  pirouette of any angle is still fine.
-- "Taxi to runway X" without an intersection reliably lands at X's
-  approach end; mid-field and opposite-threshold crossings are no
-  longer silent intersection departures.
-- Operator replies come through even when the pilot also runs a tool
-  — previously any response that paired a message with a
-  `sleep()`/function call dropped the message on the floor and
-  looked like the pilot ignored you.
-- Log and radio panes are restyled: colored left-gutter bars per
+  decelerates to a turnoff speed and holds it instead of braking to
+  a dead stop on the centerline; pick your exit and the aircraft is
+  stopped clear of the pavement and released to you to taxi.
+- The pilot can park. Name a gate or tie-down and the pilot taxis
+  there and stops with the nose on the painted heading. Works from
+  any airport in the world.
+- No more backtaxi down runways. "Taxi to runway X" without an
+  intersection reliably lands at X's approach end; mid-field and
+  opposite-threshold crossings are no longer silent intersection
+  departures.
+- Parked facing into a stall? The pilot now pivots in place to line
+  up with the taxiway network instead of declaring a dead end.
+- Operator replies come through even when the pilot also runs a
+  tool. Previously a response that paired commentary with an action
+  would drop the commentary on the floor and look like the pilot
+  ignored you.
+- Log and radio panes restyled — colored left-gutter bars per
   subsystem, operator turns in a subtle "user bubble" background,
   pilot vs ATC transmissions color-coded, errors keep their red
-  sigil.
-- Pilot behaves more like a pilot. It won't `sleep` while moving with
-  only `idle_*` profiles engaged, won't pick a non-existent runway
-  exit, tool errors carry remediation text it's expected to act on,
-  and the stable-approach rule keeps it from bailing on good flares
-  for cosmetic reasons.
+  emphasis.
+- The pilot behaves more like a pilot: won't doze off with the
+  aircraft coasting uncontrolled, won't pick a runway exit that
+  doesn't exist, reads tool-error remediation text and acts on it
+  instead of escalating to you, and sticks to stable flares instead
+  of bailing for cosmetic reasons.
 
 ### Added
 
