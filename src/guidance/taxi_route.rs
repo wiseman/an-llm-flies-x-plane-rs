@@ -190,6 +190,17 @@ pub fn nearest_node(graph: &TaxiGraph, lat: f64, lon: f64) -> Result<i64> {
         .ok_or_else(|| anyhow!("airport {} has no aircraft-taxiable nodes", graph.airport_ident))
 }
 
+/// One valid stopping node for a runway hold-short. A full-length runway
+/// hold-short can have two or more: one on each side of the runway plus
+/// any connector hold-short nodes. Each carries its own `face_toward`
+/// (the node on the other side of the forbidden edge leaving it) because
+/// the runway-facing heading is side-specific.
+#[derive(Debug, Clone)]
+pub struct HoldShortCandidate {
+    pub node: i64,
+    pub face_toward_latlon: Option<(f64, f64)>,
+}
+
 /// The resolved taxi goal plus any edges the planner must refuse to cross
 /// to reach it. For a runway destination, `forbidden_edges` contains every
 /// 1202 edge whose 1204 active-zone list names the target runway —
@@ -202,11 +213,41 @@ pub fn nearest_node(graph: &TaxiGraph, lat: f64, lon: f64) -> Result<i64> {
 /// it to append a short orientation leg so the aircraft ends up *facing*
 /// the runway at the hold-short line instead of parked parallel to it
 /// along the taxiway.
+///
+/// `alt_nodes` carries the remaining valid hold-short candidates (those
+/// not chosen as the primary `node`). Pass primary + alts into `plan()`
+/// so it picks whichever is cheapest from the aircraft's start — without
+/// this, the planner may detour around the whole airport just to reach a
+/// geometrically-closer-to-threshold node on the far side of the runway.
 #[derive(Debug, Clone, Default)]
 pub struct DestinationResolution {
     pub node: i64,
     pub forbidden_edges: HashSet<usize>,
     pub face_toward_latlon: Option<(f64, f64)>,
+    pub alt_nodes: Vec<HoldShortCandidate>,
+}
+
+impl DestinationResolution {
+    /// Primary + alternate candidate node ids, for feeding into `plan`.
+    pub fn all_node_ids(&self) -> Vec<i64> {
+        let mut out = Vec::with_capacity(1 + self.alt_nodes.len());
+        out.push(self.node);
+        out.extend(self.alt_nodes.iter().map(|c| c.node));
+        out
+    }
+
+    /// Look up the face-toward target for whichever candidate the planner
+    /// actually terminated at. Returns the primary's face when `chosen`
+    /// matches the primary, otherwise searches `alt_nodes`.
+    pub fn face_toward_for(&self, chosen: i64) -> Option<(f64, f64)> {
+        if chosen == self.node {
+            return self.face_toward_latlon;
+        }
+        self.alt_nodes
+            .iter()
+            .find(|c| c.node == chosen)
+            .and_then(|c| c.face_toward_latlon)
+    }
 }
 
 pub fn resolve_destination(
@@ -222,6 +263,7 @@ pub fn resolve_destination(
                     node: id,
                     forbidden_edges: HashSet::new(),
                     face_toward_latlon: None,
+                    alt_nodes: Vec::new(),
                 })
             } else {
                 Err(anyhow!("node {} not in taxi graph for {}", id, airport_ident))
@@ -231,6 +273,7 @@ pub fn resolve_destination(
             node: nearest_node(graph, lat, lon)?,
             forbidden_edges: HashSet::new(),
             face_toward_latlon: None,
+            alt_nodes: Vec::new(),
         }),
         TaxiDestination::Runway(runway_ident) => resolve_runway_hold_short(
             conn,
@@ -446,6 +489,7 @@ fn resolve_runway_intersection_hold_short(
         node: x.hold_short_node,
         forbidden_edges,
         face_toward_latlon: Some((x.on_runway_lat, x.on_runway_lon)),
+        alt_nodes: Vec::new(),
     })
 }
 
@@ -539,6 +583,7 @@ fn resolve_runway_hold_short(
             node: nearest_node(graph, lat, lon)?,
             forbidden_edges,
             face_toward_latlon: None,
+            alt_nodes: Vec::new(),
         });
     }
 
@@ -563,47 +608,61 @@ fn resolve_runway_hold_short(
                 .unwrap_or(false)
         })
         .collect();
-    let best = candidate_ids
-        .iter()
-        .filter_map(|id| {
-            graph.nodes.get(id).map(|n| {
-                (
-                    *id,
-                    haversine_m(lat, lon, n.latitude_deg, n.longitude_deg),
-                )
-            })
-        })
-        .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(Ordering::Equal))
-        .ok_or_else(|| {
-            anyhow!(
-                "runway {:?} at {} has active-zone edges but no reachable hold-short node (every boundary node is inside the zone)",
-                runway_ident,
-                airport_ident
-            )
-        })?;
-    // Pick the forbidden edge incident on the chosen hold-short node and
-    // grab its far endpoint's lat/lon. That's the direction the aircraft
-    // wants to face when parked at the hold-short — pointing at the
-    // runway, ready for "line up and wait" or a takeoff clearance.
-    let face_toward_latlon = forbidden_edges
-        .iter()
-        .find_map(|&i| {
+
+    // Each boundary node gets its own face-toward target, computed from a
+    // forbidden edge incident on it — that edge's far endpoint sits on the
+    // runway side, so aiming there faces the aircraft toward the runway.
+    let face_toward = |node_id: i64| -> Option<(f64, f64)> {
+        forbidden_edges.iter().find_map(|&i| {
             let e = &graph.edges[i];
-            let other = if e.from_node == best.0 {
+            let other = if e.from_node == node_id {
                 Some(e.to_node)
-            } else if e.to_node == best.0 {
+            } else if e.to_node == node_id {
                 Some(e.from_node)
             } else {
                 None
             }?;
             let n = graph.nodes.get(&other)?;
             Some((n.latitude_deg, n.longitude_deg))
-        });
+        })
+    };
+
+    // Rank by distance to the threshold; primary = nearest, rest ride
+    // along as `alt_nodes`. The planner picks whichever is cheapest by
+    // path cost, so a candidate on the aircraft's side of the runway
+    // wins over a slightly-nearer one that would require looping around.
+    let mut ranked: Vec<(i64, f64)> = candidate_ids
+        .iter()
+        .filter_map(|id| {
+            graph.nodes.get(id).map(|n| {
+                (*id, haversine_m(lat, lon, n.latitude_deg, n.longitude_deg))
+            })
+        })
+        .collect();
+    ranked.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(Ordering::Equal));
+    if ranked.is_empty() {
+        return Err(anyhow!(
+            "runway {:?} at {} has active-zone edges but no reachable hold-short node (every boundary node is inside the zone)",
+            runway_ident,
+            airport_ident
+        ));
+    }
+    let primary = ranked[0].0;
+    let primary_face = face_toward(primary);
+    let alt_nodes: Vec<HoldShortCandidate> = ranked[1..]
+        .iter()
+        .map(|(id, _)| HoldShortCandidate {
+            node: *id,
+            face_toward_latlon: face_toward(*id),
+        })
+        .collect();
+    let _ = face_toward;
 
     Ok(DestinationResolution {
-        node: best.0,
+        node: primary,
         forbidden_edges,
-        face_toward_latlon,
+        face_toward_latlon: primary_face,
+        alt_nodes,
     })
 }
 
@@ -702,10 +761,18 @@ fn initial_bearing_deg(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
 /// traversals — used by `forbid_backward_runway_traversals` to allow
 /// rolling forward along a runway while still blocking a U-turn-and-
 /// backtaxi on the same pavement.
+///
+/// `destination_nodes` is a non-empty list of acceptable goals — the
+/// planner terminates at whichever is cheapest from `start_node` and
+/// records it in the returned `TaxiPlan.destination_node`. For a full-
+/// length runway hold-short, pass every valid hold-short node on both
+/// sides of the runway; Dijkstra's optimality guarantees the one chosen
+/// is the minimum-cost, which avoids the "3 m closer to threshold but
+/// 4 km further by taxiway" trap.
 pub fn plan(
     graph: &TaxiGraph,
     start_node: i64,
-    destination_node: i64,
+    destination_nodes: &[i64],
     via_taxiways: &[String],
     forbidden_edges: &HashSet<usize>,
     forbidden_directional: &HashSet<(i64, i64)>,
@@ -713,13 +780,22 @@ pub fn plan(
     if !graph.nodes.contains_key(&start_node) {
         bail!("start node {} not in taxi graph for {}", start_node, graph.airport_ident);
     }
-    if !graph.nodes.contains_key(&destination_node) {
+    if destination_nodes.is_empty() {
         bail!(
-            "destination node {} not in taxi graph for {}",
-            destination_node,
+            "plan() called with empty destination_nodes for {}",
             graph.airport_ident
         );
     }
+    for d in destination_nodes {
+        if !graph.nodes.contains_key(d) {
+            bail!(
+                "destination node {} not in taxi graph for {}",
+                d,
+                graph.airport_ident
+            );
+        }
+    }
+    let dest_set: HashSet<i64> = destination_nodes.iter().copied().collect();
 
     // Stage semantics: stage 0 = "before first named taxiway"; stage i in
     // 1..=len = "on via_taxiways[i-1]"; stage len+1 = "past last taxiway".
@@ -770,7 +846,7 @@ pub fn plan(
         if best.get(&key).copied().unwrap_or(f64::INFINITY) < dist {
             continue;
         }
-        if node == destination_node && stage >= target_stage.saturating_sub(1) {
+        if dest_set.contains(&node) && stage >= target_stage.saturating_sub(1) {
             final_key = Some(key);
             break;
         }
@@ -810,12 +886,13 @@ pub fn plan(
 
     let Some(end) = final_key else {
         bail!(
-            "no taxi route from node {} to node {} via {:?}",
+            "no taxi route from node {} to any of {:?} via {:?}",
             start_node,
-            destination_node,
+            destination_nodes,
             via_taxiways
         );
     };
+    let destination_node = end.0;
 
     // Reconstruct the leg list by walking came_from back to the start.
     let mut legs_rev: Vec<TaxiLeg> = Vec::new();
@@ -1018,7 +1095,7 @@ mod tests {
     #[test]
     fn unconstrained_picks_shortest_path() {
         let g = tiny_graph();
-        let plan = plan(&g, 1, 3, &[], &HashSet::new(), &HashSet::new()).unwrap();
+        let plan = plan(&g, 1, &[3], &[], &HashSet::new(), &HashSet::new()).unwrap();
         // N1→N3 directly via the connector is shortest.
         assert_eq!(plan.legs.len(), 1);
         assert_eq!(plan.legs[0].from_node, 1);
@@ -1028,7 +1105,7 @@ mod tests {
     #[test]
     fn constrained_forces_a_then_d() {
         let g = tiny_graph();
-        let plan = plan(&g, 1, 3, &["A".into(), "D".into()], &HashSet::new(), &HashSet::new()).unwrap();
+        let plan = plan(&g, 1, &[3], &["A".into(), "D".into()], &HashSet::new(), &HashSet::new()).unwrap();
         // Must go N1 -A- N2 -D- N3 (not the shorter connector, not via C/N4).
         assert_eq!(plan.legs.len(), 2);
         assert_eq!(plan.legs[0].taxiway_name, "A");
@@ -1039,7 +1116,7 @@ mod tests {
     #[test]
     fn impossible_constraint_errors() {
         let g = tiny_graph();
-        let err = plan(&g, 1, 3, &["NOPE".into()], &HashSet::new(), &HashSet::new()).unwrap_err();
+        let err = plan(&g, 1, &[3], &["NOPE".into()], &HashSet::new(), &HashSet::new()).unwrap_err();
         assert!(err.to_string().contains("no taxi route"));
     }
 
@@ -1047,7 +1124,7 @@ mod tests {
     fn runway_crossings_surface_in_plan() {
         let g = tiny_graph();
         // Force the long path through N4 via C — it has active_zones="ils:31".
-        let plan = plan(&g, 1, 3, &["A".into(), "C".into(), "D".into()], &HashSet::new(), &HashSet::new()).unwrap();
+        let plan = plan(&g, 1, &[3], &["A".into(), "C".into(), "D".into()], &HashSet::new(), &HashSet::new()).unwrap();
         assert!(plan.runway_crossings.iter().any(|z| z.contains("ils:31")));
     }
 
@@ -1098,19 +1175,82 @@ mod tests {
         let g = hold_short_graph();
         // Without forbidden edges the planner will gladly walk 1 → 2 → 3
         // (past the hold-short) if asked for node 3.
-        let p_cross = plan(&g, 1, 3, &[], &HashSet::new(), &HashSet::new()).unwrap();
+        let p_cross = plan(&g, 1, &[3], &[], &HashSet::new(), &HashSet::new()).unwrap();
         assert_eq!(p_cross.legs.len(), 2);
 
         // With the runway-crossing edge forbidden and node 2 as goal, the
         // plan stops at node 2.
         let forbidden: HashSet<usize> = [1].into_iter().collect();
-        let p_hold = plan(&g, 1, 2, &[], &forbidden, &HashSet::new()).unwrap();
+        let p_hold = plan(&g, 1, &[2], &[], &forbidden, &HashSet::new()).unwrap();
         assert_eq!(p_hold.legs.len(), 1);
         assert_eq!(p_hold.legs[0].to_node, 2);
 
         // Asking for node 3 with the crossing forbidden is infeasible.
-        let err = plan(&g, 1, 3, &[], &forbidden, &HashSet::new()).unwrap_err();
+        let err = plan(&g, 1, &[3], &[], &forbidden, &HashSet::new()).unwrap_err();
         assert!(err.to_string().contains("no taxi route"));
+    }
+
+    /// Regression: at KVNY, the full-length 16L hold-short has two valid
+    /// boundary nodes — one 40.4 m from the threshold (west side of the
+    /// runway) and one 43.3 m from the threshold (east side). The old
+    /// resolver picked the west-side node by a 3 m margin, which then
+    /// required a 4 km detour around the airport (south via P, north via
+    /// A) because the aircraft started on the east ramp and 16L itself
+    /// couldn't be crossed. The new resolver returns both candidates and
+    /// the planner picks whichever is cheapest from the start.
+    ///
+    /// Synthetic graph:
+    ///
+    ///     start (1) -- clean(short) -- east_hs (2) --+
+    ///                                                 |-- [forbidden] -- rwy_mid (3)
+    ///     start (1) -- clean(LONG ) -- west_hs (4) --+
+    ///
+    /// Both hold-short nodes are equidistant to `rwy_mid` (= what the
+    /// resolver uses as the threshold proxy in the real code). The
+    /// connection to `start` differs by ~100× in length.
+    #[test]
+    fn plan_picks_reachable_hold_short_over_nearer_but_unreachable() {
+        let mk = |id, lat, lon| TaxiNode {
+            node_id: id,
+            latitude_deg: lat,
+            longitude_deg: lon,
+            usage: "both".to_string(),
+        };
+        let mut nodes = HashMap::new();
+        nodes.insert(1, mk(1, 37.0000, -122.0000));
+        nodes.insert(2, mk(2, 37.0000, -122.0001)); // east hold-short: ~9 m from start
+        nodes.insert(3, mk(3, 37.0000, -122.0002)); // "threshold" proxy
+        nodes.insert(4, mk(4, 37.0010, -122.0003)); // west hold-short: ~111 m from start on a
+                                                     // detour
+        let edges = vec![
+            mk_taxiway_edge(1, 2, "A", ""),       // clean, short
+            mk_taxiway_edge(2, 3, "C", "departure:16L"), // east crossing (forbidden)
+            mk_taxiway_edge(3, 4, "C", "departure:16L"), // west crossing (forbidden)
+            mk_taxiway_edge(1, 4, "D", ""),       // clean, long detour
+        ];
+        let mut adj: HashMap<i64, Vec<(i64, usize)>> = HashMap::new();
+        for (i, e) in edges.iter().enumerate() {
+            adj.entry(e.from_node).or_default().push((e.to_node, i));
+            adj.entry(e.to_node).or_default().push((e.from_node, i));
+        }
+        let g = TaxiGraph {
+            airport_ident: "KSYN".into(),
+            nodes,
+            edges,
+            adj,
+        };
+        // Both node 2 and node 4 border forbidden edges with one clean
+        // neighbour — both are valid hold-short candidates. Give both to
+        // the planner and require it to pick node 2 (cheap) over node 4
+        // (100× more expensive).
+        let forbidden: HashSet<usize> = [1, 2].into_iter().collect();
+        let plan = plan(&g, 1, &[4, 2], &[], &forbidden, &HashSet::new()).unwrap();
+        assert_eq!(
+            plan.destination_node, 2,
+            "planner should pick the reachable-cheap hold-short, not the geometric-nearer one"
+        );
+        assert_eq!(plan.legs.len(), 1);
+        assert_eq!(plan.legs[0].to_node, 2);
     }
 
     /// Regression: at KWHP the taxiway-B edge crossing runway 12/30 had
@@ -1215,7 +1355,7 @@ mod tests {
         // Shortest path from 2 to gate node 0: 2→1→0 via runway backward
         // (~10 m of runway) then taxi A. Without the directional forbid,
         // the planner takes it.
-        let unguarded = plan(&g, 2, 0, &[], &HashSet::new(), &HashSet::new()).unwrap();
+        let unguarded = plan(&g, 2, &[0], &[], &HashSet::new(), &HashSet::new()).unwrap();
         assert_eq!(unguarded.legs.len(), 2);
         assert_eq!(unguarded.legs[0].to_node, 1);
         assert_eq!(unguarded.legs[0].taxiway_name, "12/30");
@@ -1231,7 +1371,7 @@ mod tests {
 
         // With the directional forbid set, the planner must go forward
         // (2→3) on the runway and exit at taxiway B to reach node 5.
-        let plan5 = plan(&g, 2, 5, &[], &HashSet::new(), &fbd).unwrap();
+        let plan5 = plan(&g, 2, &[5], &[], &HashSet::new(), &fbd).unwrap();
         assert_eq!(plan5.legs.len(), 2);
         assert_eq!(plan5.legs[0].from_node, 2);
         assert_eq!(plan5.legs[0].to_node, 3);
@@ -1240,7 +1380,7 @@ mod tests {
         // Destination node 0 is now unreachable without a backtaxi — the
         // only runway-surface traversals heading west are forbidden, and
         // there is no parallel taxiway. Planner must error out.
-        let err = plan(&g, 2, 0, &[], &HashSet::new(), &fbd).unwrap_err();
+        let err = plan(&g, 2, &[0], &[], &HashSet::new(), &fbd).unwrap_err();
         assert!(err.to_string().contains("no taxi route"));
 
         // Escape hatch: naming the runway in via_taxiways lifts the

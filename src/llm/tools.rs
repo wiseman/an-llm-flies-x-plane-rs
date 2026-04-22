@@ -1214,10 +1214,18 @@ pub fn tool_broadcast_on_radio(ctx: &ToolContext, args: &Map<String, Value>) -> 
 /// where `d` is the distance of the inserted leg in feet.
 pub fn build_taxi_legs_with_pullout(
     aircraft_pos_ft: crate::types::Vec2,
+    aircraft_heading_deg: f64,
     plan_legs: &[taxi_route::TaxiLeg],
     georef: GeoReference,
-) -> (Vec<StraightLeg>, Vec<String>, Option<f64>) {
+) -> Result<(Vec<StraightLeg>, Vec<String>, Option<f64>), String> {
     const PULLOUT_THRESHOLD_FT: f64 = 20.0;
+    // Reject pullouts that require more than ~135° of turn — that means
+    // the first graph node is behind the aircraft, which on a runway is
+    // a backtaxi. `forbid_backward_runway_traversals` doesn't help here
+    // because the pullout lead-in is a synthetic segment, not a graph
+    // edge. 90° is too tight (blocks legitimate perpendicular joins).
+    const PULLOUT_MAX_TURN_DEG: f64 = 135.0;
+
     let mut legs_ft: Vec<StraightLeg> = plan_legs
         .iter()
         .map(|l| StraightLeg {
@@ -1228,12 +1236,23 @@ pub fn build_taxi_legs_with_pullout(
     let mut names: Vec<String> = plan_legs.iter().map(|l| l.taxiway_name.clone()).collect();
 
     let Some(first) = legs_ft.first().copied() else {
-        return (legs_ft, names, None);
+        return Ok((legs_ft, names, None));
     };
     let offset = first.start_ft - aircraft_pos_ft;
     let d_ft = offset.length();
     if d_ft <= PULLOUT_THRESHOLD_FT {
-        return (legs_ft, names, None);
+        return Ok((legs_ft, names, None));
+    }
+    let pullout_heading_deg = crate::types::vector_to_heading(offset);
+    let turn_deg = crate::types::wrap_degrees_180(
+        pullout_heading_deg - aircraft_heading_deg,
+    )
+    .abs();
+    if turn_deg > PULLOUT_MAX_TURN_DEG {
+        return Err(format!(
+            "pullout lead-in to first taxi node would require a {:.0}° turn from current heading {:.0}° (max {:.0}°) — aircraft is probably on a runway or facing backward; reposition before engaging",
+            turn_deg, aircraft_heading_deg, PULLOUT_MAX_TURN_DEG,
+        ));
     }
     legs_ft.insert(
         0,
@@ -1243,7 +1262,7 @@ pub fn build_taxi_legs_with_pullout(
         },
     );
     names.insert(0, String::new());
-    (legs_ft, names, Some(d_ft))
+    Ok((legs_ft, names, Some(d_ft)))
 }
 
 pub fn tool_engage_line_up(ctx: &ToolContext, args: &Map<String, Value>) -> String {
@@ -1526,6 +1545,7 @@ pub fn tool_engage_taxi(ctx: &ToolContext, args: &Map<String, Value>) -> String 
     if let Err(e) = ensure_runway_conn(ctx) {
         return format!("error: {}", e);
     }
+    let aircraft_heading_deg = start_heading_deg(&bridge);
     let (plan, face_toward_latlon) = {
         let guard = ctx.runway_conn.lock().unwrap();
         let conn = guard.as_ref().unwrap();
@@ -1554,17 +1574,16 @@ pub fn tool_engage_taxi(ctx: &ToolContext, args: &Map<String, Value>) -> String 
             Ok(d) => d,
             Err(e) => return format!("error: {}", e),
         };
-        let face = dest.face_toward_latlon;
-        let heading_deg = start_heading_deg(&bridge);
         let allowed: std::collections::HashSet<&str> =
             via_taxiways.iter().map(|s| s.as_str()).collect();
         let forbidden_directional = taxi_route::forbid_backward_runway_traversals(
-            &graph, heading_deg, &allowed,
+            &graph, aircraft_heading_deg, &allowed,
         );
+        let dest_nodes = dest.all_node_ids();
         let plan = match taxi_route::plan(
             &graph,
             start_node,
-            dest.node,
+            &dest_nodes,
             &via_taxiways,
             &dest.forbidden_edges,
             &forbidden_directional,
@@ -1572,13 +1591,21 @@ pub fn tool_engage_taxi(ctx: &ToolContext, args: &Map<String, Value>) -> String 
             Ok(p) => p,
             Err(e) => return format!("error: {}", e),
         };
+        let face = dest.face_toward_for(plan.destination_node);
         (plan, face)
     };
 
     let georef = bridge.georef();
     let aircraft_pos_ft = geodetic_offset_ft(start_lat, start_lon, georef);
-    let (legs_ft, names, pullout_ft) =
-        build_taxi_legs_with_pullout(aircraft_pos_ft, &plan.legs, georef);
+    let (legs_ft, names, pullout_ft) = match build_taxi_legs_with_pullout(
+        aircraft_pos_ft,
+        aircraft_heading_deg,
+        &plan.legs,
+        georef,
+    ) {
+        Ok(v) => v,
+        Err(e) => return format!("error: {}", e),
+    };
     // Terminal pose target: stop at the hold-short node aligned with
     // the last leg's direction. An earlier version of this code aimed
     // the aircraft *at* the runway via `face_toward_latlon`, but that
@@ -1733,10 +1760,11 @@ pub fn tool_plan_taxi_route(ctx: &ToolContext, args: &Map<String, Value>) -> Str
     let forbidden_directional = taxi_route::forbid_backward_runway_traversals(
         &graph, heading_deg, &allowed,
     );
+    let dest_nodes = dest.all_node_ids();
     let plan = match taxi_route::plan(
         &graph,
         start_node,
-        dest.node,
+        &dest_nodes,
         &via_taxiways,
         &dest.forbidden_edges,
         &forbidden_directional,
@@ -1800,7 +1828,7 @@ pub fn tool_plan_park_route(ctx: &ToolContext, args: &Map<String, Value>) -> Str
     let plan = match taxi_route::plan(
         &graph,
         start_node,
-        resolved.nearest_node,
+        &[resolved.nearest_node],
         &via_taxiways,
         &std::collections::HashSet::new(),
         &forbidden_directional,
@@ -1857,6 +1885,7 @@ pub fn tool_engage_park(ctx: &ToolContext, args: &Map<String, Value>) -> String 
     if let Err(e) = ensure_runway_conn(ctx) {
         return format!("error: {}", e);
     }
+    let aircraft_heading_deg = start_heading_deg(&bridge);
     let (plan, resolved) = {
         let guard = ctx.runway_conn.lock().unwrap();
         let conn = guard.as_ref().unwrap();
@@ -1880,16 +1909,15 @@ pub fn tool_engage_park(ctx: &ToolContext, args: &Map<String, Value>) -> String 
             Ok(r) => r,
             Err(e) => return format!("error: {}", e),
         };
-        let heading_deg = start_heading_deg(&bridge);
         let allowed: std::collections::HashSet<&str> =
             via_taxiways.iter().map(|s| s.as_str()).collect();
         let forbidden_directional = taxi_route::forbid_backward_runway_traversals(
-            &graph, heading_deg, &allowed,
+            &graph, aircraft_heading_deg, &allowed,
         );
         let plan = match taxi_route::plan(
             &graph,
             start_node,
-            resolved.nearest_node,
+            &[resolved.nearest_node],
             &via_taxiways,
             &std::collections::HashSet::new(),
             &forbidden_directional,
@@ -1902,8 +1930,15 @@ pub fn tool_engage_park(ctx: &ToolContext, args: &Map<String, Value>) -> String 
 
     let georef = bridge.georef();
     let aircraft_pos_ft = geodetic_offset_ft(start_lat, start_lon, georef);
-    let (mut legs_ft, mut names, pullout_ft) =
-        build_taxi_legs_with_pullout(aircraft_pos_ft, &plan.legs, georef);
+    let (mut legs_ft, mut names, pullout_ft) = match build_taxi_legs_with_pullout(
+        aircraft_pos_ft,
+        aircraft_heading_deg,
+        &plan.legs,
+        georef,
+    ) {
+        Ok(v) => v,
+        Err(e) => return format!("error: {}", e),
+    };
 
     // Append a short lead-in leg from the last taxi-graph node to the
     // actual 1300 spot coordinates. Parking spots sit off the network, so

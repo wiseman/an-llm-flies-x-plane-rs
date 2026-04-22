@@ -1263,9 +1263,11 @@ fn engage_taxi_prepends_pullout_leg_when_far_from_nearest_node() {
     let expected_start: Vec2 = geodetic_offset_ft(start_lat, start_lon, georef);
     let (legs, _names, pullout) = xplane_pilot::llm::tools::build_taxi_legs_with_pullout(
         expected_start,
+        0.0,
         &[], // empty stand-in; we exercise the full path via the dispatch above
         georef,
-    );
+    )
+    .expect("empty plan never errors");
     // Empty plan → empty legs list, no pullout.
     assert!(legs.is_empty());
     assert!(pullout.is_none());

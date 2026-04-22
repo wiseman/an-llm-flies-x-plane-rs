@@ -121,6 +121,14 @@ impl ScenarioRunner {
             if phase == FlightPhase::TaxiClear {
                 break;
             }
+            // ModeManager holds Rollout until past the runway end, so a
+            // sim that brakes to a stop mid-runway would otherwise spin
+            // to max_time_s.
+            if phase == FlightPhase::Rollout
+                && raw_state.ground_velocity_ft_s.length() < 1.0
+            {
+                break;
+            }
         }
 
         let final_phase = pilot.phase();

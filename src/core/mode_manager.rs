@@ -266,15 +266,16 @@ impl ModeManager {
                 if lateral_off > RUNWAY_EXIT_OFFSET_FT {
                     return FlightPhase::RunwayExit;
                 }
-                // Deterministic-sim fallback: when the aircraft comes to
-                // a full stop on centerline (no taxiway exit taken),
-                // transition to TaxiClear so pattern_fly hands off to
-                // idle with a stationary aircraft. The threshold is
-                // tight (≤ 1 kt) to match RunwayExit's full-stop guard —
-                // earlier we handed off at 5 kt, which left the aircraft
-                // coasting uncontrolled while the LLM decided next
-                // steps.
-                if state.gs_kt <= 1.0 {
+                // Only declare TaxiClear when the aircraft is both
+                // stopped and past the runway end — stopping mid-runway
+                // on centerline leaves the aircraft on pavement, and
+                // the next engage_park/engage_taxi would plan a pullout
+                // straight back up the runway.
+                let past_end = state
+                    .runway_x_ft
+                    .map(|x| x > pattern.runway_frame.runway.length_ft)
+                    .unwrap_or(false);
+                if state.gs_kt <= 1.0 && past_end {
                     return FlightPhase::TaxiClear;
                 }
                 return phase;

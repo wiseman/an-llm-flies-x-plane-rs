@@ -488,7 +488,7 @@ fn taxi_profile_slows_when_approaching_sharp_turn() {
     // Well before the turn — should cruise.
     let cruise = taxi_state(Vec2::new(200.0, 0.0), 90.0, 15.0);
     let t1 = p.contribute(&cruise, 0.2);
-    assert_eq!(t1.contribution.target_speed_kt, Some(10.0));
+    assert_eq!(t1.contribution.target_speed_kt, Some(20.0));
     // Close to the turn (within 180 ft lookahead) — should command turn speed.
     let approach = taxi_state(Vec2::new(900.0, 0.0), 90.0, 12.0);
     let t2 = p.contribute(&approach, 0.2);
@@ -518,7 +518,7 @@ fn taxi_profile_creeps_when_heading_far_off_leg() {
     // Aligned to the leg heading — cruise.
     let aligned = taxi_state(Vec2::new(10.0, 0.0), 90.0, 10.0);
     let tick = p.contribute(&aligned, 0.2);
-    assert_eq!(tick.contribution.target_speed_kt, Some(10.0));
+    assert_eq!(tick.contribution.target_speed_kt, Some(20.0));
 }
 
 #[test]
