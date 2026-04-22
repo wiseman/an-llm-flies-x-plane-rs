@@ -1078,6 +1078,67 @@ fn plan_taxi_route_constrained_honors_via_taxiways() {
     assert!(r.contains("A -> C"), "plan did not honor via list: {}", r);
 }
 
+/// When a runway has hold-short nodes at multiple points (approach end
+/// *and* a midfield crossing), "taxi to runway X" with no `intersection`
+/// argument must route to the approach-end cluster. Without the
+/// threshold-cluster clamp in `resolve_runway_hold_short`, Dijkstra would
+/// silently convert the clearance into an intersection departure by
+/// picking whichever hold-short is cheapest from the aircraft's start.
+///
+/// Fixture: runway 09/27 east-west. Start sits due north of a midfield
+/// crossing, with a long taxiway heading west to the 09 threshold
+/// hold-short. Both candidates border active-zone edges for 09, but the
+/// midfield HS is ~182 ft from start while the 09 threshold HS is ~1830
+/// ft away. The correct answer is still the 09 threshold.
+#[test]
+fn engage_taxi_picks_threshold_not_midfield_hold_short() {
+    let dir = TempDir::new().unwrap();
+    let extra = vec![
+        // Runway 09 threshold at (37.0, -122.0); 27 threshold at (37.0, -121.99).
+        "1 0 0 0 KMID KMID Midfield Test\n\
+         100 22.86 1 0 0.25 0 2 0 \
+         09 37.000000 -122.000000 0.00 0 0 0 0 0 \
+         27 37.000000 -121.990000 0.00 0 0 0 0 0\n\
+         1201 37.001000 -121.995000 both 10\n\
+         1201 37.000500 -121.995000 both 1\n\
+         1201 37.000000 -121.995000 both 2\n\
+         1201 37.000500 -122.000000 both 3\n\
+         1201 37.000000 -122.000000 both 4\n\
+         1202 10 1 twoway taxiway_E \n\
+         1202 1 2 twoway taxiway_E C\n\
+         1204 departure 09,27\n\
+         1202 10 3 twoway taxiway_E B\n\
+         1202 3 4 twoway taxiway_E B\n\
+         1204 departure 09,27\n"
+            .to_string(),
+    ];
+    build_fake_parquet(dir.path(), &extra);
+    let (ctx, _bridge) = make_ctx_with_parquet(dir.path());
+    let r = dispatch_tool(
+        &call(
+            "plan_taxi_route",
+            json!({
+                "airport_ident": "KMID",
+                "destination_runway": "09",
+                "via_taxiways": [],
+                "start_lat": 37.001000,
+                "start_lon": -121.995000,
+            }),
+        ),
+        &ctx,
+    );
+    assert!(!r.starts_with("error"), "got: {}", r);
+    // The 09 threshold hold-short is node 3. Midfield is node 1. Without
+    // the threshold-cluster clamp, Dijkstra picks node 1 (1 leg, ~182 ft);
+    // the correct plan goes to node 3 (~1830 ft via taxiway B).
+    assert!(
+        r.contains("destination_node=3"),
+        "planner picked wrong hold-short — expected node 3 (09 threshold), got:\n{}",
+        r
+    );
+    assert!(!r.contains("destination_node=1"));
+}
+
 #[test]
 fn plan_taxi_route_airport_without_network_errors() {
     let dir = TempDir::new().unwrap();

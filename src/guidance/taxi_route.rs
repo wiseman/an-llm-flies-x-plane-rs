@@ -191,11 +191,15 @@ pub struct HoldShortCandidate {
 /// the runway at the hold-short line instead of parked parallel to it
 /// along the taxiway.
 ///
-/// `alt_nodes` carries the remaining valid hold-short candidates (those
-/// not chosen as the primary `node`). Pass primary + alts into `plan()`
+/// `alt_nodes` carries the remaining valid hold-short candidates in the
+/// same threshold cluster as `node` (e.g. the pavement-end hold-short on
+/// the opposite side of the runway). Pass primary + alts into `plan()`
 /// so it picks whichever is cheapest from the aircraft's start — without
 /// this, the planner may detour around the whole airport just to reach a
 /// geometrically-closer-to-threshold node on the far side of the runway.
+/// Candidates outside the threshold cluster (mid-field crossings, the
+/// opposite threshold) are excluded: "taxi to runway X" without an
+/// `intersection` argument must end at X's approach end.
 #[derive(Debug, Clone, Default)]
 pub struct DestinationResolution {
     pub node: i64,
@@ -605,9 +609,23 @@ fn resolve_runway_hold_short(
     };
 
     // Rank by distance to the threshold; primary = nearest, rest ride
-    // along as `alt_nodes`. The planner picks whichever is cheapest by
-    // path cost, so a candidate on the aircraft's side of the runway
-    // wins over a slightly-nearer one that would require looping around.
+    // along as `alt_nodes` so the planner can pick whichever candidate
+    // on the threshold cluster has the cheapest path cost (e.g. the
+    // hold-short on the *aircraft's* side of the pavement end when the
+    // geometrically-closest one would require looping around the runway).
+    //
+    // Hard-clamp alt_nodes to a tight window around the primary: without
+    // an `intersection` argument, "taxi to runway X" means the approach
+    // end, and every boundary node of X's active zone is a candidate —
+    // including mid-runway taxiway crossings and the opposite threshold's
+    // hold-shorts. Those are hundreds-to-thousands of ft from the
+    // requested threshold, so they win on path cost and silently convert
+    // the clearance into an intersection departure. The cluster of
+    // legitimate threshold-end hold-shorts (both sides of pavement plus
+    // any approach hold-short) sits within ~150 ft of the threshold
+    // reference point, so a 500 ft cushion covers them while excluding
+    // mid-field.
+    const THRESHOLD_CLUSTER_CUSHION_M: f64 = 152.4; // 500 ft
     let mut ranked: Vec<(i64, f64)> = candidate_ids
         .iter()
         .filter_map(|id| {
@@ -626,8 +644,11 @@ fn resolve_runway_hold_short(
     }
     let primary = ranked[0].0;
     let primary_face = face_toward(primary);
+    let primary_dist_m = ranked[0].1;
+    let alt_cutoff_m = primary_dist_m + THRESHOLD_CLUSTER_CUSHION_M;
     let alt_nodes: Vec<HoldShortCandidate> = ranked[1..]
         .iter()
+        .take_while(|(_, d)| *d <= alt_cutoff_m)
         .map(|(id, _)| HoldShortCandidate {
             node: *id,
             face_toward_latlon: face_toward(*id),
