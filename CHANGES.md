@@ -5,6 +5,134 @@ The format is loosely based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project follows [Semantic Versioning](https://semver.org).
 
+## [0.5.0] — 2026-04-22
+
+### NOTAMs
+
+- After landing the pilot actually leaves the runway. Rollout
+  decelerates to a turnoff speed and holds it instead of braking to a
+  dead stop on the centerline; pick an exit with
+  `list_runway_exits` / `choose_runway_exit` and `pattern_fly` hands
+  off to idle once you're clear.
+- The pilot can park. `engage_park(airport_ident, parking_name, …)`
+  taxis to a named gate / tie-down and stops with the nose on the
+  painted heading. Query the new `parking_spots` view for candidates.
+- Taxi routing no longer backtaxis down runways. Hold-short
+  resolution, Dijkstra edge filtering, and the synthetic pullout
+  lead-in all reject backward runway traversals; an off-runway ramp
+  pirouette of any angle is still fine.
+- "Taxi to runway X" without an intersection reliably lands at X's
+  approach end; mid-field and opposite-threshold crossings are no
+  longer silent intersection departures.
+- Operator replies come through even when the pilot also runs a tool
+  — previously any response that paired a message with a
+  `sleep()`/function call dropped the message on the floor and
+  looked like the pilot ignored you.
+- Log and radio panes are restyled: colored left-gutter bars per
+  subsystem, operator turns in a subtle "user bubble" background,
+  pilot vs ATC transmissions color-coded, errors keep their red
+  sigil.
+- Pilot behaves more like a pilot. It won't `sleep` while moving with
+  only `idle_*` profiles engaged, won't pick a non-existent runway
+  exit, tool errors carry remediation text it's expected to act on,
+  and the stable-approach rule keeps it from bailing on good flares
+  for cosmetic reasons.
+
+### Added
+
+- `engage_park(airport_ident, parking_name, via_taxiways=[...])` and
+  `plan_park_route(...)` route to named parking spots sourced from
+  apt.dat rows 1300 (startup location: gate, tie-down, hangar) and
+  1301 (airline-operations metadata: ICAO category, operation type,
+  airline codes). Persisted as a Hilbert-sorted `parking_spots`
+  parquet table. Schema version bumped to 3 — existing caches rebuild
+  on next start.
+- `list_runway_exits(airport_ident, runway_ident)` and
+  `choose_runway_exit(taxiway_name)` drive the post-landing turnoff.
+  Exits are annotated with their position relative to the aircraft
+  (ahead / behind / abeam); `choose_runway_exit` validates against
+  `list_runway_exits` so the LLM can't silently pick an exit that
+  doesn't exist.
+- New `FlightPhase::RunwayExit` sits between `Rollout` and
+  `TaxiClear`. Entered when lateral offset passes 75 ft, exits at
+  ground stop or >150 ft. `PatternFlyProfile` hands off to idle on
+  the first `TaxiClear` tick when a preferred exit is set, so the
+  LLM picks up a stationary aircraft to taxi or park.
+- Scenario-driven eval harness under `scripts/eval/` — PEP 723 `uv`
+  script that applies an X-Plane 12.4 scenario via the `flight_init`
+  REST API, spawns `sim-pilot --headless`, captures 1 Hz state-trace
+  CSV + log, and emits a neutral `report.json`. Three seed
+  scenarios: `deadstick_kwhp_12`, `taxi_after_landing_kwhp_12`,
+  `taxi_only_kwhp`.
+- `AGENTS.md` with repo guidelines for Codex and other agent tooling.
+
+### Changed
+
+- System prompt reorganised around active airmanship. New Core
+  principles: aviate then navigate then communicate; `idle_*` means
+  "nothing is flying"; a clearance is a pending action, not a
+  conversation; stable-approach discipline; "waiting on context" is
+  not a plan — query. Plus a per-turn tool-call budget reminder
+  (~10 per turn, batch the work).
+- Log pane restyled: per-kind colored left-gutter bar (`▎`) plus
+  default-color body; errors keep the `!` sigil + red-bold for
+  emphasis; operator entries render over a subtle RGB(32,32,38)
+  "user bubble" background padded to pane width; a blank line
+  separates consecutive operator↔llm turns.
+- Radio pane per-source coloring: pilot broadcasts in light cyan,
+  ATC/other-traffic in yellow, tuning notes in dim gray.
+- `SimBus` log entries carry a typed `LogKind` (operator, llm,
+  safety, error, mode, system, tool-call, tokens, heartbeat, voice)
+  instead of a parsed bracket-tag. Compact-mode filtering keys off
+  the kind. On-disk log file format is unchanged.
+- `sleep` refuses when the aircraft is moving and only `idle_*`
+  profiles are active. `pattern_fly`-not-active tool errors now
+  tell the LLM exactly which tool to call.
+- `TaxiProfile` mode-line shows total remaining taxi distance
+  alongside the current leg.
+- Cruise taxi speed raised 10 → 20 kt.
+- `Rollout → TaxiClear` transition requires both `gs ≤ 1 kt` and
+  `runway_x_ft > length_ft` — no more "taxi clear" declared while
+  still sitting mid-runway.
+- Live runner installs a `ctrlc`/`SIGTERM` handler that flips the
+  same stop flags the TUI drain path uses, so harness shutdown
+  finalises the track KML + closes the bridge instead of hard-
+  killing.
+- Shared geodetic helpers (`haversine_m`, `initial_bearing_deg`,
+  `EARTH_RADIUS_M`) moved to `types.rs`; internal callers no longer
+  carry local copies.
+- Active-profiles span in the TUI brightened DarkGray → Gray (was
+  nearly invisible on dark themes).
+
+### Fixed
+
+- Assistant text silently dropped when a single response contained
+  both a message and a function_call. `handle_message` only emitted
+  text on the zero-tool-call branch; operators saw the tool fire
+  but no reply. Now emitted unconditionally.
+- Touchdown no longer slams 75% brakes to a full stop on the runway.
+  Preferred-exit rollout brakes modulate to `turnoff_speed_kt`
+  (default 15) and hold; full brakes only in the last 500 ft of
+  runway if no exit is selected.
+- `engage_park` / `engage_taxi` no longer plan backtaxi routes. The
+  apt.dat graph planner now carries per-edge `runway` vs
+  `taxiway_A..F` category and filters runway-surface edges whose
+  bearing is >90° off aircraft heading. Hold-short resolution clamps
+  alternate boundary nodes to within 500 ft of the primary
+  candidate so mid-field crossings don't win the path-cost race.
+  The synthetic pullout lead-in also rejects >135° turns when the
+  aircraft is on runway pavement.
+- `build_taxi_legs_with_pullout` no longer rejects any >135°-turn
+  pullout — only when the aircraft is actually on runway pavement.
+  Ramp pirouettes of any angle succeed, so aircraft parked facing
+  into a stall can taxi out without a manual reposition.
+- Pattern-fly `Rollout → TaxiClear` handoff now always delivers a
+  stationary aircraft — the centerline fallback tightened from
+  `gs_kt ≤ 5` to `gs_kt ≤ 1`, matching the `RunwayExit` full-stop
+  guard.
+- Log colorizer no longer allocates a lowercased copy of every
+  line; uses a byte-level `contains_ascii_ignore_case` helper.
+
 ## [0.4.0] — 2026-04-20
 
 ### NOTAMs

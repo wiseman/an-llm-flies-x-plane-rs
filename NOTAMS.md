@@ -3,6 +3,26 @@
 Operator-level summary of what's landed in each release, in pilot
 language. For code-level detail see `CHANGES.md`.
 
+## [0.5.0] — 2026-04-22
+
+- After landing the pilot leaves the runway. Rollout decelerates to a
+  turnoff speed, you pick an exit, `pattern_fly` hands you a parked
+  aircraft off the centerline.
+- The pilot can park. `engage_park` takes you to a named gate or
+  tie-down and stops on the painted heading.
+- No more backtaxi down runways — taxi routing refuses backward
+  runway traversals at every stage.
+- Operator replies stop getting dropped when the pilot also runs a
+  tool. Previously any response that paired a message with a `sleep()`
+  looked like the pilot ignored you.
+- Log and radio panes restyled — colored left-gutter bars per
+  subsystem, operator turns in a subtle "user bubble" background,
+  pilot vs ATC transmissions color-coded.
+- The pilot behaves more like a pilot: won't sleep while coasting
+  with nothing flying the aircraft, acts on tool errors instead of
+  escalating them, and doesn't bail on a stable flare for cosmetic
+  reasons.
+
 ## [0.4.0] — 2026-04-20
 
 - Intersection departures work end-to-end — "taxi to runway 19 at
