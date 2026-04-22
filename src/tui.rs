@@ -593,18 +593,6 @@ pub fn run_tui(
         };
         let log_entries = bus.log_entries();
         let (_, _, radio) = bus.snapshot();
-        // A single bus entry can span multiple physical lines (e.g. a
-        // takeoff_checklist or sql_query tool result). `render_log_entry`
-        // splits on '\n' and expands tabs to 4-space stops so ratatui
-        // doesn't render control characters as single-column glyphs that
-        // garble columns. Every physical line of an entry carries the same
-        // per-kind style (fixes multi-line color loss that happened when
-        // we split-then-colorize on a flat string).
-        let log_lines: Vec<Line> = log_entries
-            .iter()
-            .filter(|e| log_detail || !e.kind.is_verbose())
-            .flat_map(render_log_entry)
-            .collect();
         let radio_lines: Vec<Line> = radio.iter().flat_map(|l| render_radio_line(l)).collect();
 
         terminal.draw(|f| {
@@ -618,6 +606,11 @@ pub fn run_tui(
                     Constraint::Length(5),  // input (3 content lines + borders)
                 ])
                 .split(area);
+
+            // Inside the draw closure: operator-row bg tint needs the
+            // pane's live inner width to pad out to the border.
+            let log_inner_width = chunks[1].width.saturating_sub(2);
+            let log_lines = build_log_lines(&log_entries, log_detail, log_inner_width);
 
             let status_paragraph = Paragraph::new(status_fragments.clone())
                 .block(Block::default().borders(Borders::ALL).title(" FLIGHT "))
@@ -1219,39 +1212,38 @@ fn history_go_forward(
     *input_cursor = input_buffer.chars().count();
 }
 
-/// Per-kind TUI styling: sigil glyph + how to style the body and the sigil
-/// itself. Kept in one table so the palette is obvious at a glance and so
-/// the sigil gutter-width stays consistent across kinds (all 1 column wide).
-struct LogStyle {
-    sigil: &'static str,
-    sigil_style: Style,
-    body_style: Style,
+/// Most kinds render as a colored left-gutter bar with default body
+/// text. Errors keep a sigil + red-bold body so they still cut through
+/// a stream of bar-styled entries.
+enum LogStyle {
+    Bar {
+        bar_style: Style,
+        body_style: Style,
+    },
+    Sigil {
+        sigil: &'static str,
+        sigil_style: Style,
+        body_style: Style,
+    },
 }
+
+const LOG_BAR: &str = "▎";
 
 fn style_for_kind(kind: LogKind) -> LogStyle {
     match kind {
-        LogKind::Operator => LogStyle {
-            sigil: "▶",
-            sigil_style: Style::default()
-                .fg(Color::LightMagenta)
-                .add_modifier(Modifier::BOLD),
-            body_style: Style::default().fg(Color::LightMagenta),
-        },
-        LogKind::Llm => LogStyle {
-            sigil: "●",
-            sigil_style: Style::default()
-                .fg(Color::LightGreen)
-                .add_modifier(Modifier::BOLD),
+        LogKind::Operator => LogStyle::Bar {
+            bar_style: Style::default().fg(Color::LightMagenta),
             body_style: Style::default(),
         },
-        LogKind::Safety => LogStyle {
-            sigil: "⚠",
-            sigil_style: Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-            body_style: Style::default().fg(Color::Yellow),
+        LogKind::Llm => LogStyle::Bar {
+            bar_style: Style::default().fg(Color::LightGreen),
+            body_style: Style::default(),
         },
-        LogKind::Error => LogStyle {
+        LogKind::Safety => LogStyle::Bar {
+            bar_style: Style::default().fg(Color::Yellow),
+            body_style: Style::default(),
+        },
+        LogKind::Error => LogStyle::Sigil {
             sigil: "!",
             sigil_style: Style::default()
                 .fg(Color::LightRed)
@@ -1260,34 +1252,85 @@ fn style_for_kind(kind: LogKind) -> LogStyle {
                 .fg(Color::LightRed)
                 .add_modifier(Modifier::BOLD),
         },
-        LogKind::Mode => LogStyle {
-            sigil: "·",
-            sigil_style: Style::default().fg(Color::Gray),
+        LogKind::Mode => LogStyle::Bar {
+            bar_style: Style::default().fg(Color::Gray),
             body_style: Style::default().fg(Color::Gray),
         },
-        LogKind::System => LogStyle {
-            sigil: "·",
-            sigil_style: Style::default().fg(Color::Gray),
+        LogKind::System => LogStyle::Bar {
+            bar_style: Style::default().fg(Color::Gray),
             body_style: Style::default().fg(Color::Gray),
         },
-        LogKind::ToolCall | LogKind::Tokens | LogKind::Heartbeat | LogKind::Voice => LogStyle {
-            sigil: "·",
-            sigil_style: Style::default().fg(Color::DarkGray),
-            body_style: Style::default().fg(Color::DarkGray),
-        },
+        LogKind::ToolCall | LogKind::Tokens | LogKind::Heartbeat | LogKind::Voice => {
+            LogStyle::Bar {
+                bar_style: Style::default().fg(Color::DarkGray),
+                body_style: Style::default().fg(Color::DarkGray),
+            }
+        }
     }
 }
 
-/// Render one `LogEntry` as one-or-more ratatui `Line`s. The first physical
-/// line carries the kind's sigil + a single-space gutter; subsequent lines
-/// of a multi-line entry get a 2-space indent (no sigil) so they visually
-/// group under the leading glyph. All lines share the kind's body style.
+/// Slightly-lighter-than-black tint for operator blocks — reads like a
+/// chat "user bubble" against the default terminal bg.
+const OPERATOR_BG: Color = Color::Rgb(32, 32, 38);
+
+/// Filter, insert a blank line at each operator↔llm turn, and tint
+/// operator lines to the pane's inner width so the bg extends past the
+/// text itself.
+fn build_log_lines(
+    entries: &[LogEntry],
+    show_verbose: bool,
+    inner_width: u16,
+) -> Vec<Line<'static>> {
+    let mut out: Vec<Line<'static>> = Vec::new();
+    let mut prev_kind: Option<LogKind> = None;
+    for entry in entries.iter().filter(|e| show_verbose || !e.kind.is_verbose()) {
+        if prev_kind.is_some_and(|p| is_author_turn_boundary(p, entry.kind)) {
+            out.push(Line::default());
+        }
+        let is_operator = entry.kind == LogKind::Operator;
+        for line in render_log_entry(entry) {
+            out.push(if is_operator {
+                tint_line_bg(line, OPERATOR_BG, inner_width)
+            } else {
+                line
+            });
+        }
+        prev_kind = Some(entry.kind);
+    }
+    out
+}
+
+fn is_author_turn_boundary(prev: LogKind, cur: LogKind) -> bool {
+    matches!(
+        (prev, cur),
+        (LogKind::Operator, LogKind::Llm) | (LogKind::Llm, LogKind::Operator)
+    )
+}
+
+/// Apply `bg` to every span on the line in place and pad the row out to
+/// `inner_width` columns with a trailing bg-only space. Content wider
+/// than the pane wraps onto an un-tinted continuation row — ratatui
+/// wraps after styling, and manually rendering the wrap here would fight
+/// the Paragraph widget.
+fn tint_line_bg(mut line: Line<'static>, bg: Color, inner_width: u16) -> Line<'static> {
+    let used = line.width();
+    for span in line.spans.iter_mut() {
+        span.style = span.style.bg(bg);
+    }
+    let width = inner_width as usize;
+    if width > used {
+        line.spans.push(Span::styled(
+            " ".repeat(width - used),
+            Style::default().bg(bg),
+        ));
+    }
+    line
+}
+
 fn render_log_entry(entry: &LogEntry) -> Vec<Line<'static>> {
-    // Error lines can still embed an "error" substring that we want to
-    // promote visually even if the caller classified them loosely. The
-    // enum-driven style already covers Error, but we also bump System
-    // entries whose body starts with "error" — defensive for any lingering
-    // raw `push_log` error strings.
+    // Defensive: a System entry whose body embeds "error" gets upgraded
+    // to the Error style — catches any lingering raw `push_log("error:
+    // …")` that wasn't migrated to push_log_kind.
     let style = if entry.kind == LogKind::System
         && contains_ascii_ignore_case(&entry.text, "error")
     {
@@ -1301,21 +1344,27 @@ fn render_log_entry(entry: &LogEntry) -> Vec<Line<'static>> {
         return Vec::new();
     }
 
-    let sigil_width = 2; // one glyph + one space; matches the continuation indent
-    let indent: String = " ".repeat(sigil_width);
-
     segments
         .into_iter()
         .enumerate()
         .map(|(i, segment)| {
             let mut spans: Vec<Span<'static>> = Vec::with_capacity(3);
-            if i == 0 {
-                spans.push(Span::styled(style.sigil.to_string(), style.sigil_style));
-                spans.push(Span::raw(" "));
-            } else {
-                spans.push(Span::raw(indent.clone()));
+            match &style {
+                LogStyle::Bar { bar_style, body_style } => {
+                    spans.push(Span::styled(LOG_BAR, *bar_style));
+                    spans.push(Span::raw(" "));
+                    spans.push(Span::styled(segment, *body_style));
+                }
+                LogStyle::Sigil { sigil, sigil_style, body_style } => {
+                    if i == 0 {
+                        spans.push(Span::styled(*sigil, *sigil_style));
+                        spans.push(Span::raw(" "));
+                    } else {
+                        spans.push(Span::raw("  "));
+                    }
+                    spans.push(Span::styled(segment, *body_style));
+                }
             }
-            spans.push(Span::styled(segment, style.body_style));
             Line::from(spans)
         })
         .collect()
@@ -1785,6 +1834,104 @@ mod tests {
     }
 
     // ---- Radio pane source classification + styling ----------------
+    // ---- Log pane rendering: bar-gutter + sigil-for-errors ----------
+    #[test]
+    fn render_log_entry_bar_kinds_put_colored_bar_on_every_line() {
+        let entry = LogEntry::new(LogKind::Llm, "line one\nline two");
+        let lines = render_log_entry(&entry);
+        assert_eq!(lines.len(), 2);
+        for line in &lines {
+            assert_eq!(line.spans[0].content, LOG_BAR);
+            assert_eq!(line.spans[0].style.fg, Some(Color::LightGreen));
+            assert_eq!(line.spans[1].content, " ");
+        }
+        assert_eq!(lines[0].spans[2].content, "line one");
+        assert_eq!(lines[1].spans[2].content, "line two");
+        // Bar-kinds render the body in the default style — color lives
+        // on the gutter, not the text.
+        assert!(!lines[0].spans[2].style.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn render_log_entry_error_kind_uses_sigil_not_bar() {
+        let entry = LogEntry::new(LogKind::Error, "boom");
+        let lines = render_log_entry(&entry);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].spans[0].content, "!");
+        assert_ne!(lines[0].spans[0].content, LOG_BAR);
+        assert!(lines[0].spans[0].style.add_modifier.contains(Modifier::BOLD));
+        // Error body stays bold + red for emphasis.
+        assert_eq!(lines[0].spans[2].style.fg, Some(Color::LightRed));
+        assert!(lines[0].spans[2].style.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn render_log_entry_system_with_error_substring_upgrades_to_error_style() {
+        let entry = LogEntry::new(LogKind::System, "fatal error: boom");
+        let lines = render_log_entry(&entry);
+        assert_eq!(lines[0].spans[0].content, "!");
+    }
+
+    #[test]
+    fn build_log_lines_inserts_blank_between_operator_and_llm() {
+        let entries = vec![
+            LogEntry::new(LogKind::Operator, "take off"),
+            LogEntry::new(LogKind::Llm, "rolling"),
+            LogEntry::new(LogKind::Llm, "v1"),
+            LogEntry::new(LogKind::Operator, "abort"),
+        ];
+        let lines = build_log_lines(&entries, true, 40);
+        let joined: Vec<String> = lines
+            .iter()
+            .map(|l| {
+                l.spans.iter().map(|s| s.content.as_ref()).collect::<String>()
+            })
+            .collect();
+        // operator → blank → llm → llm (no blank, same voice) → blank → operator
+        assert_eq!(joined.len(), 6);
+        assert!(joined[0].contains("take off"));
+        assert_eq!(joined[1].trim(), "");
+        assert!(joined[2].contains("rolling"));
+        assert!(joined[3].contains("v1"));
+        assert_eq!(joined[4].trim(), "");
+        assert!(joined[5].contains("abort"));
+    }
+
+    #[test]
+    fn build_log_lines_no_blank_between_unrelated_kinds() {
+        let entries = vec![
+            LogEntry::new(LogKind::System, "bridge up"),
+            LogEntry::new(LogKind::Llm, "rolling"),
+            LogEntry::new(LogKind::Safety, "go_around"),
+        ];
+        let lines = build_log_lines(&entries, true, 40);
+        // No operator↔llm transitions → no separators.
+        assert_eq!(lines.len(), 3);
+    }
+
+    #[test]
+    fn build_log_lines_tints_operator_lines_to_inner_width() {
+        let entries = vec![LogEntry::new(LogKind::Operator, "go")];
+        let lines = build_log_lines(&entries, true, 40);
+        assert_eq!(lines.len(), 1);
+        let row = &lines[0];
+        assert_eq!(row.width(), 40);
+        // Every span on the operator row carries the tint bg.
+        for span in &row.spans {
+            assert_eq!(span.style.bg, Some(OPERATOR_BG));
+        }
+    }
+
+    #[test]
+    fn build_log_lines_does_not_tint_non_operator_lines() {
+        let entries = vec![LogEntry::new(LogKind::Llm, "rolling")];
+        let lines = build_log_lines(&entries, true, 40);
+        assert_eq!(lines.len(), 1);
+        for span in &lines[0].spans {
+            assert_eq!(span.style.bg, None);
+        }
+    }
+
     #[test]
     fn classify_radio_pilot_transmission() {
         assert_eq!(
