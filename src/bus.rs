@@ -4,6 +4,12 @@
 //! and the TUI to exchange text updates without stepping on each other's
 //! stdout. When `echo = true` every push also prints to stdout — set it to
 //! false when the TUI is rendering.
+//!
+//! Log entries carry a `LogKind` so the TUI can style operator input vs
+//! LLM output vs verbose worker chatter independently. `snapshot()` and
+//! `log_tail()` still return `Vec<String>` (legacy-prefixed) so callers
+//! outside the TUI keep working; the TUI uses `log_entries()` to get the
+//! typed entries.
 
 use std::collections::VecDeque;
 use std::fs::{File, OpenOptions};
@@ -16,6 +22,85 @@ use parking_lot::Mutex;
 
 pub const LOG_MAX_LINES: usize = 1000;
 pub const RADIO_MAX_LINES: usize = 200;
+
+/// Classification of a log entry. Drives TUI styling and the compact-mode
+/// filter; also maps to the legacy bracket-tag used in the on-disk `.log`
+/// and in `snapshot()` / `log_tail()` return values.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LogKind {
+    /// Operator input submitted from the TUI (or --atc-message when routed
+    /// as operator). Shown prominently.
+    Operator,
+    /// Final assistant text from the LLM. Shown prominently.
+    Llm,
+    /// /mode switch confirmations.
+    Mode,
+    /// Safety-monitor events (go-around, crash detection, …).
+    Safety,
+    /// Generic system / bridge / track / shutdown messages.
+    System,
+    /// Error messages. The body may already embed a subsystem tag.
+    Error,
+    /// LLM tool dispatch — verbose, hidden in compact mode.
+    ToolCall,
+    /// Per-call token usage — verbose, hidden in compact mode.
+    Tokens,
+    /// Heartbeat status payloads — verbose, hidden in compact mode.
+    Heartbeat,
+    /// Voice/PTT state transitions — verbose, hidden in compact mode.
+    Voice,
+}
+
+impl LogKind {
+    /// Legacy bracket-tag (with trailing space) that was textually baked
+    /// into the log string before typed entries existed. Re-applied at
+    /// read-time by `snapshot()`/`log_tail()`/FileLog so the on-disk `.log`
+    /// and string-filter tests stay byte-compatible with the old behavior.
+    pub fn legacy_prefix(self) -> Option<&'static str> {
+        match self {
+            LogKind::Operator => Some("[operator] "),
+            LogKind::Llm => Some("[llm] "),
+            LogKind::Mode => Some("[mode] "),
+            LogKind::Safety => Some("[safety] "),
+            LogKind::Heartbeat => Some("[heartbeat] "),
+            LogKind::ToolCall | LogKind::Tokens => Some("[llm-worker] "),
+            LogKind::System | LogKind::Error | LogKind::Voice => None,
+        }
+    }
+
+    /// True if this kind should be hidden in the default (compact) TUI view.
+    pub fn is_verbose(self) -> bool {
+        matches!(
+            self,
+            LogKind::ToolCall | LogKind::Tokens | LogKind::Heartbeat | LogKind::Voice
+        )
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct LogEntry {
+    pub kind: LogKind,
+    pub text: String,
+}
+
+impl LogEntry {
+    pub fn new(kind: LogKind, text: impl Into<String>) -> Self {
+        Self { kind, text: text.into() }
+    }
+
+    /// Legacy-formatted string: bracket-tag (if any) + body.
+    pub fn formatted(&self) -> String {
+        match self.kind.legacy_prefix() {
+            Some(p) => {
+                let mut s = String::with_capacity(p.len() + self.text.len());
+                s.push_str(p);
+                s.push_str(&self.text);
+                s
+            }
+            None => self.text.clone(),
+        }
+    }
+}
 
 /// Line-buffered append-only file sink with channel tags + timestamps.
 pub struct FileLog {
@@ -71,7 +156,7 @@ struct BusInner {
     echo: bool,
     file_log: Option<Arc<FileLog>>,
     status_line: String,
-    log_buffer: VecDeque<String>,
+    log_buffer: VecDeque<LogEntry>,
     radio_buffer: VecDeque<String>,
 }
 
@@ -114,46 +199,77 @@ impl SimBus {
         }
     }
 
+    /// Shortcut: push a System-kind entry. Kept for unmigrated callers and
+    /// for genuinely generic subsystem messages.
     pub fn push_log(&self, text: impl Into<String>) {
-        self.push_channel("log", text.into(), /* radio */ false);
+        self.push_log_entry(LogEntry::new(LogKind::System, text.into()));
     }
 
-    pub fn push_radio(&self, text: impl Into<String>) {
-        self.push_channel("radio", text.into(), /* radio */ true);
+    /// Push a typed log entry. Body should be the bare message — the
+    /// `[operator]` / `[llm]` / etc. bracket-tag is re-applied at read-time
+    /// via `LogKind::legacy_prefix`.
+    pub fn push_log_kind(&self, kind: LogKind, text: impl Into<String>) {
+        self.push_log_entry(LogEntry::new(kind, text.into()));
     }
 
-    fn push_channel(&self, channel: &'static str, text: String, radio: bool) {
+    pub fn push_log_entry(&self, entry: LogEntry) {
+        let formatted = entry.formatted();
         let (echo, file_log) = {
             let mut g = self.inner.lock();
-            let buf = if radio { &mut g.radio_buffer } else { &mut g.log_buffer };
-            let cap = if radio { RADIO_MAX_LINES } else { LOG_MAX_LINES };
-            if buf.len() == cap {
-                buf.pop_front();
+            if g.log_buffer.len() == LOG_MAX_LINES {
+                g.log_buffer.pop_front();
             }
-            buf.push_back(text.clone());
+            g.log_buffer.push_back(entry);
             (g.echo, g.file_log.clone())
         };
         if let Some(f) = file_log {
-            f.write(channel, &text);
+            f.write("log", &formatted);
+        }
+        if echo {
+            println!("{}", formatted);
+        }
+    }
+
+    pub fn push_radio(&self, text: impl Into<String>) {
+        let text = text.into();
+        let (echo, file_log) = {
+            let mut g = self.inner.lock();
+            if g.radio_buffer.len() == RADIO_MAX_LINES {
+                g.radio_buffer.pop_front();
+            }
+            g.radio_buffer.push_back(text.clone());
+            (g.echo, g.file_log.clone())
+        };
+        if let Some(f) = file_log {
+            f.write("radio", &text);
         }
         if echo {
             println!("{}", text);
         }
     }
 
+    /// Snapshot with legacy-formatted log strings. Kept for tests and for
+    /// callers that don't need the `LogKind`. The TUI uses `log_entries()`
+    /// directly for styling.
     pub fn snapshot(&self) -> (String, Vec<String>, Vec<String>) {
         let g = self.inner.lock();
         (
             g.status_line.clone(),
-            g.log_buffer.iter().cloned().collect(),
+            g.log_buffer.iter().map(LogEntry::formatted).collect(),
             g.radio_buffer.iter().cloned().collect(),
         )
+    }
+
+    /// Typed view of the log buffer for the TUI.
+    pub fn log_entries(&self) -> Vec<LogEntry> {
+        let g = self.inner.lock();
+        g.log_buffer.iter().cloned().collect()
     }
 
     pub fn log_tail(&self, n: usize) -> Vec<String> {
         let g = self.inner.lock();
         let start = g.log_buffer.len().saturating_sub(n);
-        g.log_buffer.iter().skip(start).cloned().collect()
+        g.log_buffer.iter().skip(start).map(LogEntry::formatted).collect()
     }
 
     pub fn radio_tail(&self, n: usize) -> Vec<String> {
@@ -231,5 +347,38 @@ mod tests {
         }
         let (_, logs, _) = bus.snapshot();
         assert_eq!(logs.len(), 8 * 50);
+    }
+
+    #[test]
+    fn kind_legacy_prefix_matches_old_text_tags() {
+        let bus = SimBus::new(false);
+        bus.push_log_kind(LogKind::Operator, "takeoff");
+        bus.push_log_kind(LogKind::Llm, "rolling");
+        bus.push_log_kind(LogKind::Safety, "go_around triggered: …");
+        bus.push_log_kind(LogKind::Heartbeat, "{\"phase\":\"cruise\"}");
+        bus.push_log_kind(LogKind::ToolCall, "tool set_throttle -> ok");
+        bus.push_log_kind(LogKind::Tokens, "tokens in=10 out=5");
+        let (_, logs, _) = bus.snapshot();
+        assert_eq!(logs[0], "[operator] takeoff");
+        assert_eq!(logs[1], "[llm] rolling");
+        assert_eq!(logs[2], "[safety] go_around triggered: …");
+        assert_eq!(logs[3], "[heartbeat] {\"phase\":\"cruise\"}");
+        assert_eq!(logs[4], "[llm-worker] tool set_throttle -> ok");
+        assert_eq!(logs[5], "[llm-worker] tokens in=10 out=5");
+    }
+
+    #[test]
+    fn log_entries_preserves_kind() {
+        let bus = SimBus::new(false);
+        bus.push_log_kind(LogKind::Operator, "a");
+        bus.push_log_kind(LogKind::Llm, "b");
+        bus.push_log("c");
+        let entries = bus.log_entries();
+        assert_eq!(entries[0].kind, LogKind::Operator);
+        assert_eq!(entries[0].text, "a");
+        assert_eq!(entries[1].kind, LogKind::Llm);
+        assert_eq!(entries[1].text, "b");
+        assert_eq!(entries[2].kind, LogKind::System);
+        assert_eq!(entries[2].text, "c");
     }
 }

@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 use crossbeam_channel::Receiver;
 use serde_json::{json, Value};
 
-use crate::bus::SimBus;
+use crate::bus::{LogKind, SimBus};
 use crate::llm::responses_client::ResponsesBackend;
 use crate::llm::tools::{dispatch_tool, tool_schemas, ToolContext};
 
@@ -213,7 +213,11 @@ pub fn run_conversation_loop(
     bus: Option<&SimBus>,
 ) {
     let mut conv = Conversation::new(initial_mode.system_prompt());
-    emit_log(bus, &format!("[llm-worker] pilot mode: {}", initial_mode.label()));
+    emit_log_kind(
+        bus,
+        LogKind::Mode,
+        &format!("pilot mode: {}", initial_mode.label()),
+    );
     while !stop.load(Ordering::Acquire) {
         let message = match input_queue.recv_timeout(Duration::from_millis(500)) {
             Ok(m) => m,
@@ -229,7 +233,11 @@ pub fn run_conversation_loop(
             total_wall_budget_s,
             bus,
         ) {
-            emit_log(bus, &format!("[llm-worker] error handling message: {:?}", e));
+            emit_log_kind(
+                bus,
+                LogKind::Error,
+                &format!("[llm-worker] error handling message: {:?}", e),
+            );
         }
     }
 }
@@ -247,7 +255,7 @@ fn handle_message(
         IncomingSource::Operator => conv.append_operator_message(&message.text),
         IncomingSource::Heartbeat => {
             conv.append_heartbeat_message(&message.text);
-            emit_log(bus, &format!("[heartbeat] {}", message.text));
+            emit_log_kind(bus, LogKind::Heartbeat, &message.text);
         }
         IncomingSource::Atc => {
             conv.append_atc_message(&message.text);
@@ -255,10 +263,11 @@ fn handle_message(
         }
         IncomingSource::ModeSwitch(mode) => {
             conv.append_mode_switch_message(mode.runtime_overlay());
-            emit_log(
+            emit_log_kind(
                 bus,
+                LogKind::Mode,
                 &format!(
-                    "[llm-worker] pilot mode switched to {} (overlay injected as user message)",
+                    "pilot mode switched to {} (overlay injected as user message)",
                     mode.label()
                 ),
             );
@@ -269,7 +278,7 @@ fn handle_message(
     let deadline = Instant::now() + Duration::from_secs(total_wall_budget_s);
     loop {
         if Instant::now() >= deadline {
-            emit_log(bus, "[llm-worker] wall-clock budget exceeded; ending turn");
+            emit_log_kind(bus, LogKind::Error, "wall-clock budget exceeded; ending turn");
             return Ok(());
         }
         let profiles = tool_context.pilot.lock().list_profile_names().join(", ");
@@ -279,7 +288,11 @@ fn handle_message(
         let response = client.create_response(&input, &tool_schemas(), timeout)?;
         log_usage(&response, client, bus);
         let Some(output_items) = response.get("output").and_then(|v| v.as_array()).cloned() else {
-            emit_log(bus, &format!("[llm-worker] unexpected output shape: {}", response));
+            emit_log_kind(
+                bus,
+                LogKind::Error,
+                &format!("unexpected output shape: {}", response),
+            );
             return Ok(());
         };
         conv.append_response_items(&output_items);
@@ -300,7 +313,11 @@ fn handle_message(
             let call_id = call.get("call_id").or_else(|| call.get("id"));
             let call_id = call_id.and_then(|v| v.as_str()).unwrap_or("").to_string();
             if call_id.is_empty() {
-                emit_log(bus, &format!("[llm-worker] function_call missing call_id: {}", call));
+                emit_log_kind(
+                    bus,
+                    LogKind::Error,
+                    &format!("function_call missing call_id: {}", call),
+                );
                 continue;
             }
             let name = call.get("name").and_then(|v| v.as_str()).unwrap_or("?").to_string();
@@ -308,7 +325,11 @@ fn handle_message(
             if name == "sleep" {
                 slept = true;
             }
-            emit_log(bus, &format!("[llm-worker] tool {} -> {}", name, result));
+            emit_log_kind(
+                bus,
+                LogKind::ToolCall,
+                &format!("tool {} -> {}", name, result),
+            );
             conv.append_function_call_output(&call_id, &result)?;
         }
         if slept {
@@ -317,10 +338,18 @@ fn handle_message(
     }
 }
 
-fn emit_log(bus: Option<&SimBus>, text: &str) {
+fn emit_log_kind(bus: Option<&SimBus>, kind: LogKind, text: &str) {
     match bus {
-        Some(b) => b.push_log(text),
-        None => println!("{}", text),
+        Some(b) => b.push_log_kind(kind, text),
+        None => {
+            // Stdout fallback for the no-bus path keeps the legacy
+            // bracket-tag so operators watching stdout see the same
+            // subsystem labels they would in the .log file.
+            match kind.legacy_prefix() {
+                Some(p) => println!("{}{}", p, text),
+                None => println!("{}", text),
+            }
+        }
     }
 }
 
@@ -345,10 +374,11 @@ fn log_usage(response: &Value, client: &dyn ResponsesBackend, bus: Option<&SimBu
         .unwrap_or(0);
     let output = usage.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
     let s = client.cache_snapshot();
-    emit_log(
+    emit_log_kind(
         bus,
+        LogKind::Tokens,
         &format!(
-            "[llm-worker] tokens in={} (cached={}) out={} | session in={} out={} calls={}",
+            "tokens in={} (cached={}) out={} | session in={} out={} calls={}",
             input, cached, output, s.total_input_tokens, s.total_output_tokens, s.total_requests,
         ),
     );
@@ -362,7 +392,7 @@ fn emit_assistant_text(output_items: &[Value], bus: Option<&SimBus>) {
                     if part.get("type").and_then(|v| v.as_str()) == Some("output_text") {
                         if let Some(text) = part.get("text").and_then(|v| v.as_str()) {
                             if !text.trim().is_empty() {
-                                emit_log(bus, &format!("[llm] {}", text));
+                                emit_log_kind(bus, LogKind::Llm, text);
                             }
                         }
                     }

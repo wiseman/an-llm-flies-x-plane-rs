@@ -242,7 +242,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use ratatui::Terminal;
 
-use crate::bus::SimBus;
+use crate::bus::{LogEntry, LogKind, SimBus};
 use crate::core::mission_manager::PilotCore;
 use crate::live_runner::HeartbeatPump;
 use crate::llm::conversation::{IncomingMessage, PilotMode};
@@ -410,16 +410,19 @@ pub fn run_tui(
                         .map(|p| p.recording)
                         .unwrap_or(false);
                     if now_recording && !was_recording {
-                        bus.push_log(format!(
-                            "voice: listening ({})",
-                            if ptt_tracker.kitty_observed {
-                                "kitty"
-                            } else {
-                                "fallback"
-                            }
-                        ));
+                        bus.push_log_kind(
+                            LogKind::Voice,
+                            format!(
+                                "voice: listening ({})",
+                                if ptt_tracker.kitty_observed {
+                                    "kitty"
+                                } else {
+                                    "fallback"
+                                }
+                            ),
+                        );
                     } else if !now_recording && was_recording {
-                        bus.push_log("voice: finalizing".to_string());
+                        bus.push_log_kind(LogKind::Voice, "voice: finalizing");
                     }
                     continue;
                 }
@@ -480,16 +483,19 @@ pub fn run_tui(
                                     Some(mode) => {
                                         let _ = input_queue
                                             .send(IncomingMessage::mode_switch(mode));
-                                        bus.push_log(format!(
-                                            "[mode] switched to {}",
-                                            mode.label()
-                                        ));
+                                        bus.push_log_kind(
+                                            LogKind::Mode,
+                                            format!("switched to {}", mode.label()),
+                                        );
                                     }
                                     None => {
-                                        bus.push_log(format!(
-                                            "[mode] unknown mode {:?} — expected normal | realistic",
-                                            arg
-                                        ));
+                                        bus.push_log_kind(
+                                            LogKind::Error,
+                                            format!(
+                                                "unknown mode {:?} — expected normal | realistic",
+                                                arg
+                                            ),
+                                        );
                                     }
                                 }
                             } else {
@@ -503,7 +509,7 @@ pub fn run_tui(
                                     pump.record_user_input();
                                 }
                                 if source != "atc" {
-                                    bus.push_log(format!("[{}] {}", source, payload));
+                                    bus.push_log_kind(LogKind::Operator, payload);
                                 }
                             }
                         }
@@ -585,30 +591,21 @@ pub fn run_tui(
             let snapshot = pilot.lock().latest_snapshot.clone();
             render_status_fragments(snapshot.as_ref(), cache_stats.as_deref())
         };
-        let (_, logs, radio) = bus.snapshot();
+        let log_entries = bus.log_entries();
+        let (_, _, radio) = bus.snapshot();
         // A single bus entry can span multiple physical lines (e.g. a
-        // takeoff_checklist or sql_query tool result). Split on '\n' and
-        // expand tabs to 4-space stops so ratatui doesn't render the
-        // control characters as single-column glyphs that garble columns.
-        let log_lines: Vec<Line> = logs
+        // takeoff_checklist or sql_query tool result). `render_log_entry`
+        // splits on '\n' and expands tabs to 4-space stops so ratatui
+        // doesn't render control characters as single-column glyphs that
+        // garble columns. Every physical line of an entry carries the same
+        // per-kind style (fixes multi-line color loss that happened when
+        // we split-then-colorize on a flat string).
+        let log_lines: Vec<Line> = log_entries
             .iter()
-            .filter(|l| log_detail || !is_verbose_line(l))
-            .flat_map(|l| {
-                split_and_normalize(l)
-                    .into_iter()
-                    .map(|segment| Line::from(colorize_log_line(&segment)))
-                    .collect::<Vec<_>>()
-            })
+            .filter(|e| log_detail || !e.kind.is_verbose())
+            .flat_map(render_log_entry)
             .collect();
-        let radio_lines: Vec<Line> = radio
-            .iter()
-            .flat_map(|l| {
-                split_and_normalize(l)
-                    .into_iter()
-                    .map(|segment| Line::from(Span::raw(segment)))
-                    .collect::<Vec<_>>()
-            })
-            .collect();
+        let radio_lines: Vec<Line> = radio.iter().flat_map(|l| render_radio_line(l)).collect();
 
         terminal.draw(|f| {
             let area = f.area();
@@ -1222,11 +1219,198 @@ fn history_go_forward(
     *input_cursor = input_buffer.chars().count();
 }
 
-fn is_verbose_line(line: &str) -> bool {
-    line.contains("[llm-worker] tool ")
-        || line.contains("[llm-worker] tokens ")
-        || line.contains("[heartbeat]")
-        || line.contains("voice:")
+/// Per-kind TUI styling: sigil glyph + how to style the body and the sigil
+/// itself. Kept in one table so the palette is obvious at a glance and so
+/// the sigil gutter-width stays consistent across kinds (all 1 column wide).
+struct LogStyle {
+    sigil: &'static str,
+    sigil_style: Style,
+    body_style: Style,
+}
+
+fn style_for_kind(kind: LogKind) -> LogStyle {
+    match kind {
+        LogKind::Operator => LogStyle {
+            sigil: "▶",
+            sigil_style: Style::default()
+                .fg(Color::LightMagenta)
+                .add_modifier(Modifier::BOLD),
+            body_style: Style::default().fg(Color::LightMagenta),
+        },
+        LogKind::Llm => LogStyle {
+            sigil: "●",
+            sigil_style: Style::default()
+                .fg(Color::LightGreen)
+                .add_modifier(Modifier::BOLD),
+            body_style: Style::default(),
+        },
+        LogKind::Safety => LogStyle {
+            sigil: "⚠",
+            sigil_style: Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+            body_style: Style::default().fg(Color::Yellow),
+        },
+        LogKind::Error => LogStyle {
+            sigil: "!",
+            sigil_style: Style::default()
+                .fg(Color::LightRed)
+                .add_modifier(Modifier::BOLD),
+            body_style: Style::default()
+                .fg(Color::LightRed)
+                .add_modifier(Modifier::BOLD),
+        },
+        LogKind::Mode => LogStyle {
+            sigil: "·",
+            sigil_style: Style::default().fg(Color::Gray),
+            body_style: Style::default().fg(Color::Gray),
+        },
+        LogKind::System => LogStyle {
+            sigil: "·",
+            sigil_style: Style::default().fg(Color::Gray),
+            body_style: Style::default().fg(Color::Gray),
+        },
+        LogKind::ToolCall | LogKind::Tokens | LogKind::Heartbeat | LogKind::Voice => LogStyle {
+            sigil: "·",
+            sigil_style: Style::default().fg(Color::DarkGray),
+            body_style: Style::default().fg(Color::DarkGray),
+        },
+    }
+}
+
+/// Render one `LogEntry` as one-or-more ratatui `Line`s. The first physical
+/// line carries the kind's sigil + a single-space gutter; subsequent lines
+/// of a multi-line entry get a 2-space indent (no sigil) so they visually
+/// group under the leading glyph. All lines share the kind's body style.
+fn render_log_entry(entry: &LogEntry) -> Vec<Line<'static>> {
+    // Error lines can still embed an "error" substring that we want to
+    // promote visually even if the caller classified them loosely. The
+    // enum-driven style already covers Error, but we also bump System
+    // entries whose body starts with "error" — defensive for any lingering
+    // raw `push_log` error strings.
+    let style = if entry.kind == LogKind::System
+        && contains_ascii_ignore_case(&entry.text, "error")
+    {
+        style_for_kind(LogKind::Error)
+    } else {
+        style_for_kind(entry.kind)
+    };
+
+    let segments = split_and_normalize(&entry.text);
+    if segments.is_empty() {
+        return Vec::new();
+    }
+
+    let sigil_width = 2; // one glyph + one space; matches the continuation indent
+    let indent: String = " ".repeat(sigil_width);
+
+    segments
+        .into_iter()
+        .enumerate()
+        .map(|(i, segment)| {
+            let mut spans: Vec<Span<'static>> = Vec::with_capacity(3);
+            if i == 0 {
+                spans.push(Span::styled(style.sigil.to_string(), style.sigil_style));
+                spans.push(Span::raw(" "));
+            } else {
+                spans.push(Span::raw(indent.clone()));
+            }
+            spans.push(Span::styled(segment, style.body_style));
+            Line::from(spans)
+        })
+        .collect()
+}
+
+/// Classification of a line in the RADIO pane. Drives per-source coloring so
+/// the operator can tell at a glance who's talking.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RadioSource {
+    /// Outbound pilot transmission from the `broadcast_on_radio` tool —
+    /// rendered as `[COM1 118.350] <message>`.
+    Pilot,
+    /// Inbound ATC / other-traffic traffic surfaced via the `[atc] ` prefix
+    /// (operator's Tab-PTT, `--atc-message`, or typed `atc:` lines).
+    Atc,
+    /// System / bridge notes like tuning confirmations — no human speaker.
+    System,
+}
+
+fn classify_radio_line(line: &str) -> RadioSource {
+    // Byte-level match — avoids per-frame String allocation from
+    // `to_ascii_lowercase` across up to RADIO_MAX_LINES on every redraw.
+    let bytes = line.as_bytes();
+    if bytes.first() != Some(&b'[') {
+        return RadioSource::System;
+    }
+    let Some(close) = bytes.iter().position(|&b| b == b']') else {
+        return RadioSource::System;
+    };
+    let tag = &bytes[1..close];
+    if tag.len() >= 3 && tag[..3].eq_ignore_ascii_case(b"atc") {
+        return RadioSource::Atc;
+    }
+    if tag.len() >= 3 && tag[..3].eq_ignore_ascii_case(b"com") {
+        // Tuning/status notes embed the whole sentence inside the brackets
+        // (`[COM1 tuned to 118.350]`) and have no body; a real pilot
+        // transmission always has message text after `]`.
+        if line[close + 1..].trim().is_empty() {
+            return RadioSource::System;
+        }
+        return RadioSource::Pilot;
+    }
+    RadioSource::System
+}
+
+fn radio_color(source: RadioSource) -> Color {
+    match source {
+        RadioSource::Pilot => Color::LightCyan,
+        RadioSource::Atc => Color::Yellow,
+        RadioSource::System => Color::DarkGray,
+    }
+}
+
+/// Render one RADIO entry as one-or-more styled `Line`s. The leading
+/// `[...]` tag is split off and rendered bold so the source reads at a
+/// glance; the body carries the same hue, un-bolded.
+fn render_radio_line(line: &str) -> Vec<Line<'static>> {
+    let color = radio_color(classify_radio_line(line));
+    let tag_style = Style::default().fg(color).add_modifier(Modifier::BOLD);
+    let body_style = Style::default().fg(color);
+    let segments = split_and_normalize(line);
+    segments
+        .into_iter()
+        .enumerate()
+        .map(|(i, mut segment)| {
+            if i == 0 {
+                if let Some(split_at) = leading_bracket_tag_end(&segment) {
+                    let rest = segment.split_off(split_at);
+                    let mut spans: Vec<Span<'static>> = Vec::with_capacity(2);
+                    spans.push(Span::styled(segment, tag_style));
+                    if !rest.is_empty() {
+                        spans.push(Span::styled(rest, body_style));
+                    }
+                    return Line::from(spans);
+                }
+            }
+            Line::from(Span::styled(segment, body_style))
+        })
+        .collect()
+}
+
+/// Byte index just past the leading `[...]` tag (plus one space separator
+/// if present), suitable for `String::split_off`. `None` if the line
+/// doesn't start with `[` or has no closing bracket.
+fn leading_bracket_tag_end(line: &str) -> Option<usize> {
+    if !line.starts_with('[') {
+        return None;
+    }
+    let bytes = line.as_bytes();
+    let close = bytes.iter().position(|&b| b == b']')?;
+    let mut split_at = close + 1;
+    if bytes.get(split_at) == Some(&b' ') {
+        split_at += 1;
+    }
+    Some(split_at)
 }
 
 /// Compute a `Paragraph::scroll` y-offset that keeps the most recent line at
@@ -1273,23 +1457,6 @@ fn expand_tabs(line: &str) -> String {
         }
     }
     out
-}
-
-fn colorize_log_line(line: &str) -> Vec<Span<'static>> {
-    let style = if contains_ascii_ignore_case(line, "error") {
-        Style::default()
-            .fg(Color::LightRed)
-            .add_modifier(Modifier::BOLD)
-    } else if line.contains("[safety]") {
-        Style::default().fg(Color::Yellow)
-    } else if line.contains("[heartbeat]") {
-        Style::default().fg(Color::DarkGray)
-    } else if line.contains("[llm]") {
-        Style::default().fg(Color::LightCyan)
-    } else {
-        Style::default()
-    };
-    vec![Span::styled(line.to_string(), style)]
 }
 
 fn contains_ascii_ignore_case(haystack: &str, needle: &str) -> bool {
@@ -1615,6 +1782,82 @@ mod tests {
     #[test]
     fn wrap_helper_available() {
         assert_eq!(wrap_degrees_180(190.0), -170.0);
+    }
+
+    // ---- Radio pane source classification + styling ----------------
+    #[test]
+    fn classify_radio_pilot_transmission() {
+        assert_eq!(
+            classify_radio_line("[COM1 118.350] Whiteman Tower, N12345 ready for takeoff"),
+            RadioSource::Pilot,
+        );
+        assert_eq!(
+            classify_radio_line("[COM2 121.900] Ground, N12345 at ramp, taxi"),
+            RadioSource::Pilot,
+        );
+    }
+
+    #[test]
+    fn classify_radio_atc_transmission() {
+        assert_eq!(
+            classify_radio_line("[atc] N12345 cleared for takeoff runway 24"),
+            RadioSource::Atc,
+        );
+    }
+
+    #[test]
+    fn classify_radio_system_tuning_note() {
+        assert_eq!(
+            classify_radio_line("[COM1 tuned to 118.350]"),
+            RadioSource::System,
+        );
+    }
+
+    #[test]
+    fn classify_radio_com_with_empty_body_is_system() {
+        // Locks in the invariant used by classify_radio_line: any COM tag
+        // with no body after `]` is treated as a system note.
+        assert_eq!(
+            classify_radio_line("[COM1 118.350]"),
+            RadioSource::System,
+        );
+    }
+
+    #[test]
+    fn classify_radio_unknown_prefix_is_system() {
+        assert_eq!(classify_radio_line("plain text"), RadioSource::System);
+        assert_eq!(classify_radio_line("[weird] foo"), RadioSource::System);
+    }
+
+    #[test]
+    fn render_radio_line_splits_tag_and_body_spans() {
+        let lines = render_radio_line("[atc] cleared to land");
+        assert_eq!(lines.len(), 1);
+        let spans = &lines[0].spans;
+        assert_eq!(spans.len(), 2);
+        assert_eq!(spans[0].content, "[atc] ");
+        assert!(spans[0].style.add_modifier.contains(Modifier::BOLD));
+        assert_eq!(spans[0].style.fg, Some(Color::Yellow));
+        assert_eq!(spans[1].content, "cleared to land");
+        assert!(!spans[1].style.add_modifier.contains(Modifier::BOLD));
+        assert_eq!(spans[1].style.fg, Some(Color::Yellow));
+    }
+
+    #[test]
+    fn render_radio_line_pilot_uses_cyan() {
+        let lines = render_radio_line("[COM1 118.350] tower n12345");
+        let spans = &lines[0].spans;
+        assert_eq!(spans[0].style.fg, Some(Color::LightCyan));
+        assert_eq!(spans[1].style.fg, Some(Color::LightCyan));
+    }
+
+    #[test]
+    fn render_radio_line_system_tuning_stays_dim_and_single_span() {
+        let lines = render_radio_line("[COM1 tuned to 118.350]");
+        let spans = &lines[0].spans;
+        // Whole line is a bracketed tag with no trailing body.
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].style.fg, Some(Color::DarkGray));
     }
 
     // ---- Emacs-style input editing ----------------------------------

@@ -9,7 +9,7 @@ use std::sync::{
 
 use crossbeam_channel::Sender;
 
-use crate::bus::SimBus;
+use crate::bus::{LogKind, SimBus};
 use crate::config::{AirportConfig, ConfigBundle};
 use crate::core::mission_manager::PilotCore;
 use crate::llm::conversation::IncomingMessage;
@@ -179,12 +179,18 @@ impl HeartbeatPump {
             {
                 if let Some(bus) = &self.bus {
                     let reason = snapshot.go_around_reason.clone().unwrap_or_else(|| "unknown".to_string());
-                    bus.push_log(format!("[safety] go_around triggered: {}", reason));
+                    bus.push_log_kind(
+                        LogKind::Safety,
+                        format!("go_around triggered: {}", reason),
+                    );
                 }
             }
             if crash_edge {
                 if let Some(bus) = &self.bus {
-                    bus.push_log("[safety] has_crashed -> 1 (X-Plane reports aircraft crashed)".to_string());
+                    bus.push_log_kind(
+                        LogKind::Safety,
+                        "has_crashed -> 1 (X-Plane reports aircraft crashed)",
+                    );
                 }
             }
             // Crashes bypass the min-interval throttle — we always want the
@@ -402,12 +408,15 @@ pub fn run_live_xplane(base_config: ConfigBundle, runtime: LiveRunConfig) -> Res
         None => SimBus::new(!runtime.interactive),
     };
     if let Some(p) = &runtime.log_file_path {
-        bus.push_log(format!("log_file={}", p.display()));
+        bus.push_log_kind(LogKind::System, format!("log_file={}", p.display()));
     }
-    bus.push_log(format!(
-        "bridge connected host={} port={}",
-        runtime.xplane_host, runtime.xplane_port
-    ));
+    bus.push_log_kind(
+        LogKind::System,
+        format!(
+            "bridge connected host={} port={}",
+            runtime.xplane_host, runtime.xplane_port
+        ),
+    );
     let airport_label = live_config
         .airport
         .airport
@@ -419,15 +428,21 @@ pub fn run_live_xplane(base_config: ConfigBundle, runtime: LiveRunConfig) -> Res
         .id
         .clone()
         .unwrap_or_else(|| "(unset)".to_string());
-    bus.push_log(format!(
-        "pilot_reference airport={} runway={} course={:.0} field_elev={:.0}ft",
-        airport_label,
-        runway_label,
-        live_config.airport.runway.course_deg,
-        live_config.airport.field_elevation_ft,
-    ));
+    bus.push_log_kind(
+        LogKind::System,
+        format!(
+            "pilot_reference airport={} runway={} course={:.0} field_elev={:.0}ft",
+            airport_label,
+            runway_label,
+            live_config.airport.runway.course_deg,
+            live_config.airport.field_elevation_ft,
+        ),
+    );
     if runtime.engage_profile != "idle" {
-        bus.push_log(format!("startup profile engaged: {}", runtime.engage_profile));
+        bus.push_log_kind(
+            LogKind::System,
+            format!("startup profile engaged: {}", runtime.engage_profile),
+        );
     }
 
     let (input_tx, input_rx) = unbounded::<IncomingMessage>();
@@ -470,7 +485,7 @@ pub fn run_live_xplane(base_config: ConfigBundle, runtime: LiveRunConfig) -> Res
         }
     });
     if airspace_source.is_some() {
-        bus.push_log("airspace awareness enabled".to_string());
+        bus.push_log_kind(LogKind::System, "airspace awareness enabled");
     }
     let heartbeat_pump = if runtime.heartbeat_enabled {
         let clock: Arc<dyn Clock> = Arc::new(RealClock);
@@ -486,10 +501,13 @@ pub fn run_live_xplane(base_config: ConfigBundle, runtime: LiveRunConfig) -> Res
             pump_builder = pump_builder.with_airspace(src.clone());
         }
         let pump = Arc::new(pump_builder);
-        bus.push_log(format!(
-            "heartbeat pump started interval={:.0}s",
-            runtime.heartbeat_interval_s
-        ));
+        bus.push_log_kind(
+            LogKind::System,
+            format!(
+                "heartbeat pump started interval={:.0}s",
+                runtime.heartbeat_interval_s
+            ),
+        );
         Some(pump)
     } else {
         None
@@ -534,11 +552,17 @@ pub fn run_live_xplane(base_config: ConfigBundle, runtime: LiveRunConfig) -> Res
         match &runtime.track_paths {
             Some((csv, _kml)) => match crate::track::TrackRecorder::new(csv) {
                 Ok(r) => {
-                    bus.push_log(format!("track_csv={} (1 Hz)", csv.display()));
+                    bus.push_log_kind(
+                        LogKind::System,
+                        format!("track_csv={} (1 Hz)", csv.display()),
+                    );
                     Some(Arc::new(PLMutex::new(r)))
                 }
                 Err(e) => {
-                    bus.push_log(format!("track recorder disabled: {e}"));
+                    bus.push_log_kind(
+                        LogKind::Error,
+                        format!("track recorder disabled: {e}"),
+                    );
                     None
                 }
             },
@@ -562,10 +586,13 @@ pub fn run_live_xplane(base_config: ConfigBundle, runtime: LiveRunConfig) -> Res
         let _ = ctrlc::set_handler(move || {
             if armed.swap(true, Ordering::AcqRel) {
                 // Second signal — user wants out now.
-                bus.push_log("[shutdown] second signal received, exiting hard".to_string());
+                bus.push_log_kind(
+                    LogKind::System,
+                    "[shutdown] second signal received, exiting hard",
+                );
                 std::process::exit(130);
             }
-            bus.push_log("[shutdown] signal received, draining...".to_string());
+            bus.push_log_kind(LogKind::System, "[shutdown] signal received, draining...");
             control_stop.store(true, Ordering::Release);
             llm_stop.store(true, Ordering::Release);
         });
@@ -601,19 +628,23 @@ pub fn run_live_xplane(base_config: ConfigBundle, runtime: LiveRunConfig) -> Res
                         tool_ctx.bridge.clone(),
                     ) {
                         Ok(c) => {
-                            bus.push_log(
-                                "voice: ptt ready (deepgram, hold space / tab)".to_string(),
+                            bus.push_log_kind(
+                                LogKind::Voice,
+                                "voice: ptt ready (deepgram, hold space / tab)",
                             );
                             Some(Arc::new(c))
                         }
                         Err(e) => {
-                            bus.push_log(format!("voice: disabled ({e})"));
+                            bus.push_log_kind(
+                                LogKind::Voice,
+                                format!("voice: disabled ({e})"),
+                            );
                             None
                         }
                     }
                 }
                 _ => {
-                    bus.push_log("voice: disabled (no DEEPGRAM_API_KEY)".to_string());
+                    bus.push_log_kind(LogKind::Voice, "voice: disabled (no DEEPGRAM_API_KEY)");
                     None
                 }
             }
@@ -671,12 +702,14 @@ fn finalize_track(
     };
     let guard = rec.lock();
     match guard.write_kml(kml_path, &runtime.session_stem) {
-        Ok(_) => bus.push_log(format!(
-            "track_kml={} ({} points)",
-            kml_path.display(),
-            guard.len()
-        )),
-        Err(e) => bus.push_log(format!("track_kml write failed: {e}")),
+        Ok(_) => bus.push_log_kind(
+            LogKind::System,
+            format!("track_kml={} ({} points)", kml_path.display(), guard.len()),
+        ),
+        Err(e) => bus.push_log_kind(
+            LogKind::Error,
+            format!("track_kml write failed: {e}"),
+        ),
     }
 }
 
@@ -699,7 +732,10 @@ fn run_control_loop(
         let raw_state = match bridge.read_state() {
             Ok(s) => s,
             Err(e) => {
-                bus.push_log(format!("[bridge] read error: {}", e));
+                bus.push_log_kind(
+                    LogKind::Error,
+                    format!("[bridge] read error: {}", e),
+                );
                 thread::sleep(target_period);
                 continue;
             }
@@ -713,7 +749,10 @@ fn run_control_loop(
             commands
         };
         if let Err(e) = bridge.write_commands(&commands) {
-            bus.push_log(format!("[bridge] write error: {}", e));
+            bus.push_log_kind(
+                LogKind::Error,
+                format!("[bridge] write error: {}", e),
+            );
         }
         if let Some(pump) = heartbeat_pump.as_ref() {
             pump.check_and_emit();
@@ -775,7 +814,7 @@ fn sample_track(
         on_ground: state.on_ground,
     };
     if let Err(e) = recorder.lock().record(pt) {
-        bus.push_log(format!("[track] write error: {e}"));
+        bus.push_log_kind(LogKind::Error, format!("[track] write error: {e}"));
     }
 }
 

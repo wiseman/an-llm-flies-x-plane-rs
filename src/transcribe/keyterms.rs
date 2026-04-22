@@ -11,6 +11,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use parking_lot::Mutex as PLMutex;
 
+use crate::bus::LogKind;
 use crate::core::mission_manager::{PilotCore, StatusSnapshot};
 use crate::llm::tools::{ensure_runway_conn, ToolBridge, ToolContext};
 use crate::sim::datarefs::{LATITUDE_DEG, LONGITUDE_DEG};
@@ -70,7 +71,7 @@ pub fn build_keyterms(
     // Fail-soft on the whole database path.
     if let Err(e) = append_database_terms(&mut high, &mut low, snapshot.as_ref(), bridge, ctx) {
         if let Some(bus) = &ctx.bus {
-            bus.push_log(format!("voice: keyterm db skipped ({e})"));
+            bus.push_log_kind(LogKind::Voice, format!("voice: keyterm db skipped ({e})"));
         }
     }
 

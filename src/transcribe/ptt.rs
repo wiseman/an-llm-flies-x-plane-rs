@@ -22,7 +22,7 @@ use anyhow::{anyhow, Context, Result};
 use crossbeam_channel::{bounded, unbounded, Receiver, Sender};
 use parking_lot::Mutex;
 
-use crate::bus::SimBus;
+use crate::bus::{LogKind, SimBus};
 use crate::core::mission_manager::PilotCore;
 use crate::llm::tools::{ToolBridge, ToolContext};
 use crate::transcribe::audio::{start_capture, AudioCapture};
@@ -168,7 +168,7 @@ fn worker_loop(
 ) {
     let log = |msg: String| {
         if let Some(b) = &bus {
-            b.push_log(msg);
+            b.push_log_kind(LogKind::Voice, msg);
         }
     };
     // 20-second headroom: the WS connect() call blocks this thread, so
