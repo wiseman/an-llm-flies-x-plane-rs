@@ -15,6 +15,7 @@ use std::collections::VecDeque;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use chrono::Local;
@@ -163,6 +164,10 @@ struct BusInner {
 #[derive(Clone)]
 pub struct SimBus {
     inner: Arc<Mutex<BusInner>>,
+    /// True while the LLM worker is blocked on a `create_response` HTTP
+    /// round-trip. Lock-free so the TUI draw path can poll every frame
+    /// without contending with producers pushing log lines.
+    llm_busy: Arc<AtomicBool>,
 }
 
 impl SimBus {
@@ -175,7 +180,16 @@ impl SimBus {
                 log_buffer: VecDeque::with_capacity(LOG_MAX_LINES),
                 radio_buffer: VecDeque::with_capacity(RADIO_MAX_LINES),
             })),
+            llm_busy: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    pub fn set_llm_busy(&self, busy: bool) {
+        self.llm_busy.store(busy, Ordering::Relaxed);
+    }
+
+    pub fn is_llm_busy(&self) -> bool {
+        self.llm_busy.load(Ordering::Relaxed)
     }
 
     pub fn with_file_log(echo: bool, file_log: Arc<FileLog>) -> Self {

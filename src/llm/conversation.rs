@@ -285,7 +285,10 @@ fn handle_message(
         let input = conv.build_input(&profiles);
         let remaining = deadline.saturating_duration_since(Instant::now()).as_secs();
         let timeout = per_request_timeout_s.min(remaining.max(1));
-        let response = client.create_response(&input, &tool_schemas(), timeout)?;
+        let response = {
+            let _busy = LlmBusyGuard::new(bus);
+            client.create_response(&input, &tool_schemas(), timeout)?
+        };
         log_usage(&response, client, bus);
         let Some(output_items) = response.get("output").and_then(|v| v.as_array()).cloned() else {
             emit_log_kind(
@@ -334,6 +337,31 @@ fn handle_message(
         }
         if slept {
             return Ok(());
+        }
+    }
+}
+
+/// Flips the bus `llm_busy` flag on for as long as this guard lives and
+/// clears it on drop — including when `?` unwinds through the HTTP
+/// call. The TUI polls the flag every frame to animate the waiting
+/// spinner.
+struct LlmBusyGuard<'a> {
+    bus: Option<&'a SimBus>,
+}
+
+impl<'a> LlmBusyGuard<'a> {
+    fn new(bus: Option<&'a SimBus>) -> Self {
+        if let Some(b) = bus {
+            b.set_llm_busy(true);
+        }
+        Self { bus }
+    }
+}
+
+impl Drop for LlmBusyGuard<'_> {
+    fn drop(&mut self) {
+        if let Some(b) = self.bus {
+            b.set_llm_busy(false);
         }
     }
 }

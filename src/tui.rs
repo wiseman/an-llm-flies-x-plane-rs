@@ -610,7 +610,10 @@ pub fn run_tui(
             // Inside the draw closure: operator-row bg tint needs the
             // pane's live inner width to pad out to the border.
             let log_inner_width = chunks[1].width.saturating_sub(2);
-            let log_lines = build_log_lines(&log_entries, log_detail, log_inner_width);
+            let mut log_lines = build_log_lines(&log_entries, log_detail, log_inner_width);
+            if bus.is_llm_busy() {
+                log_lines.push(render_thinking_line(tui_epoch.elapsed()));
+            }
 
             let status_paragraph = Paragraph::new(status_fragments.clone())
                 .block(Block::default().borders(Borders::ALL).title(" FLIGHT "))
@@ -1514,6 +1517,28 @@ fn contains_ascii_ignore_case(haystack: &str, needle: &str) -> bool {
     h.len() >= n.len() && h.windows(n.len()).any(|w| w.eq_ignore_ascii_case(n))
 }
 
+const PROP_FRAMES: [char; 4] = ['│', '╱', '─', '╲'];
+const PROP_FRAME_MS: u128 = 100;
+
+/// Mirrors the `<bar> <body>` shape of bar-styled log entries so it
+/// reads as a transient extra row rather than chrome.
+fn render_thinking_line(elapsed: Duration) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(
+            PROP_FRAMES[prop_frame_index(elapsed)].to_string(),
+            Style::default()
+                .fg(Color::LightCyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" "),
+        Span::styled("thinking…", Style::default().fg(Color::DarkGray)),
+    ])
+}
+
+fn prop_frame_index(elapsed: Duration) -> usize {
+    (elapsed.as_millis() / PROP_FRAME_MS) as usize % PROP_FRAMES.len()
+}
+
 /// Produce styled `Line`s for the status pane. Reimplements the lexer logic
 /// from `format_snapshot_display` with color hints for deviation bands.
 fn render_status_fragments(
@@ -1834,6 +1859,29 @@ mod tests {
     }
 
     // ---- Radio pane source classification + styling ----------------
+    // ---- Propeller spinner for the LOG pane "thinking" line --------
+    #[test]
+    fn render_thinking_line_has_prop_glyph_and_label() {
+        let line = render_thinking_line(Duration::from_millis(0));
+        let glyph = PROP_FRAMES[0].to_string();
+        assert_eq!(line.spans[0].content, glyph);
+        assert_eq!(line.spans[0].style.fg, Some(Color::LightCyan));
+        assert!(line.spans[0].style.add_modifier.contains(Modifier::BOLD));
+        let body: String = line.spans.iter().skip(1).map(|s| s.content.as_ref()).collect();
+        assert_eq!(body, " thinking…");
+    }
+
+    #[test]
+    fn prop_frame_index_advances_and_wraps() {
+        assert_eq!(prop_frame_index(Duration::from_millis(0)), 0);
+        assert_eq!(prop_frame_index(Duration::from_millis(100)), 1);
+        assert_eq!(prop_frame_index(Duration::from_millis(200)), 2);
+        assert_eq!(prop_frame_index(Duration::from_millis(300)), 3);
+        assert_eq!(prop_frame_index(Duration::from_millis(400)), 0);
+        // sub-frame slop falls on the previous frame.
+        assert_eq!(prop_frame_index(Duration::from_millis(99)), 0);
+    }
+
     // ---- Log pane rendering: bar-gutter + sigil-for-errors ----------
     #[test]
     fn render_log_entry_bar_kinds_put_colored_bar_on_every_line() {
