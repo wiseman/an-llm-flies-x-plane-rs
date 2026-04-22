@@ -13,7 +13,7 @@ use crossbeam_channel::unbounded;
 use parking_lot::Mutex as PLMutex;
 use serde_json::{json, Value};
 
-use xplane_pilot::bus::SimBus;
+use xplane_pilot::bus::{LogKind, SimBus};
 use xplane_pilot::config::load_default_config_bundle;
 use xplane_pilot::core::mission_manager::PilotCore;
 use xplane_pilot::llm::conversation::{
@@ -246,6 +246,59 @@ fn single_tool_call_then_text_ends_turn() {
 
     assert_eq!(client.n_calls(), 2);
     assert!(ctx.pilot.lock().list_profile_names().contains(&"heading_hold".to_string()));
+}
+
+#[test]
+fn assistant_text_emitted_even_when_response_also_has_tool_call() {
+    let ctx = make_ctx();
+    let client = StubClient::new(vec![json!({
+        "output": [
+            text_msg("I'm good and ready."),
+            fn_call("sleep", json!({}), "c1"),
+        ],
+    })]);
+    let bus = SimBus::new(false);
+    let (tx, rx) = unbounded::<IncomingMessage>();
+    tx.send(IncomingMessage::operator("hi how are you")).unwrap();
+    let stop = Arc::new(AtomicBool::new(false));
+
+    std::thread::scope(|s| {
+        let handle = s.spawn({
+            let stop = stop.clone();
+            || {
+                run_conversation_loop(
+                    &client,
+                    &ctx,
+                    &rx,
+                    stop,
+                    60,
+                    120,
+                    PilotMode::Normal,
+                    Some(&bus),
+                );
+            }
+        });
+        for _ in 0..50 {
+            if client.n_calls() >= 1 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        stop.store(true, Ordering::Release);
+        handle.join().unwrap();
+    });
+
+    assert_eq!(client.n_calls(), 1);
+    let entries = bus.log_entries();
+    let saw_text = entries
+        .iter()
+        .any(|e| e.kind == LogKind::Llm && e.text == "I'm good and ready.");
+    assert!(
+        saw_text,
+        "expected assistant text to reach the bus; got entries: {:?}",
+        entries.iter().map(|e| (e.kind, e.text.clone())).collect::<Vec<_>>()
+    );
 }
 
 #[test]

@@ -303,8 +303,8 @@ fn handle_message(
             .cloned()
             .collect();
 
+        emit_assistant_text(&output_items, bus);
         if function_calls.is_empty() {
-            emit_assistant_text(&output_items, bus);
             return Ok(());
         }
 
