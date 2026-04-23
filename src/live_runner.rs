@@ -333,8 +333,11 @@ use parking_lot::Mutex as PLMutex;
 
 use crate::bus::FileLog;
 use crate::core::profiles::PatternFlyProfile;
+use crate::llm::anthropic::AnthropicBackend;
+use crate::llm::backend::{LlmBackend, LlmProvider, ReasoningEffort};
 use crate::llm::conversation::{run_conversation_loop, PilotMode};
-use crate::llm::responses_client::ResponsesClient;
+use crate::llm::gemini::GeminiBackend;
+use crate::llm::openai::OpenAiBackend;
 use crate::llm::tools::{ToolBridge, ToolContext};
 use crate::sim::xplane_bridge::{probe_bootstrap_sample, GeoReference, XPlaneWebBridge};
 use crate::tui::{format_snapshot_display, run_tui};
@@ -344,9 +347,12 @@ use crate::types::clamp;
 pub struct LiveRunConfig {
     pub xplane_host: String,
     pub xplane_port: u16,
+    pub llm_provider: LlmProvider,
     pub llm_model: String,
-    /// When `Some`, passed to the Responses API as `reasoning.effort`. When
-    /// `None`, the `reasoning` field is omitted entirely.
+    /// When `Some`, passed through to the backend as its reasoning/thinking
+    /// knob. OpenAI sees it as `reasoning.effort`; Anthropic as a
+    /// `thinking.budget_tokens` derived from the level; Gemini as
+    /// `thinkingConfig.thinkingBudget`. `None` omits the knob.
     pub llm_reasoning_effort: Option<String>,
     pub atc_messages: Vec<String>,
     pub interactive: bool,
@@ -449,25 +455,54 @@ pub fn run_live_xplane(base_config: ConfigBundle, runtime: LiveRunConfig) -> Res
         let _ = input_tx.send(IncomingMessage::atc(msg.clone()));
     }
 
-    let llm_client = {
-        let mut c = ResponsesClient::new(runtime.llm_model.clone());
-        c.reasoning_effort = runtime.llm_reasoning_effort.clone();
-        // Per-session transcript file alongside the .log/.csv/.kml
-        // artifacts (e.g. output/sim_pilot-20260420-175613.txt). The
-        // client overwrites it on every Responses API call — before
-        // the HTTP request with a `(pending)` response marker and
-        // again after the response arrives. Parent dir is derived
-        // from the log path when present, otherwise defaults to
-        // `output/` in the CWD.
+    // Per-session transcript file alongside the .log/.csv/.kml
+    // artifacts (e.g. output/sim_pilot-20260420-175613.txt). The
+    // backend overwrites it on every API call — before the HTTP
+    // request with a `(pending)` response marker and again after the
+    // response arrives. Parent dir is derived from the log path when
+    // present, otherwise defaults to `output/` in the CWD.
+    let transcript_path = {
         let parent = runtime
             .log_file_path
             .as_ref()
             .and_then(|p| p.parent().map(|p| p.to_path_buf()))
             .unwrap_or_else(|| std::path::PathBuf::from("output"));
-        c.transcript_path = Some(parent.join(format!("{}.txt", runtime.session_stem)));
-        Arc::new(c)
+        Some(parent.join(format!("{}.txt", runtime.session_stem)))
     };
-    let cache_stats = llm_client.cache_stats.clone();
+    let reasoning_effort: Option<ReasoningEffort> = runtime
+        .llm_reasoning_effort
+        .as_deref()
+        .and_then(|s| s.parse::<ReasoningEffort>().ok());
+    let llm_client: Arc<dyn LlmBackend> = match runtime.llm_provider {
+        LlmProvider::OpenAi => {
+            let mut c = OpenAiBackend::new(runtime.llm_model.clone());
+            c.transcript_path = transcript_path.clone();
+            Arc::new(c)
+        }
+        LlmProvider::Anthropic => {
+            let mut c = AnthropicBackend::new(runtime.llm_model.clone());
+            c.transcript_path = transcript_path.clone();
+            Arc::new(c)
+        }
+        LlmProvider::Gemini => {
+            let mut c = GeminiBackend::new(runtime.llm_model.clone());
+            c.transcript_path = transcript_path.clone();
+            Arc::new(c)
+        }
+    };
+    bus.push_log_kind(
+        LogKind::System,
+        format!(
+            "pilot llm: provider={} model={}{}",
+            runtime.llm_provider.as_str(),
+            runtime.llm_model,
+            match reasoning_effort {
+                Some(e) => format!(" reasoning={}", e.as_str()),
+                None => String::new(),
+            }
+        ),
+    );
+    let cache_stats = llm_client.cache_stats_arc();
     // One DuckDB connection slot, shared between the LLM's tool handlers
     // (via ToolContext.runway_conn) and the heartbeat airspace query. Both
     // serialize on the mutex — DuckDB connections aren't safe for
@@ -531,6 +566,7 @@ pub fn run_live_xplane(base_config: ConfigBundle, runtime: LiveRunConfig) -> Res
         let stop = llm_stop.clone();
         let bus_clone = bus.clone();
         let initial_mode = runtime.pilot_mode;
+        let effort = reasoning_effort;
         thread::Builder::new()
             .name("llm-worker".into())
             .spawn(move || {
@@ -542,6 +578,7 @@ pub fn run_live_xplane(base_config: ConfigBundle, runtime: LiveRunConfig) -> Res
                     60,
                     120,
                     initial_mode,
+                    effort,
                     Some(&bus_clone),
                 );
             })?
@@ -656,7 +693,7 @@ pub fn run_live_xplane(base_config: ConfigBundle, runtime: LiveRunConfig) -> Res
             control_stop.clone(),
             pilot_arc.clone(),
             heartbeat_pump.clone(),
-            Some(cache_stats),
+            cache_stats.clone(),
             ptt,
         );
         control_stop.store(true, Ordering::Release);

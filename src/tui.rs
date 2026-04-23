@@ -246,7 +246,7 @@ use crate::bus::{LogEntry, LogKind, SimBus};
 use crate::core::mission_manager::PilotCore;
 use crate::live_runner::HeartbeatPump;
 use crate::llm::conversation::{IncomingMessage, PilotMode};
-use crate::llm::responses_client::CacheStats;
+use crate::llm::backend::CacheStats;
 use crate::transcribe::{PttController, PttMode, PttSnapshot};
 
 /// Run the interactive TUI on the calling thread. Blocks until the user exits

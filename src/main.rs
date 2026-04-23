@@ -10,6 +10,7 @@ use clap::{Parser, ValueEnum};
 use xplane_pilot::config::load_default_config_bundle;
 use xplane_pilot::data::{apt_dat, parquet as data_parquet};
 use xplane_pilot::live_runner::{run_live_xplane, LiveRunConfig};
+use xplane_pilot::llm::backend::LlmProvider;
 use xplane_pilot::llm::conversation::PilotMode;
 use xplane_pilot::sim::{
     logging::write_scenario_log_csv, plotting::write_scenario_plots, scenario::ScenarioRunner,
@@ -46,8 +47,16 @@ struct Cli {
     #[arg(long, default_value_t = 8086)]
     xplane_port: u16,
 
-    #[arg(long = "pilot-llm-model", default_value = "gpt-5.4-2026-03-05")]
-    pilot_llm_model: String,
+    /// Which LLM vendor to route through. Selects the wire protocol and
+    /// the API-key env var. Defaults to OpenAI for backward compatibility.
+    #[arg(long = "pilot-llm-provider", value_enum, default_value_t = LlmProvider::OpenAi)]
+    pilot_llm_provider: LlmProvider,
+
+    /// Model ID for the selected provider. When omitted, each provider
+    /// picks a sensible default (OpenAI: gpt-5.4-2026-03-05; Anthropic:
+    /// claude-sonnet-4-6; Gemini: gemini-2.5-flash).
+    #[arg(long = "pilot-llm-model")]
+    pilot_llm_model: Option<String>,
 
     /// Pilot persona that selects which system prompt the LLM runs with at
     /// startup. Can be swapped at runtime via the TUI `/mode <name>` command.
@@ -151,6 +160,7 @@ impl From<CliPilotMode> for PilotMode {
         }
     }
 }
+
 
 fn resolve_scenario_name(explicit: Option<&str>, wind: Vec2) -> String {
     if let Some(name) = explicit {
@@ -279,7 +289,12 @@ fn main() -> Result<()> {
             println!("backend=xplane");
             println!("xplane_host={}", args.xplane_host);
             println!("xplane_port={}", args.xplane_port);
-            println!("pilot_llm_model={}", args.pilot_llm_model);
+            let llm_provider = args.pilot_llm_provider;
+            let llm_model = args
+                .pilot_llm_model
+                .unwrap_or_else(|| llm_provider.default_model().to_string());
+            println!("pilot_llm_provider={}", llm_provider.as_str());
+            println!("pilot_llm_model={}", llm_model);
             let pilot_mode: PilotMode = args.pilot_mode.into();
             println!("pilot_mode={}", pilot_mode.label());
             if let Some(e) = &args.pilot_llm_reasoning_effort {
@@ -302,7 +317,8 @@ fn main() -> Result<()> {
                 LiveRunConfig {
                     xplane_host: args.xplane_host,
                     xplane_port: args.xplane_port,
-                    llm_model: args.pilot_llm_model,
+                    llm_provider,
+                    llm_model,
                     llm_reasoning_effort: args.pilot_llm_reasoning_effort,
                     atc_messages: args.atc_message,
                     interactive: !args.headless,

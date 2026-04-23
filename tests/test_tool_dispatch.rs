@@ -69,12 +69,9 @@ fn make_ctx(bridge: Option<Arc<dyn ToolBridge>>, cache_dir: Option<PathBuf>) -> 
     ctx
 }
 
-fn call(name: &str, args: serde_json::Value) -> serde_json::Value {
-    json!({
-        "name": name,
-        "call_id": "call_test",
-        "arguments": args.to_string(),
-    })
+/// Test helper: invoke `dispatch_tool` with a named tool and JSON args.
+fn dispatch(name: &str, args: serde_json::Value, ctx: &ToolContext) -> String {
+    dispatch_tool(name, &args.to_string(), ctx)
 }
 
 /// Base airports/runways used by every test fixture. Each tuple is:
@@ -147,7 +144,7 @@ fn build_fake_parquet(dir: &std::path::Path, extra_blocks: &[String]) -> PathBuf
 #[test]
 fn unknown_tool_returns_error() {
     let ctx = make_ctx(None, None);
-    let r = dispatch_tool(&json!({"name": "not_a_tool", "arguments": "{}"}), &ctx);
+    let r = dispatch_tool("not_a_tool", "{}", &ctx);
     assert!(r.starts_with("error:"));
     assert!(r.contains("unknown tool"));
 }
@@ -155,14 +152,14 @@ fn unknown_tool_returns_error() {
 #[test]
 fn invalid_arguments_json_returns_error() {
     let ctx = make_ctx(None, None);
-    let r = dispatch_tool(&json!({"name": "engage_heading_hold", "arguments": "not-json"}), &ctx);
+    let r = dispatch_tool("engage_heading_hold", "not-json", &ctx);
     assert!(r.starts_with("error:"));
 }
 
 #[test]
 fn missing_required_arg_returns_error() {
     let ctx = make_ctx(None, None);
-    let r = dispatch_tool(&call("engage_heading_hold", json!({})), &ctx);
+    let r = dispatch("engage_heading_hold", json!({}), &ctx);
     assert!(r.starts_with("error:"));
 }
 
@@ -171,7 +168,7 @@ fn missing_required_arg_returns_error() {
 #[test]
 fn engage_heading_hold_engages_profile() {
     let ctx = make_ctx(None, None);
-    let r = dispatch_tool(&call("engage_heading_hold", json!({"heading_deg": 270.0})), &ctx);
+    let r = dispatch("engage_heading_hold", json!({"heading_deg": 270.0}), &ctx);
     assert!(r.contains("heading_hold"));
     let names = ctx.pilot.lock().list_profile_names();
     assert!(names.contains(&"heading_hold".to_string()));
@@ -181,13 +178,10 @@ fn engage_heading_hold_engages_profile() {
 #[test]
 fn engage_cruise_installs_three_holds_atomically() {
     let ctx = make_ctx(None, None);
-    let r = dispatch_tool(
-        &call(
+    let r = dispatch(
             "engage_cruise",
             json!({"heading_deg": 130.0, "altitude_ft": 2500.0, "speed_kt": 95.0}),
-        ),
-        &ctx,
-    );
+        &ctx);
     assert!(r.contains("engaged cruise"));
     let mut names = ctx.pilot.lock().list_profile_names();
     names.sort();
@@ -214,13 +208,10 @@ fn engage_cruise_from_takeoff_displaces_three_axis_profile() {
         p.engage_profile(Box::new(TakeoffProfile::new(cfg, rf)));
     }
     assert_eq!(ctx.pilot.lock().list_profile_names(), vec!["takeoff"]);
-    let r = dispatch_tool(
-        &call(
+    let r = dispatch(
             "engage_cruise",
             json!({"heading_deg": 180.0, "altitude_ft": 3000.0, "speed_kt": 100.0}),
-        ),
-        &ctx,
-    );
+        &ctx);
     assert!(r.contains("displaced"));
     assert!(r.contains("takeoff"));
 }
@@ -234,14 +225,14 @@ fn execute_touch_and_go_arms_pattern_fly_flag() {
         let rf = p.runway_frame.clone();
         p.engage_profile(Box::new(PatternFlyProfile::new(cfg, rf)));
     }
-    let r = dispatch_tool(&call("execute_touch_and_go", json!({})), &ctx);
+    let r = dispatch("execute_touch_and_go", json!({}), &ctx);
     assert!(r.contains("touch-and-go armed"));
 }
 
 #[test]
 fn execute_touch_and_go_without_pattern_fly_errors() {
     let ctx = make_ctx(None, None);
-    let r = dispatch_tool(&call("execute_touch_and_go", json!({})), &ctx);
+    let r = dispatch("execute_touch_and_go", json!({}), &ctx);
     assert!(r.starts_with("error:"));
     assert!(r.contains("pattern_fly"));
 }
@@ -249,7 +240,7 @@ fn execute_touch_and_go_without_pattern_fly_errors() {
 #[test]
 fn engage_pattern_fly_without_required_args_errors() {
     let ctx = make_ctx(None, None);
-    let r = dispatch_tool(&call("engage_pattern_fly", json!({})), &ctx);
+    let r = dispatch("engage_pattern_fly", json!({}), &ctx);
     assert!(r.starts_with("error:"));
     assert!(!ctx.pilot.lock().has_profile("pattern_fly"));
 }
@@ -262,13 +253,10 @@ fn engage_takeoff_refuses_when_parking_brake_set() {
         -122.308,
     );
     let ctx = make_ctx(Some(bridge as Arc<dyn ToolBridge>), None);
-    let r = dispatch_tool(
-        &call(
+    let r = dispatch(
             "engage_takeoff",
             json!({"airport_ident": "KSEA", "runway_ident": "16L"}),
-        ),
-        &ctx,
-    );
+        &ctx);
     assert!(r.starts_with("error:"));
     assert!(r.contains("parking brake"));
     assert!(r.contains("set_parking_brake"));
@@ -277,7 +265,7 @@ fn engage_takeoff_refuses_when_parking_brake_set() {
 #[test]
 fn engage_takeoff_requires_airport_and_runway_args() {
     let ctx = make_ctx(None, None);
-    let r = dispatch_tool(&call("engage_takeoff", json!({})), &ctx);
+    let r = dispatch("engage_takeoff", json!({}), &ctx);
     assert!(r.starts_with("error:"));
     // One of the required-arg complaints must surface.
     assert!(
@@ -336,13 +324,10 @@ fn engage_takeoff_refuses_when_not_on_runway() {
         completed_profiles: Vec::new(),
         profile_mode_line_suffixes: Vec::new(),
     });
-    let r = dispatch_tool(
-        &call(
+    let r = dispatch(
             "engage_takeoff",
             json!({"airport_ident": "KSEA", "runway_ident": "16L"}),
-        ),
-        &ctx,
-    );
+        &ctx);
     assert!(r.starts_with("error:"), "got: {}", r);
     // Position check is the one that should fail.
     assert!(
@@ -359,7 +344,7 @@ fn disengage_profile_readds_idles() {
         let mut p = ctx.pilot.lock();
         p.engage_profile(Box::new(HeadingHoldProfile::new(270.0, 25.0, None).unwrap()));
     }
-    let r = dispatch_tool(&call("disengage_profile", json!({"name": "heading_hold"})), &ctx);
+    let r = dispatch("disengage_profile", json!({"name": "heading_hold"}), &ctx);
     assert!(r.contains("heading_hold"));
     assert!(ctx.pilot.lock().list_profile_names().contains(&"idle_lateral".to_string()));
 }
@@ -367,7 +352,7 @@ fn disengage_profile_readds_idles() {
 #[test]
 fn list_profiles_returns_comma_separated() {
     let ctx = make_ctx(None, None);
-    let r = dispatch_tool(&call("list_profiles", json!({})), &ctx);
+    let r = dispatch("list_profiles", json!({}), &ctx);
     assert!(r.contains("idle_lateral"));
     assert!(r.contains("idle_vertical"));
     assert!(r.contains("idle_speed"));
@@ -382,13 +367,10 @@ fn extend_pattern_leg_downwind_with_pattern_fly_succeeds() {
         let rf = p.runway_frame.clone();
         p.engage_profile(Box::new(PatternFlyProfile::new(cfg, rf)));
     }
-    let r = dispatch_tool(
-        &call(
+    let r = dispatch(
             "extend_pattern_leg",
             json!({"leg": "downwind", "extension_ft": 1500.0, "mode": "add"}),
-        ),
-        &ctx,
-    );
+        &ctx);
     assert!(r.contains("downwind leg extension"));
 }
 
@@ -401,13 +383,10 @@ fn extend_pattern_leg_base_returns_error() {
         let rf = p.runway_frame.clone();
         p.engage_profile(Box::new(PatternFlyProfile::new(cfg, rf)));
     }
-    let r = dispatch_tool(
-        &call(
+    let r = dispatch(
             "extend_pattern_leg",
             json!({"leg": "base", "extension_ft": 500.0, "mode": "add"}),
-        ),
-        &ctx,
-    );
+        &ctx);
     assert!(r.starts_with("error:"));
 }
 
@@ -420,10 +399,7 @@ fn execute_pattern_turn_base_sets_trigger() {
         let rf = p.runway_frame.clone();
         p.engage_profile(Box::new(PatternFlyProfile::new(cfg, rf)));
     }
-    let r = dispatch_tool(
-        &call("execute_pattern_turn", json!({"leg": "base"})),
-        &ctx,
-    );
+    let r = dispatch("execute_pattern_turn", json!({"leg": "base"}), &ctx);
     assert!(r.contains("turn to base triggered"));
 }
 
@@ -436,13 +412,10 @@ fn set_pattern_clearance_revokes_base() {
         let rf = p.runway_frame.clone();
         p.engage_profile(Box::new(PatternFlyProfile::new(cfg, rf)));
     }
-    let r = dispatch_tool(
-        &call(
+    let r = dispatch(
             "set_pattern_clearance",
             json!({"gate": "turn_base", "granted": false, "runway_id": null}),
-        ),
-        &ctx,
-    );
+        &ctx);
     assert!(r.contains("turn_base clearance revoked"));
 }
 
@@ -455,13 +428,10 @@ fn set_pattern_clearance_cleared_to_land() {
         let rf = p.runway_frame.clone();
         p.engage_profile(Box::new(PatternFlyProfile::new(cfg, rf)));
     }
-    let r = dispatch_tool(
-        &call(
+    let r = dispatch(
             "set_pattern_clearance",
             json!({"gate": "land", "granted": true, "runway_id": "16L"}),
-        ),
-        &ctx,
-    );
+        &ctx);
     assert!(r.contains("cleared to land"));
     assert!(r.contains("16L"));
 }
@@ -469,7 +439,7 @@ fn set_pattern_clearance_cleared_to_land() {
 #[test]
 fn go_around_without_pattern_fly_errors() {
     let ctx = make_ctx(None, None);
-    let r = dispatch_tool(&call("go_around", json!({})), &ctx);
+    let r = dispatch("go_around", json!({}), &ctx);
     assert!(r.starts_with("error:"));
 }
 
@@ -486,8 +456,7 @@ fn engage_pattern_fly_for_takeoff_roll() {
     let dir = TempDir::new().unwrap();
     build_fake_parquet(dir.path(), &[]);
     let (ctx, _bridge) = make_ctx_with_parquet(dir.path());
-    let r = dispatch_tool(
-        &call(
+    let r = dispatch(
             "engage_pattern_fly",
             json!({
                 "airport_ident": "KSEA",
@@ -495,9 +464,7 @@ fn engage_pattern_fly_for_takeoff_roll() {
                 "side": "left",
                 "start_phase": "takeoff_roll",
             }),
-        ),
-        &ctx,
-    );
+        &ctx);
     assert!(!r.contains("error"), "got {}", r);
     assert_eq!(ctx.pilot.lock().list_profile_names(), vec!["pattern_fly"]);
 }
@@ -521,8 +488,7 @@ fn engage_pattern_fly_anchors_at_pavement_end_and_exposes_displacement() {
     ];
     build_fake_parquet(dir.path(), &extra);
     let (ctx, _bridge) = make_ctx_with_parquet(dir.path());
-    let r = dispatch_tool(
-        &call(
+    let r = dispatch(
             "engage_pattern_fly",
             json!({
                 "airport_ident": "KTEST",
@@ -530,9 +496,7 @@ fn engage_pattern_fly_anchors_at_pavement_end_and_exposes_displacement() {
                 "side": "left",
                 "start_phase": "pattern_entry",
             }),
-        ),
-        &ctx,
-    );
+        &ctx);
     assert!(!r.contains("error"), "got {}", r);
     let pilot = ctx.pilot.lock();
     let threshold = pilot.runway_frame.runway.threshold_ft;
@@ -563,8 +527,7 @@ fn engage_pattern_fly_unknown_airport_errors() {
     let dir = TempDir::new().unwrap();
     build_fake_parquet(dir.path(), &[]);
     let (ctx, _bridge) = make_ctx_with_parquet(dir.path());
-    let r = dispatch_tool(
-        &call(
+    let r = dispatch(
             "engage_pattern_fly",
             json!({
                 "airport_ident": "NOWHERE",
@@ -572,9 +535,7 @@ fn engage_pattern_fly_unknown_airport_errors() {
                 "side": "left",
                 "start_phase": "pattern_entry",
             }),
-        ),
-        &ctx,
-    );
+        &ctx);
     assert!(r.starts_with("error:"));
     assert!(r.contains("not found"));
 }
@@ -584,8 +545,7 @@ fn engage_pattern_fly_invalid_start_phase() {
     let dir = TempDir::new().unwrap();
     build_fake_parquet(dir.path(), &[]);
     let (ctx, _bridge) = make_ctx_with_parquet(dir.path());
-    let r = dispatch_tool(
-        &call(
+    let r = dispatch(
             "engage_pattern_fly",
             json!({
                 "airport_ident": "KSEA",
@@ -593,9 +553,7 @@ fn engage_pattern_fly_invalid_start_phase() {
                 "side": "left",
                 "start_phase": "barrel_roll",
             }),
-        ),
-        &ctx,
-    );
+        &ctx);
     assert!(r.starts_with("error:"));
     assert!(r.contains("unknown start_phase"));
 }
@@ -605,7 +563,7 @@ fn join_pattern_without_pattern_fly_errors() {
     let dir = TempDir::new().unwrap();
     build_fake_parquet(dir.path(), &[]);
     let (ctx, _bridge) = make_ctx_with_parquet(dir.path());
-    let r = dispatch_tool(&call("join_pattern", json!({"runway_id": "30"})), &ctx);
+    let r = dispatch("join_pattern", json!({"runway_id": "30"}), &ctx);
     assert!(r.starts_with("error:"));
     assert!(r.contains("engage_pattern_fly"));
 }
@@ -615,7 +573,7 @@ fn join_pattern_without_pattern_fly_errors() {
 #[test]
 fn tune_radio_without_bridge_errors() {
     let ctx = make_ctx(None, None);
-    let r = dispatch_tool(&call("tune_radio", json!({"radio": "com1", "frequency_mhz": 118.3})), &ctx);
+    let r = dispatch("tune_radio", json!({"radio": "com1", "frequency_mhz": 118.3}), &ctx);
     assert!(r.starts_with("error:"));
 }
 
@@ -623,7 +581,7 @@ fn tune_radio_without_bridge_errors() {
 fn tune_radio_writes_dataref() {
     let bridge = FakeBridge::new(&[], 47.4638, -122.308);
     let ctx = make_ctx(Some(bridge.clone() as Arc<dyn ToolBridge>), None);
-    let r = dispatch_tool(&call("tune_radio", json!({"radio": "com1", "frequency_mhz": 118.30})), &ctx);
+    let r = dispatch("tune_radio", json!({"radio": "com1", "frequency_mhz": 118.30}), &ctx);
     assert!(r.contains("118.300 MHz"));
     let writes = bridge.writes();
     assert_eq!(writes.len(), 1);
@@ -635,7 +593,7 @@ fn tune_radio_writes_dataref() {
 #[test]
 fn broadcast_appends_to_recent_and_logs() {
     let ctx = make_ctx(None, None);
-    let r = dispatch_tool(&call("broadcast_on_radio", json!({"radio": "com1", "message": "hello"})), &ctx);
+    let r = dispatch("broadcast_on_radio", json!({"radio": "com1", "message": "hello"}), &ctx);
     assert!(r.contains("hello"));
     let broadcasts = ctx.recent_broadcasts.lock();
     assert_eq!(broadcasts.len(), 1);
@@ -648,7 +606,7 @@ fn broadcast_appends_to_recent_and_logs() {
 fn set_parking_brake_engage_writes_1() {
     let bridge = FakeBridge::new(&[], 47.4638, -122.308);
     let ctx = make_ctx(Some(bridge.clone() as Arc<dyn ToolBridge>), None);
-    let r = dispatch_tool(&call("set_parking_brake", json!({"engaged": true})), &ctx);
+    let r = dispatch("set_parking_brake", json!({"engaged": true}), &ctx);
     assert!(r.contains("engaged"));
     let writes = bridge.writes();
     assert_eq!(writes[0]["sim/cockpit2/controls/parking_brake_ratio"], 1.0);
@@ -658,7 +616,7 @@ fn set_parking_brake_engage_writes_1() {
 fn set_parking_brake_release_writes_0() {
     let bridge = FakeBridge::new(&[], 47.4638, -122.308);
     let ctx = make_ctx(Some(bridge.clone() as Arc<dyn ToolBridge>), None);
-    let r = dispatch_tool(&call("set_parking_brake", json!({"engaged": false})), &ctx);
+    let r = dispatch("set_parking_brake", json!({"engaged": false}), &ctx);
     assert!(r.contains("released"));
     let writes = bridge.writes();
     assert_eq!(writes[0]["sim/cockpit2/controls/parking_brake_ratio"], 0.0);
@@ -730,7 +688,7 @@ fn checklist_flags_set_parking_brake() {
     let bridge = FakeBridge::new(&[("sim/cockpit2/controls/parking_brake_ratio", 1.0)], 47.4638, -122.308);
     let ctx = make_ctx(Some(bridge as Arc<dyn ToolBridge>), None);
     seed_snapshot(&ctx, 0, true);
-    let r = dispatch_tool(&call("takeoff_checklist", json!({})), &ctx);
+    let r = dispatch("takeoff_checklist", json!({}), &ctx);
     assert!(r.contains("[ACTION] parking brake: SET"));
     assert!(r.contains("set_parking_brake(engaged=False)"));
     assert!(r.contains("need action"));
@@ -741,7 +699,7 @@ fn checklist_passes_when_brake_released_and_flaps_ok() {
     let bridge = FakeBridge::new(&[("sim/cockpit2/controls/parking_brake_ratio", 0.0)], 47.4638, -122.308);
     let ctx = make_ctx(Some(bridge as Arc<dyn ToolBridge>), None);
     seed_snapshot(&ctx, 0, true);
-    let r = dispatch_tool(&call("takeoff_checklist", json!({})), &ctx);
+    let r = dispatch("takeoff_checklist", json!({}), &ctx);
     assert!(r.contains("[OK]     parking brake: released"));
     assert!(r.contains("[OK]     flaps: 0 deg"));
     assert!(r.contains("[OK]     on ground"));
@@ -753,7 +711,7 @@ fn checklist_flags_too_many_flaps() {
     let bridge = FakeBridge::new(&[("sim/cockpit2/controls/parking_brake_ratio", 0.0)], 47.4638, -122.308);
     let ctx = make_ctx(Some(bridge as Arc<dyn ToolBridge>), None);
     seed_snapshot(&ctx, 20, true);
-    let r = dispatch_tool(&call("takeoff_checklist", json!({})), &ctx);
+    let r = dispatch("takeoff_checklist", json!({}), &ctx);
     assert!(r.contains("[ACTION] flaps: 20 deg"));
 }
 
@@ -762,14 +720,14 @@ fn checklist_flags_not_on_ground() {
     let bridge = FakeBridge::new(&[("sim/cockpit2/controls/parking_brake_ratio", 0.0)], 47.4638, -122.308);
     let ctx = make_ctx(Some(bridge as Arc<dyn ToolBridge>), None);
     seed_snapshot(&ctx, 0, false);
-    let r = dispatch_tool(&call("takeoff_checklist", json!({})), &ctx);
+    let r = dispatch("takeoff_checklist", json!({}), &ctx);
     assert!(r.contains("[ERROR]  not on ground"));
 }
 
 #[test]
 fn checklist_no_snapshot_returns_error() {
     let ctx = make_ctx(None, None);
-    let r = dispatch_tool(&call("takeoff_checklist", json!({})), &ctx);
+    let r = dispatch("takeoff_checklist", json!({}), &ctx);
     assert!(r.starts_with("error:"));
 }
 
@@ -778,7 +736,7 @@ fn checklist_no_snapshot_returns_error() {
 #[test]
 fn get_status_before_any_update_returns_uninitialized() {
     let ctx = make_ctx(None, None);
-    let r = dispatch_tool(&call("get_status", json!({})), &ctx);
+    let r = dispatch("get_status", json!({}), &ctx);
     let v: serde_json::Value = serde_json::from_str(&r).unwrap();
     assert_eq!(v, json!({"status": "uninitialized"}));
 }
@@ -792,7 +750,7 @@ fn get_status_includes_parking_brake_fields_when_bridge_present() {
     );
     let ctx = make_ctx(Some(bridge.clone() as Arc<dyn ToolBridge>), None);
     seed_snapshot(&ctx, 0, true);
-    let r = dispatch_tool(&call("get_status", json!({})), &ctx);
+    let r = dispatch("get_status", json!({}), &ctx);
     let v: serde_json::Value = serde_json::from_str(&r).unwrap();
     assert_eq!(v["parking_brake_set"], json!(true));
     assert_eq!(v["parking_brake_ratio"], json!(0.75));
@@ -807,7 +765,7 @@ fn get_status_reports_released_parking_brake() {
     );
     let ctx = make_ctx(Some(bridge.clone() as Arc<dyn ToolBridge>), None);
     seed_snapshot(&ctx, 0, true);
-    let r = dispatch_tool(&call("get_status", json!({})), &ctx);
+    let r = dispatch("get_status", json!({}), &ctx);
     let v: serde_json::Value = serde_json::from_str(&r).unwrap();
     assert_eq!(v["parking_brake_set"], json!(false));
     assert_eq!(v["parking_brake_ratio"], json!(0.0));
@@ -816,7 +774,7 @@ fn get_status_reports_released_parking_brake() {
 #[test]
 fn sleep_returns_string() {
     let ctx = make_ctx(None, None);
-    let r = dispatch_tool(&call("sleep", json!({})), &ctx);
+    let r = dispatch("sleep", json!({}), &ctx);
     assert!(!r.is_empty());
 }
 
@@ -831,7 +789,7 @@ fn sleep_refuses_when_moving_with_only_idle_profiles() {
         let snap = pilot.latest_snapshot.as_mut().unwrap();
         snap.state.gs_kt = 12.3;
     }
-    let r = dispatch_tool(&call("sleep", json!({})), &ctx);
+    let r = dispatch("sleep", json!({}), &ctx);
     assert!(r.starts_with("error:"), "expected refusal, got {}", r);
     assert!(r.contains("12.3"));
     assert!(r.contains("engage"));
@@ -849,7 +807,7 @@ fn sleep_allows_when_moving_with_non_idle_profile_active() {
         snap.state.gs_kt = 65.0;
         snap.active_profiles = vec!["pattern_fly".to_string()];
     }
-    let r = dispatch_tool(&call("sleep", json!({})), &ctx);
+    let r = dispatch("sleep", json!({}), &ctx);
     assert!(!r.starts_with("error:"), "expected sleep to succeed with pattern_fly active, got {}", r);
     assert!(r.contains("sleeping"));
 }
@@ -859,7 +817,7 @@ fn sleep_allows_when_aircraft_is_stationary() {
     let ctx = make_ctx(None, None);
     seed_snapshot(&ctx, 0, true);
     // gs_kt defaults to 0.0 in seed_snapshot — leave it.
-    let r = dispatch_tool(&call("sleep", json!({})), &ctx);
+    let r = dispatch("sleep", json!({}), &ctx);
     assert!(!r.starts_with("error:"), "expected sleep to succeed, got {}", r);
     assert!(r.contains("sleeping"));
 }
@@ -873,7 +831,7 @@ fn sleep_allows_at_tiny_sensor_noise_below_epsilon() {
         let snap = pilot.latest_snapshot.as_mut().unwrap();
         snap.state.gs_kt = 0.3; // below the 0.5 kt epsilon
     }
-    let r = dispatch_tool(&call("sleep", json!({})), &ctx);
+    let r = dispatch("sleep", json!({}), &ctx);
     assert!(!r.starts_with("error:"), "expected sleep to succeed below epsilon, got {}", r);
 }
 
@@ -882,10 +840,7 @@ fn sleep_with_suppress_arg_is_noop_without_pump() {
     // In tests the ToolContext has no heartbeat_pump; the sleep handler must
     // still accept the new arg and return a sensible string instead of panicking.
     let ctx = make_ctx(None, None);
-    let r = dispatch_tool(
-        &call("sleep", json!({"suppress_idle_heartbeat_s": 120.0})),
-        &ctx,
-    );
+    let r = dispatch("sleep", json!({"suppress_idle_heartbeat_s": 120.0}), &ctx);
     assert!(r.contains("suppressed"));
     assert!(r.contains("120"));
 }
@@ -893,20 +848,14 @@ fn sleep_with_suppress_arg_is_noop_without_pump() {
 #[test]
 fn sleep_null_suppress_arg_uses_default_message() {
     let ctx = make_ctx(None, None);
-    let r = dispatch_tool(
-        &call("sleep", json!({"suppress_idle_heartbeat_s": serde_json::Value::Null})),
-        &ctx,
-    );
+    let r = dispatch("sleep", json!({"suppress_idle_heartbeat_s": serde_json::Value::Null}), &ctx);
     assert_eq!(r, "sleeping; waiting for next external message");
 }
 
 #[test]
 fn sleep_clamps_suppress_arg_to_cap() {
     let ctx = make_ctx(None, None);
-    let r = dispatch_tool(
-        &call("sleep", json!({"suppress_idle_heartbeat_s": 9_999.0})),
-        &ctx,
-    );
+    let r = dispatch("sleep", json!({"suppress_idle_heartbeat_s": 9_999.0}), &ctx);
     // Cap is 600 s; message should reflect the clamped value.
     assert!(r.contains("600"));
 }
@@ -918,13 +867,10 @@ fn sql_select_returns_tab_separated_rows_with_header() {
     let dir = TempDir::new().unwrap();
     build_fake_parquet(dir.path(), &[]);
     let (ctx, _) = make_ctx_with_parquet(dir.path());
-    let r = dispatch_tool(
-        &call(
+    let r = dispatch(
             "sql_query",
             json!({"query": "SELECT airport_ident, le_ident, length_ft FROM runways WHERE airport_ident='KSEA' ORDER BY length_ft DESC"}),
-        ),
-        &ctx,
-    );
+        &ctx);
     let lines: Vec<&str> = r.lines().collect();
     assert_eq!(lines[0], "airport_ident\tle_ident\tlength_ft");
     assert_eq!(lines.len(), 4);
@@ -942,13 +888,10 @@ fn sql_empty_result_returns_zero_rows_message() {
     let dir = TempDir::new().unwrap();
     build_fake_parquet(dir.path(), &[]);
     let (ctx, _) = make_ctx_with_parquet(dir.path());
-    let r = dispatch_tool(
-        &call(
+    let r = dispatch(
             "sql_query",
             json!({"query": "SELECT * FROM runways WHERE airport_ident='NOWHERE'"}),
-        ),
-        &ctx,
-    );
+        &ctx);
     assert_eq!(r, "0 rows");
 }
 
@@ -957,17 +900,14 @@ fn sql_invalid_returns_error() {
     let dir = TempDir::new().unwrap();
     build_fake_parquet(dir.path(), &[]);
     let (ctx, _) = make_ctx_with_parquet(dir.path());
-    let r = dispatch_tool(
-        &call("sql_query", json!({"query": "SELECT * FROM does_not_exist"})),
-        &ctx,
-    );
+    let r = dispatch("sql_query", json!({"query": "SELECT * FROM does_not_exist"}), &ctx);
     assert!(r.starts_with("error:"));
 }
 
 #[test]
 fn sql_missing_csv_path_returns_error() {
     let ctx = make_ctx(None, None);
-    let r = dispatch_tool(&call("sql_query", json!({"query": "SELECT 1"})), &ctx);
+    let r = dispatch("sql_query", json!({"query": "SELECT 1"}), &ctx);
     assert!(r.starts_with("error:"));
     assert!(r.contains("not configured"));
 }
@@ -989,10 +929,7 @@ fn sql_row_cap_truncates_large_results() {
     }
     build_fake_parquet(dir.path(), &extra);
     let (ctx, _) = make_ctx_with_parquet(dir.path());
-    let r = dispatch_tool(
-        &call("sql_query", json!({"query": "SELECT airport_ident FROM runways"})),
-        &ctx,
-    );
+    let r = dispatch("sql_query", json!({"query": "SELECT airport_ident FROM runways"}), &ctx);
     let lines: Vec<&str> = r.lines().collect();
     assert_eq!(lines.len(), 52); // header + 50 rows + truncation notice
     assert!(lines.last().unwrap().contains("truncated"));
@@ -1035,8 +972,7 @@ fn plan_taxi_route_shortest_returns_formatted_plan() {
     let dir = TempDir::new().unwrap();
     build_taxi_fixture_parquet(dir.path());
     let (ctx, _bridge) = make_ctx_with_parquet(dir.path());
-    let r = dispatch_tool(
-        &call(
+    let r = dispatch(
             "plan_taxi_route",
             json!({
                 "airport_ident": "KTEST",
@@ -1045,9 +981,7 @@ fn plan_taxi_route_shortest_returns_formatted_plan() {
                 "start_lat": 37.000500,
                 "start_lon": -122.002000,
             }),
-        ),
-        &ctx,
-    );
+        &ctx);
     assert!(!r.starts_with("error"), "got: {}", r);
     assert!(r.contains("taxi plan KTEST"), "output: {}", r);
     assert!(r.contains("A -> D"), "output: {}", r);
@@ -1061,8 +995,7 @@ fn plan_taxi_route_constrained_honors_via_taxiways() {
     let (ctx, _bridge) = make_ctx_with_parquet(dir.path());
     // Force A then C (which routes via N4 instead of the shorter D leg) —
     // destination_runway 09 still resolves, and the plan takes the longer path.
-    let r = dispatch_tool(
-        &call(
+    let r = dispatch(
             "plan_taxi_route",
             json!({
                 "airport_ident": "KTEST",
@@ -1071,9 +1004,7 @@ fn plan_taxi_route_constrained_honors_via_taxiways() {
                 "start_lat": 37.000500,
                 "start_lon": -122.002000,
             }),
-        ),
-        &ctx,
-    );
+        &ctx);
     assert!(!r.starts_with("error"), "got: {}", r);
     assert!(r.contains("A -> C"), "plan did not honor via list: {}", r);
 }
@@ -1114,8 +1045,7 @@ fn engage_taxi_picks_threshold_not_midfield_hold_short() {
     ];
     build_fake_parquet(dir.path(), &extra);
     let (ctx, _bridge) = make_ctx_with_parquet(dir.path());
-    let r = dispatch_tool(
-        &call(
+    let r = dispatch(
             "plan_taxi_route",
             json!({
                 "airport_ident": "KMID",
@@ -1124,9 +1054,7 @@ fn engage_taxi_picks_threshold_not_midfield_hold_short() {
                 "start_lat": 37.001000,
                 "start_lon": -121.995000,
             }),
-        ),
-        &ctx,
-    );
+        &ctx);
     assert!(!r.starts_with("error"), "got: {}", r);
     // The 09 threshold hold-short is node 3. Midfield is node 1. Without
     // the threshold-cluster clamp, Dijkstra picks node 1 (1 leg, ~182 ft);
@@ -1144,8 +1072,7 @@ fn plan_taxi_route_airport_without_network_errors() {
     let dir = TempDir::new().unwrap();
     build_fake_parquet(dir.path(), &[]); // Base fixture has no taxi rows.
     let (ctx, _bridge) = make_ctx_with_parquet(dir.path());
-    let r = dispatch_tool(
-        &call(
+    let r = dispatch(
             "plan_taxi_route",
             json!({
                 "airport_ident": "KSEA",
@@ -1154,9 +1081,7 @@ fn plan_taxi_route_airport_without_network_errors() {
                 "start_lat": 47.46,
                 "start_lon": -122.30,
             }),
-        ),
-        &ctx,
-    );
+        &ctx);
     assert!(r.starts_with("error"));
     assert!(r.contains("no taxi network"));
 }
@@ -1181,8 +1106,7 @@ fn engage_taxi_swaps_in_taxi_profile_and_reports_summary() {
         Some(bridge.clone() as Arc<dyn ToolBridge>),
         Some(dir.path().to_path_buf()),
     );
-    let r = dispatch_tool(
-        &call(
+    let r = dispatch(
             "engage_taxi",
             json!({
                 "airport_ident": "KTEST",
@@ -1191,9 +1115,7 @@ fn engage_taxi_swaps_in_taxi_profile_and_reports_summary() {
                 "start_lat": 37.000500,
                 "start_lon": -122.002000,
             }),
-        ),
-        &ctx,
-    );
+        &ctx);
     assert!(!r.starts_with("error"), "got: {}", r);
     assert!(r.contains("engaged taxi KTEST"), "got: {}", r);
     assert!(r.contains("A -> D"), "got: {}", r);
@@ -1218,8 +1140,7 @@ fn engage_taxi_releases_parking_brake_when_set() {
         Some(bridge.clone() as Arc<dyn ToolBridge>),
         Some(dir.path().to_path_buf()),
     );
-    let r = dispatch_tool(
-        &call(
+    let r = dispatch(
             "engage_taxi",
             json!({
                 "airport_ident": "KTEST",
@@ -1228,9 +1149,7 @@ fn engage_taxi_releases_parking_brake_when_set() {
                 "start_lat": 37.000500,
                 "start_lon": -122.002000,
             }),
-        ),
-        &ctx,
-    );
+        &ctx);
     assert!(!r.starts_with("error"), "got: {}", r);
     assert!(r.contains("released parking brake"), "got: {}", r);
     let writes = bridge.writes();
@@ -1257,8 +1176,7 @@ fn engage_taxi_leaves_parking_brake_alone_when_released() {
         Some(bridge.clone() as Arc<dyn ToolBridge>),
         Some(dir.path().to_path_buf()),
     );
-    let r = dispatch_tool(
-        &call(
+    let r = dispatch(
             "engage_taxi",
             json!({
                 "airport_ident": "KTEST",
@@ -1267,9 +1185,7 @@ fn engage_taxi_leaves_parking_brake_alone_when_released() {
                 "start_lat": 37.000500,
                 "start_lon": -122.002000,
             }),
-        ),
-        &ctx,
-    );
+        &ctx);
     assert!(!r.starts_with("error"), "got: {}", r);
     assert!(!r.contains("released parking brake"), "got: {}", r);
     let writes = bridge.writes();
@@ -1295,8 +1211,7 @@ fn engage_taxi_prepends_pullout_leg_when_far_from_nearest_node() {
         Some(bridge.clone() as Arc<dyn ToolBridge>),
         Some(dir.path().to_path_buf()),
     );
-    let r = dispatch_tool(
-        &call(
+    let r = dispatch(
             "engage_taxi",
             json!({
                 "airport_ident": "KTEST",
@@ -1305,9 +1220,7 @@ fn engage_taxi_prepends_pullout_leg_when_far_from_nearest_node() {
                 "start_lat": start_lat,
                 "start_lon": start_lon,
             }),
-        ),
-        &ctx,
-    );
+        &ctx);
     assert!(!r.starts_with("error"), "got: {}", r);
     assert!(
         r.contains("pullout:"),
@@ -1359,8 +1272,7 @@ fn engage_taxi_allows_big_pullout_turn_off_runway() {
         Some(bridge.clone() as Arc<dyn ToolBridge>),
         Some(dir.path().to_path_buf()),
     );
-    let r = dispatch_tool(
-        &call(
+    let r = dispatch(
             "engage_taxi",
             json!({
                 "airport_ident": "KTEST",
@@ -1369,9 +1281,7 @@ fn engage_taxi_allows_big_pullout_turn_off_runway() {
                 "start_lat": start_lat,
                 "start_lon": start_lon,
             }),
-        ),
-        &ctx,
-    );
+        &ctx);
     assert!(
         !r.starts_with("error"),
         "off-runway big-turn pullout should succeed, got: {}",
@@ -1420,8 +1330,7 @@ fn engage_taxi_rejects_big_pullout_turn_on_runway() {
         Some(bridge.clone() as Arc<dyn ToolBridge>),
         Some(dir.path().to_path_buf()),
     );
-    let r = dispatch_tool(
-        &call(
+    let r = dispatch(
             "engage_taxi",
             json!({
                 "airport_ident": "KRWY",
@@ -1430,9 +1339,7 @@ fn engage_taxi_rejects_big_pullout_turn_on_runway() {
                 "start_lat": start_lat,
                 "start_lon": start_lon,
             }),
-        ),
-        &ctx,
-    );
+        &ctx);
     assert!(r.starts_with("error"), "on-runway big-turn should reject: {}", r);
     assert!(
         r.contains("backtaxi") || r.contains("runway pavement"),
@@ -1461,8 +1368,7 @@ fn engage_line_up_builds_two_leg_route_to_runway_threshold() {
         Some(bridge.clone() as Arc<dyn ToolBridge>),
         Some(dir.path().to_path_buf()),
     );
-    let r = dispatch_tool(
-        &call(
+    let r = dispatch(
             "engage_line_up",
             json!({
                 "airport_ident": "KTEST",
@@ -1470,9 +1376,7 @@ fn engage_line_up_builds_two_leg_route_to_runway_threshold() {
                 "start_lat": 37.000400,
                 "start_lon": -121.998200,
             }),
-        ),
-        &ctx,
-    );
+        &ctx);
     assert!(!r.starts_with("error"), "got: {}", r);
     assert!(r.contains("engaged line_up KTEST"), "got: {}", r);
     assert!(r.contains("runway 09"), "got: {}", r);
@@ -1492,8 +1396,7 @@ fn engage_line_up_unknown_runway_errors() {
         Some(bridge.clone() as Arc<dyn ToolBridge>),
         Some(dir.path().to_path_buf()),
     );
-    let r = dispatch_tool(
-        &call(
+    let r = dispatch(
             "engage_line_up",
             json!({
                 "airport_ident": "KTEST",
@@ -1501,9 +1404,7 @@ fn engage_line_up_unknown_runway_errors() {
                 "start_lat": 37.000800,
                 "start_lon": -121.998500,
             }),
-        ),
-        &ctx,
-    );
+        &ctx);
     assert!(r.starts_with("error"));
     assert!(r.contains("runway"));
 }
@@ -1513,8 +1414,7 @@ fn engage_taxi_without_bridge_errors() {
     let dir = TempDir::new().unwrap();
     build_taxi_fixture_parquet(dir.path());
     let ctx = make_ctx(None, Some(dir.path().to_path_buf()));
-    let r = dispatch_tool(
-        &call(
+    let r = dispatch(
             "engage_taxi",
             json!({
                 "airport_ident": "KTEST",
@@ -1523,9 +1423,7 @@ fn engage_taxi_without_bridge_errors() {
                 "start_lat": 37.000500,
                 "start_lon": -122.002000,
             }),
-        ),
-        &ctx,
-    );
+        &ctx);
     assert!(r.starts_with("error"));
     assert!(r.contains("bridge"));
 }
@@ -1537,8 +1435,7 @@ fn spatial_function_finds_nearest_runways() {
     let dir = TempDir::new().unwrap();
     build_fake_parquet(dir.path(), &[]);
     let (ctx, _) = make_ctx_with_parquet(dir.path());
-    let r = dispatch_tool(
-        &call(
+    let r = dispatch(
             "sql_query",
             json!({"query":
                 "SELECT airport_ident, le_ident \
@@ -1546,9 +1443,7 @@ fn spatial_function_finds_nearest_runways() {
                  WHERE closed = 0 AND le_latitude_deg IS NOT NULL \
                  ORDER BY ST_Distance_Sphere(ST_Point(le_longitude_deg, le_latitude_deg), ST_Point(-122.31, 47.46)) \
                  LIMIT 3"}),
-        ),
-        &ctx,
-    );
+        &ctx);
     let lines: Vec<&str> = r.lines().collect();
     assert_eq!(lines[0], "airport_ident\tle_ident");
     let airports: Vec<&str> = lines[1..4].iter().map(|l| l.split('\t').next().unwrap()).collect();
@@ -1601,7 +1496,7 @@ fn spatial_closest_runway_template_returns_centerline_and_threshold_distances() 
          LIMIT 1",
         lat = lat, lon = lon, hdg = hdg,
     );
-    let r = dispatch_tool(&call("sql_query", json!({"query": query})), &ctx);
+    let r = dispatch("sql_query", json!({"query": query}), &ctx);
     let lines: Vec<&str> = r.lines().collect();
     assert_eq!(
         lines[0],
@@ -1632,8 +1527,7 @@ fn spatial_least_of_both_ends_picks_closer_high_numbered_threshold() {
     let dir = TempDir::new().unwrap();
     build_fake_parquet(dir.path(), &[]);
     let (ctx, _) = make_ctx_with_parquet(dir.path());
-    let r = dispatch_tool(
-        &call(
+    let r = dispatch(
             "sql_query",
             json!({"query":
                 "SELECT airport_ident, le_ident, he_ident, \
@@ -1644,9 +1538,7 @@ fn spatial_least_of_both_ends_picks_closer_high_numbered_threshold() {
                  FROM runways \
                  WHERE closed = 0 AND le_latitude_deg IS NOT NULL AND he_latitude_deg IS NOT NULL \
                  ORDER BY dist_m LIMIT 1"}),
-        ),
-        &ctx,
-    );
+        &ctx);
     let lines: Vec<&str> = r.lines().collect();
     assert_eq!(lines[0], "airport_ident\tle_ident\the_ident\tdist_m");
     let fields: Vec<&str> = lines[1].split('\t').collect();
@@ -1696,17 +1588,14 @@ fn sql_query_parking_spots_view_is_visible() {
     let dir = TempDir::new().unwrap();
     build_park_fixture_parquet(dir.path());
     let (ctx, _) = make_ctx_with_parquet(dir.path());
-    let r = dispatch_tool(
-        &call(
+    let r = dispatch(
             "sql_query",
             json!({"query":
                 "SELECT name, kind, categories, operation_type, airlines \
                  FROM parking_spots \
                  WHERE airport_ident = 'KTEST' \
                  ORDER BY name"}),
-        ),
-        &ctx,
-    );
+        &ctx);
     let lines: Vec<&str> = r.lines().collect();
     assert_eq!(lines[0], "name\tkind\tcategories\toperation_type\tairlines");
     assert!(lines.iter().any(|l| l.starts_with("GA Tie-Down 1\ttie_down")));
@@ -1721,8 +1610,7 @@ fn plan_park_route_returns_parking_coordinates_and_heading() {
     let dir = TempDir::new().unwrap();
     build_park_fixture_parquet(dir.path());
     let (ctx, _) = make_ctx_with_parquet(dir.path());
-    let r = dispatch_tool(
-        &call(
+    let r = dispatch(
             "plan_park_route",
             json!({
                 "airport_ident": "KTEST",
@@ -1731,9 +1619,7 @@ fn plan_park_route_returns_parking_coordinates_and_heading() {
                 "start_lat": 37.000500,
                 "start_lon": -122.002000,
             }),
-        ),
-        &ctx,
-    );
+        &ctx);
     assert!(!r.starts_with("error"), "got: {}", r);
     assert!(r.contains("taxi plan KTEST"));
     assert!(r.contains("parking: \"Gate A4\""));
@@ -1745,8 +1631,7 @@ fn plan_park_route_unknown_spot_errors() {
     let dir = TempDir::new().unwrap();
     build_park_fixture_parquet(dir.path());
     let (ctx, _) = make_ctx_with_parquet(dir.path());
-    let r = dispatch_tool(
-        &call(
+    let r = dispatch(
             "plan_park_route",
             json!({
                 "airport_ident": "KTEST",
@@ -1755,9 +1640,7 @@ fn plan_park_route_unknown_spot_errors() {
                 "start_lat": 37.000500,
                 "start_lon": -122.002000,
             }),
-        ),
-        &ctx,
-    );
+        &ctx);
     assert!(r.starts_with("error"), "expected error, got: {}", r);
     assert!(r.contains("parking spot"));
 }
@@ -1785,8 +1668,7 @@ fn engage_park_swaps_in_taxi_profile_and_clears_pattern() {
     ctx.pilot.lock().engage_profile(Box::new(p));
     assert!(ctx.pilot.lock().has_profile("pattern_fly"));
 
-    let r = dispatch_tool(
-        &call(
+    let r = dispatch(
             "engage_park",
             json!({
                 "airport_ident": "KTEST",
@@ -1795,9 +1677,7 @@ fn engage_park_swaps_in_taxi_profile_and_clears_pattern() {
                 "start_lat": 37.000500,
                 "start_lon": -122.002000,
             }),
-        ),
-        &ctx,
-    );
+        &ctx);
     assert!(!r.starts_with("error"), "got: {}", r);
     assert!(r.contains("engaged park KTEST"));
     assert!(r.contains("Gate A4"));
@@ -1812,8 +1692,7 @@ fn choose_runway_exit_records_preference_on_pattern_profile() {
     let dir = TempDir::new().unwrap();
     build_fake_parquet(dir.path(), &[]);
     let (ctx, _bridge) = make_ctx_with_parquet(dir.path());
-    dispatch_tool(
-        &call(
+    dispatch(
             "engage_pattern_fly",
             json!({
                 "airport_ident": "KSEA",
@@ -1821,20 +1700,12 @@ fn choose_runway_exit_records_preference_on_pattern_profile() {
                 "side": "left",
                 "start_phase": "takeoff_roll",
             }),
-        ),
-        &ctx,
-    );
-    let r = dispatch_tool(
-        &call("choose_runway_exit", json!({"taxiway_name": "A5"})),
-        &ctx,
-    );
+        &ctx);
+    let r = dispatch("choose_runway_exit", json!({"taxiway_name": "A5"}), &ctx);
     assert!(r.contains("A5"), "got: {}", r);
     assert!(r.contains("preferred"), "got: {}", r);
 
-    let cleared = dispatch_tool(
-        &call("choose_runway_exit", json!({"taxiway_name": null})),
-        &ctx,
-    );
+    let cleared = dispatch("choose_runway_exit", json!({"taxiway_name": null}), &ctx);
     assert!(cleared.contains("cleared"), "got: {}", cleared);
 }
 
@@ -1861,8 +1732,7 @@ fn choose_runway_exit_rejects_unknown_exit_with_valid_list() {
     ];
     build_fake_parquet(dir.path(), &extra);
     let (ctx, _bridge) = make_ctx_with_parquet(dir.path());
-    dispatch_tool(
-        &call(
+    dispatch(
             "engage_pattern_fly",
             json!({
                 "airport_ident": "KEXIT",
@@ -1870,13 +1740,8 @@ fn choose_runway_exit_rejects_unknown_exit_with_valid_list() {
                 "side": "left",
                 "start_phase": "takeoff_roll",
             }),
-        ),
-        &ctx,
-    );
-    let r = dispatch_tool(
-        &call("choose_runway_exit", json!({"taxiway_name": "Z"})),
-        &ctx,
-    );
+        &ctx);
+    let r = dispatch("choose_runway_exit", json!({"taxiway_name": "Z"}), &ctx);
     assert!(r.starts_with("error"), "got: {}", r);
     assert!(r.contains("\"Z\""), "got: {}", r);
     assert!(r.contains("A5"), "valid list missing A5: {}", r);
@@ -1888,10 +1753,7 @@ fn choose_runway_exit_errors_when_pattern_fly_not_active() {
     let dir = TempDir::new().unwrap();
     build_fake_parquet(dir.path(), &[]);
     let (ctx, _bridge) = make_ctx_with_parquet(dir.path());
-    let r = dispatch_tool(
-        &call("choose_runway_exit", json!({"taxiway_name": "A5"})),
-        &ctx,
-    );
+    let r = dispatch("choose_runway_exit", json!({"taxiway_name": "A5"}), &ctx);
     assert!(r.starts_with("error"), "got: {}", r);
     assert!(r.contains("pattern_fly"));
 }
@@ -1918,13 +1780,10 @@ fn list_runway_exits_enumerates_annotated_taxiways() {
     ];
     build_fake_parquet(dir.path(), &extra);
     let (ctx, _) = make_ctx_with_parquet(dir.path());
-    let r = dispatch_tool(
-        &call(
+    let r = dispatch(
             "list_runway_exits",
             json!({"airport_ident": "KEXIT", "runway_ident": "09"}),
-        ),
-        &ctx,
-    );
+        &ctx);
     assert!(!r.starts_with("error"), "got: {}", r);
     assert!(r.contains("A5"), "output: {}", r);
     assert!(r.contains("A7"), "output: {}", r);

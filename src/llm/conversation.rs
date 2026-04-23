@@ -1,12 +1,12 @@
-//! Multi-turn Responses-API conversation loop.
+//! Multi-turn LLM conversation loop.
 //!
-//! `Conversation` holds the pinned system prompt + rotating message history.
-//! History grows unbounded — there is no compaction.
-//! `run_conversation_loop` pulls one `IncomingMessage` off the queue, appends
-//! it, then drives the Responses API in a loop: each tool call is dispatched
-//! and its output posted back as a `function_call_output` item. The loop
-//! terminates on (a) no function calls in the response, (b) a `sleep` tool
-//! call, or (c) the wall-clock budget running out.
+//! `Conversation` holds the pinned system prompt + rotating message history
+//! in provider-neutral `Message` form. History grows unbounded — there is no
+//! compaction.  `run_conversation_loop` pulls one `IncomingMessage` off the
+//! queue, appends it, then drives the backend in a loop: each tool call is
+//! dispatched and its output appended as a tool_result message. The loop
+//! terminates on (a) no tool calls in the response, (b) a `sleep` tool call,
+//! or (c) the wall-clock budget running out.
 
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -15,10 +15,11 @@ use std::sync::{
 use std::time::{Duration, Instant};
 
 use crossbeam_channel::Receiver;
-use serde_json::{json, Value};
 
 use crate::bus::{LogKind, SimBus};
-use crate::llm::responses_client::ResponsesBackend;
+use crate::llm::backend::{
+    LlmBackend, LlmRequest, LlmResponse, Message, Part, ReasoningEffort, Role,
+};
 use crate::llm::tools::{dispatch_tool, tool_schemas, ToolContext};
 
 pub const SYSTEM_PROMPT: &str = include_str!("system_prompt.md");
@@ -116,100 +117,147 @@ impl IncomingMessage {
     }
 }
 
-fn user_item(text: &str) -> Value {
-    json!({
-        "role": "user",
-        "content": [{"type": "input_text", "text": text}]
-    })
-}
-
-fn system_item(text: &str) -> Value {
-    json!({
-        "role": "system",
-        "content": [{"type": "input_text", "text": text}]
-    })
-}
-
 pub struct Conversation {
-    pub system_prompt: String,
-    pub pinned_items: Vec<Value>,
-    pub rotating_items: Vec<Value>,
+    pub pinned: Vec<Message>,
+    pub rotating: Vec<Message>,
 }
 
 impl Conversation {
     pub fn new(system_prompt: impl Into<String>) -> Self {
-        let prompt = system_prompt.into();
-        let pinned = vec![system_item(&prompt)];
         Self {
-            system_prompt: prompt,
-            pinned_items: pinned,
-            rotating_items: Vec::new(),
+            pinned: vec![Message::system(system_prompt.into())],
+            rotating: Vec::new(),
         }
     }
 
-    /// Replace the pinned system prompt in place. History (`rotating_items`)
-    /// is preserved so the model stays in the same turn; only the leading
-    /// system item is rewritten.
+    /// The current system prompt as a string slice. Derived from
+    /// `pinned[0]`; returns `""` if the head slot has been cleared.
+    pub fn system_prompt(&self) -> &str {
+        self.pinned_text(0).unwrap_or("")
+    }
+
+    /// Replace the pinned system prompt in place. History (`rotating`) is
+    /// preserved so the model stays in the same turn; only the leading
+    /// system message is rewritten.
     pub fn set_system_prompt(&mut self, prompt: impl Into<String>) {
-        let prompt = prompt.into();
-        if self.pinned_items.is_empty() {
-            self.pinned_items.push(system_item(&prompt));
+        let msg = Message::system(prompt.into());
+        if self.pinned.is_empty() {
+            self.pinned.push(msg);
         } else {
-            self.pinned_items[0] = system_item(&prompt);
+            self.pinned[0] = msg;
         }
-        self.system_prompt = prompt;
     }
 
     pub fn append_operator_message(&mut self, text: &str) {
-        self.rotating_items.push(user_item(&format!("[OPERATOR] {}", text)));
+        self.rotating
+            .push(Message::user_text(format!("[OPERATOR] {}", text)));
     }
     pub fn append_atc_message(&mut self, text: &str) {
-        self.rotating_items.push(user_item(&format!("[ATC] {}", text)));
+        self.rotating
+            .push(Message::user_text(format!("[ATC] {}", text)));
     }
     pub fn append_heartbeat_message(&mut self, text: &str) {
-        self.rotating_items.push(user_item(&format!("[HEARTBEAT] {}", text)));
+        self.rotating
+            .push(Message::user_text(format!("[HEARTBEAT] {}", text)));
     }
     pub fn append_mode_switch_message(&mut self, text: &str) {
-        self.rotating_items.push(user_item(&format!("[MODE_SWITCH] {}", text)));
+        self.rotating
+            .push(Message::user_text(format!("[MODE_SWITCH] {}", text)));
     }
-    pub fn append_response_items(&mut self, items: &[Value]) {
-        for item in items {
-            self.rotating_items.push(item.clone());
+
+    /// Record the assistant output from one response. Text parts become
+    /// one assistant text message per contiguous group; tool_call parts
+    /// each become a standalone assistant message carrying just that call
+    /// so subsequent tool_result messages pair one-to-one.
+    pub fn append_response(&mut self, output: &[Part]) {
+        let mut text_buf: Vec<String> = Vec::new();
+        let flush_text = |buf: &mut Vec<String>, rotating: &mut Vec<Message>| {
+            if !buf.is_empty() {
+                let joined = buf.join("\n");
+                buf.clear();
+                rotating.push(Message::assistant_text(joined));
+            }
+        };
+        for part in output {
+            match part {
+                Part::Text(t) => {
+                    if !t.is_empty() {
+                        text_buf.push(t.clone());
+                    }
+                }
+                Part::ToolCall { id, name, arguments } => {
+                    flush_text(&mut text_buf, &mut self.rotating);
+                    self.rotating.push(Message::assistant_tool_call(
+                        id.clone(),
+                        name.clone(),
+                        arguments.clone(),
+                    ));
+                }
+                Part::ToolResult { .. } => {
+                    // Assistants don't emit tool_results; ignore if the
+                    // backend ever leaks one into the output stream.
+                }
+            }
         }
+        flush_text(&mut text_buf, &mut self.rotating);
     }
-    pub fn append_function_call_output(&mut self, call_id: &str, output: &str) -> anyhow::Result<()> {
+
+    pub fn append_tool_result(&mut self, call_id: &str, output: &str) -> anyhow::Result<()> {
         if call_id.is_empty() {
-            return Err(anyhow::anyhow!("function_call_output requires a call_id"));
+            return Err(anyhow::anyhow!("tool_result requires a call_id"));
         }
-        self.rotating_items.push(json!({
-            "type": "function_call_output",
-            "call_id": call_id,
-            "output": output,
-        }));
+        self.rotating.push(Message::tool_result(call_id, output));
         Ok(())
     }
 
-    pub fn build_input(&self, active_profiles_summary: &str) -> Vec<Value> {
-        let summary = system_item(&format!(
+    /// Build the full input for one turn: pinned + rotating + a trailing
+    /// system message summarizing the currently-active guidance
+    /// profiles. The trailing summary changes every turn by design — it
+    /// is explicitly *not* part of the cacheable prefix.
+    pub fn build_input(&self, active_profiles_summary: &str) -> Vec<Message> {
+        let summary_text = format!(
             "Active profiles: {}",
             if active_profiles_summary.is_empty() { "(none)" } else { active_profiles_summary }
-        ));
-        let mut out = Vec::with_capacity(self.pinned_items.len() + self.rotating_items.len() + 1);
-        out.extend(self.pinned_items.iter().cloned());
-        out.extend(self.rotating_items.iter().cloned());
-        out.push(summary);
+        );
+        let mut out = Vec::with_capacity(self.pinned.len() + self.rotating.len() + 1);
+        out.extend(self.pinned.iter().cloned());
+        out.extend(self.rotating.iter().cloned());
+        out.push(Message::system(summary_text));
         out
+    }
+
+    /// Helper used by tests to read the tag on the N-th rotating
+    /// message (e.g. `[OPERATOR]`). Returns `None` if the slot isn't a
+    /// user text message.
+    pub fn rotating_text(&self, idx: usize) -> Option<&str> {
+        let msg = self.rotating.get(idx)?;
+        if msg.role != Role::User {
+            return None;
+        }
+        match msg.content.first()? {
+            Part::Text(t) => Some(t.as_str()),
+            _ => None,
+        }
+    }
+
+    pub fn pinned_text(&self, idx: usize) -> Option<&str> {
+        let msg = self.pinned.get(idx)?;
+        match msg.content.first()? {
+            Part::Text(t) => Some(t.as_str()),
+            _ => None,
+        }
     }
 }
 
 pub fn run_conversation_loop(
-    client: &dyn ResponsesBackend,
+    client: &dyn LlmBackend,
     tool_context: &ToolContext,
     input_queue: &Receiver<IncomingMessage>,
     stop: Arc<AtomicBool>,
     per_request_timeout_s: u64,
     total_wall_budget_s: u64,
     initial_mode: PilotMode,
+    reasoning_effort: Option<ReasoningEffort>,
     bus: Option<&SimBus>,
 ) {
     let mut conv = Conversation::new(initial_mode.system_prompt());
@@ -231,6 +279,7 @@ pub fn run_conversation_loop(
             &message,
             per_request_timeout_s,
             total_wall_budget_s,
+            reasoning_effort,
             bus,
         ) {
             emit_log_kind(
@@ -244,11 +293,12 @@ pub fn run_conversation_loop(
 
 fn handle_message(
     conv: &mut Conversation,
-    client: &dyn ResponsesBackend,
+    client: &dyn LlmBackend,
     tool_context: &ToolContext,
     message: &IncomingMessage,
     per_request_timeout_s: u64,
     total_wall_budget_s: u64,
+    reasoning_effort: Option<ReasoningEffort>,
     bus: Option<&SimBus>,
 ) -> anyhow::Result<()> {
     match &message.source {
@@ -276,55 +326,55 @@ fn handle_message(
     }
 
     let deadline = Instant::now() + Duration::from_secs(total_wall_budget_s);
+    let tools = tool_schemas();
     loop {
         if Instant::now() >= deadline {
             emit_log_kind(bus, LogKind::Error, "wall-clock budget exceeded; ending turn");
             return Ok(());
         }
         let profiles = tool_context.pilot.lock().list_profile_names().join(", ");
-        let input = conv.build_input(&profiles);
+        let messages = conv.build_input(&profiles);
         let remaining = deadline.saturating_duration_since(Instant::now()).as_secs();
         let timeout = per_request_timeout_s.min(remaining.max(1));
         let response = {
             let _busy = LlmBusyGuard::new(bus);
-            client.create_response(&input, &tool_schemas(), timeout)?
+            client.create_response(&LlmRequest {
+                messages: &messages,
+                tools: &tools,
+                reasoning_effort,
+                timeout_secs: timeout,
+            })?
         };
         log_usage(&response, client, bus);
-        let Some(output_items) = response.get("output").and_then(|v| v.as_array()).cloned() else {
-            emit_log_kind(
-                bus,
-                LogKind::Error,
-                &format!("unexpected output shape: {}", response),
-            );
-            return Ok(());
-        };
-        conv.append_response_items(&output_items);
+        emit_assistant_text(&response.output, bus);
+        conv.append_response(&response.output);
 
-        let function_calls: Vec<Value> = output_items
+        let tool_calls: Vec<(String, String, String)> = response
+            .output
             .iter()
-            .filter(|item| item.get("type").and_then(|v| v.as_str()) == Some("function_call"))
-            .cloned()
+            .filter_map(|p| match p {
+                Part::ToolCall { id, name, arguments } => {
+                    Some((id.clone(), name.clone(), arguments.clone()))
+                }
+                _ => None,
+            })
             .collect();
 
-        emit_assistant_text(&output_items, bus);
-        if function_calls.is_empty() {
+        if tool_calls.is_empty() {
             return Ok(());
         }
 
         let mut slept = false;
-        for call in function_calls {
-            let call_id = call.get("call_id").or_else(|| call.get("id"));
-            let call_id = call_id.and_then(|v| v.as_str()).unwrap_or("").to_string();
+        for (call_id, name, arguments) in tool_calls {
             if call_id.is_empty() {
                 emit_log_kind(
                     bus,
                     LogKind::Error,
-                    &format!("function_call missing call_id: {}", call),
+                    &format!("tool_call missing call_id: name={}", name),
                 );
                 continue;
             }
-            let name = call.get("name").and_then(|v| v.as_str()).unwrap_or("?").to_string();
-            let result = dispatch_tool(&call, tool_context);
+            let result = dispatch_tool(&name, &arguments, tool_context);
             if name == "sleep" {
                 slept = true;
             }
@@ -333,7 +383,7 @@ fn handle_message(
                 LogKind::ToolCall,
                 &format!("tool {} -> {}", name, result),
             );
-            conv.append_function_call_output(&call_id, &result)?;
+            conv.append_tool_result(&call_id, &result)?;
         }
         if slept {
             return Ok(());
@@ -388,43 +438,38 @@ fn emit_radio(bus: Option<&SimBus>, text: &str) {
     }
 }
 
-/// Pull `usage` from the Responses-API payload and push one log line with
-/// the per-call input/cached/output counts plus the session-cumulative totals
-/// from the backend's `cache_snapshot()`. Silent if the response has no
-/// `usage` (older model versions, stubbed test clients).
-fn log_usage(response: &Value, client: &dyn ResponsesBackend, bus: Option<&SimBus>) {
-    let Some(usage) = response.get("usage") else { return };
-    let input = usage.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
-    let cached = usage
-        .get("input_tokens_details")
-        .and_then(|d| d.get("cached_tokens"))
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0);
-    let output = usage.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+/// Push one log line with the per-call input/cached/output counts plus
+/// session-cumulative totals from the backend's `cache_snapshot()`.
+/// Silent when the response carries no usage (older model versions,
+/// stubbed test clients).
+fn log_usage(response: &LlmResponse, client: &dyn LlmBackend, bus: Option<&SimBus>) {
+    let u = &response.usage;
+    // Suppress the line when every counter is zero — test stubs that
+    // return empty `LlmUsage::default()` shouldn't clutter the bus.
+    if u.input_tokens == 0 && u.output_tokens == 0 && u.cached_tokens == 0 {
+        return;
+    }
     let s = client.cache_snapshot();
     emit_log_kind(
         bus,
         LogKind::Tokens,
         &format!(
             "tokens in={} (cached={}) out={} | session in={} out={} calls={}",
-            input, cached, output, s.total_input_tokens, s.total_output_tokens, s.total_requests,
+            u.input_tokens,
+            u.cached_tokens,
+            u.output_tokens,
+            s.total_input_tokens,
+            s.total_output_tokens,
+            s.total_requests,
         ),
     );
 }
 
-fn emit_assistant_text(output_items: &[Value], bus: Option<&SimBus>) {
-    for item in output_items {
-        if item.get("type").and_then(|v| v.as_str()) == Some("message") {
-            if let Some(content) = item.get("content").and_then(|v| v.as_array()) {
-                for part in content {
-                    if part.get("type").and_then(|v| v.as_str()) == Some("output_text") {
-                        if let Some(text) = part.get("text").and_then(|v| v.as_str()) {
-                            if !text.trim().is_empty() {
-                                emit_log_kind(bus, LogKind::Llm, text);
-                            }
-                        }
-                    }
-                }
+fn emit_assistant_text(output: &[Part], bus: Option<&SimBus>) {
+    for part in output {
+        if let Part::Text(t) = part {
+            if !t.trim().is_empty() {
+                emit_log_kind(bus, LogKind::Llm, t);
             }
         }
     }

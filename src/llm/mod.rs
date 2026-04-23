@@ -1,3 +1,6 @@
+pub mod anthropic;
+pub mod backend;
 pub mod conversation;
-pub mod responses_client;
+pub mod gemini;
+pub mod openai;
 pub mod tools;

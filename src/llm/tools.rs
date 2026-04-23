@@ -15,6 +15,7 @@ use serde_json::{json, Map, Value};
 
 use crate::bus::SimBus;
 use crate::config::ConfigBundle;
+use crate::llm::backend::ToolDef;
 use crate::core::mission_manager::{PilotCore, StatusSnapshot};
 use crate::core::profiles::{
     AltitudeHoldProfile, ExtendMode, HeadingHoldProfile, PatternClearanceGate, PatternFlyProfile,
@@ -2345,18 +2346,14 @@ fn duckdb_value_to_str(value: &duckdb::types::Value) -> String {
 
 // ---------- dispatch ----------
 
-pub fn dispatch_tool(call: &Value, ctx: &ToolContext) -> String {
-    let Some(name) = call.get("name").and_then(|v| v.as_str()) else {
+pub fn dispatch_tool(name: &str, arguments: &str, ctx: &ToolContext) -> String {
+    if name.is_empty() {
         return "error: tool call missing name".to_string();
-    };
-    let args_json = call.get("arguments").and_then(|v| v.as_str()).unwrap_or("{}");
-    let args: Value = if args_json.is_empty() {
-        Value::Object(Map::new())
-    } else {
-        match serde_json::from_str(args_json) {
-            Ok(v) => v,
-            Err(e) => return format!("error: invalid arguments JSON: {}", e),
-        }
+    }
+    let args_json = if arguments.is_empty() { "{}" } else { arguments };
+    let args: Value = match serde_json::from_str(args_json) {
+        Ok(v) => v,
+        Err(e) => return format!("error: invalid arguments JSON: {}", e),
     };
     let Value::Object(map) = args else {
         return "error: arguments must be an object".to_string();
@@ -2397,20 +2394,18 @@ pub fn dispatch_tool(call: &Value, ctx: &ToolContext) -> String {
 
 // ---------- tool schemas ----------
 
-pub fn tool_schemas() -> Vec<Value> {
-    fn schema(name: &str, description: &str, properties: Value, required: &[&str]) -> Value {
-        json!({
-            "type": "function",
-            "name": name,
-            "description": description,
-            "strict": true,
-            "parameters": {
+pub fn tool_schemas() -> Vec<ToolDef> {
+    fn schema(name: &str, description: &str, properties: Value, required: &[&str]) -> ToolDef {
+        ToolDef {
+            name: name.to_string(),
+            description: description.to_string(),
+            parameters: json!({
                 "type": "object",
                 "properties": properties,
                 "required": required,
                 "additionalProperties": false,
-            }
-        })
+            }),
+        }
     }
     vec![
         schema(

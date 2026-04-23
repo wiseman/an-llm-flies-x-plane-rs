@@ -173,17 +173,15 @@ fn engage_line_up_at_intersection_uses_on_runway_point_not_threshold() {
     let ctx = make_ctx(bridge.clone(), &cache);
 
     let r = xplane_pilot::llm::tools::dispatch_tool(
+        "engage_line_up",
         &serde_json::json!({
-            "name": "engage_line_up",
-            "call_id": "c1",
-            "arguments": serde_json::json!({
-                "airport_ident": "KEMT",
-                "runway_ident": "19",
-                "intersection": "C",
-                "start_lat": null,
-                "start_lon": null,
-            }).to_string(),
-        }),
+            "airport_ident": "KEMT",
+            "runway_ident": "19",
+            "intersection": "C",
+            "start_lat": null,
+            "start_lon": null,
+        })
+        .to_string(),
         &ctx,
     );
     assert!(
@@ -227,17 +225,15 @@ fn engage_line_up_rejects_when_aircraft_is_far_from_entry_point() {
     let ctx = make_ctx(bridge.clone(), &cache);
 
     let r = xplane_pilot::llm::tools::dispatch_tool(
+        "engage_line_up",
         &serde_json::json!({
-            "name": "engage_line_up",
-            "call_id": "c1",
-            "arguments": serde_json::json!({
-                "airport_ident": "KEMT",
-                "runway_ident": "19",
-                "intersection": "B",
-                "start_lat": null,
-                "start_lon": null,
-            }).to_string(),
-        }),
+            "airport_ident": "KEMT",
+            "runway_ident": "19",
+            "intersection": "B",
+            "start_lat": null,
+            "start_lon": null,
+        })
+        .to_string(),
         &ctx,
     );
     assert!(r.starts_with("error:"), "expected error, got: {r}");
