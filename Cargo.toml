@@ -11,6 +11,10 @@ readme = "README.md"
 name = "sim-pilot"
 path = "src/main.rs"
 
+[[bin]]
+name = "sim-pilot-transcript"
+path = "src/bin/transcript.rs"
+
 [lib]
 name = "xplane_pilot"
 path = "src/lib.rs"
