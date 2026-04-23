@@ -211,9 +211,12 @@ impl Conversation {
     }
 
     /// Build the full input for one turn: pinned + rotating + a trailing
-    /// system message summarizing the currently-active guidance
+    /// *user* message summarizing the currently-active guidance
     /// profiles. The trailing summary changes every turn by design — it
-    /// is explicitly *not* part of the cacheable prefix.
+    /// is explicitly *not* part of the cacheable prefix, which is why
+    /// it rides as a user message after the stable system/history rather
+    /// than as a second system block that would invalidate the
+    /// system-side cache entry on every profile change.
     pub fn build_input(&self, active_profiles_summary: &str) -> Vec<Message> {
         let summary_text = format!(
             "Active profiles: {}",
@@ -222,8 +225,22 @@ impl Conversation {
         let mut out = Vec::with_capacity(self.pinned.len() + self.rotating.len() + 1);
         out.extend(self.pinned.iter().cloned());
         out.extend(self.rotating.iter().cloned());
-        out.push(Message::system(summary_text));
+        out.push(Message::user_text(summary_text));
         out
+    }
+
+    /// Index into `build_input()`'s output of the last byte-stable
+    /// message — i.e., the last rotating message, which is stable from
+    /// the moment it's written until the conversation is abandoned.
+    /// Returns `None` when rotating is empty (only the pinned system
+    /// prompt is stable; providers cache it via the system-side
+    /// breakpoint without needing a messages-side one).
+    pub fn cache_anchor_idx(&self) -> Option<usize> {
+        if self.rotating.is_empty() {
+            None
+        } else {
+            Some(self.pinned.len() + self.rotating.len() - 1)
+        }
     }
 
     /// Helper used by tests to read the tag on the N-th rotating
@@ -334,6 +351,7 @@ fn handle_message(
         }
         let profiles = tool_context.pilot.lock().list_profile_names().join(", ");
         let messages = conv.build_input(&profiles);
+        let cache_anchor_idx = conv.cache_anchor_idx();
         let remaining = deadline.saturating_duration_since(Instant::now()).as_secs();
         let timeout = per_request_timeout_s.min(remaining.max(1));
         let response = {
@@ -343,6 +361,7 @@ fn handle_message(
                 tools: &tools,
                 reasoning_effort,
                 timeout_secs: timeout,
+                cache_anchor_idx,
             })?
         };
         log_usage(&response, client, bus);

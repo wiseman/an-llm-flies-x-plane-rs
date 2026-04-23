@@ -132,18 +132,28 @@ fn append_heartbeat_message_adds_tagged_user_item() {
 }
 
 #[test]
-fn build_input_includes_pinned_profiles_summary_and_rotating() {
+fn build_input_includes_pinned_operator_and_trailing_profiles_user() {
     let mut conv = Conversation::new("sys");
     conv.append_operator_message("hi");
     let items = conv.build_input("heading_hold, idle_vertical, idle_speed");
-    // pinned system + one user + trailing system summary
+    // pinned system + operator user + trailing user profile summary
     assert_eq!(items.len(), 3);
     assert_eq!(items[0].role, xplane_pilot::llm::backend::Role::System);
     assert_eq!(items[1].role, xplane_pilot::llm::backend::Role::User);
-    assert_eq!(items[2].role, xplane_pilot::llm::backend::Role::System);
+    assert_eq!(items[2].role, xplane_pilot::llm::backend::Role::User);
     let summary = user_text(&items[2]).unwrap();
     assert!(summary.contains("Active profiles"));
     assert!(summary.contains("heading_hold"));
+}
+
+#[test]
+fn cache_anchor_idx_points_at_last_rotating_message() {
+    let mut conv = Conversation::new("sys");
+    assert_eq!(conv.cache_anchor_idx(), None, "no anchor when rotating is empty");
+    conv.append_operator_message("hi");
+    assert_eq!(conv.cache_anchor_idx(), Some(1));
+    conv.append_heartbeat_message("hb");
+    assert_eq!(conv.cache_anchor_idx(), Some(2));
 }
 
 // ---------- pilot mode ----------

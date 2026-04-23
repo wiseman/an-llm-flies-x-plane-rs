@@ -147,6 +147,12 @@ pub struct LlmRequest<'a> {
     pub tools: &'a [ToolDef],
     pub reasoning_effort: Option<ReasoningEffort>,
     pub timeout_secs: u64,
+    /// Optional index into `messages` of the last message that is
+    /// byte-stable across turns. Providers that support explicit prefix
+    /// caching (Anthropic) use this to place a cache breakpoint; providers
+    /// with implicit/automatic caching (OpenAI, Gemini 2.5) ignore it.
+    /// `None` = no messages-side cache hint.
+    pub cache_anchor_idx: Option<usize>,
 }
 
 #[derive(Debug, Clone, Default)]

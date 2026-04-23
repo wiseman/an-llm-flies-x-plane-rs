@@ -52,7 +52,7 @@ impl LlmBackend for AnthropicBackend {
             .or_else(|| env::var("ANTHROPIC_API_KEY").ok())
             .ok_or_else(|| anyhow!("ANTHROPIC_API_KEY is required for the Anthropic backend"))?;
 
-        let (system_blocks, messages) = encode_messages(req.messages);
+        let (system_blocks, messages) = encode_messages(req.messages, req.cache_anchor_idx);
         let tools_json = encode_tools(req.tools);
 
         let mut payload = json!({
@@ -107,14 +107,29 @@ impl LlmBackend for AnthropicBackend {
 /// Split the neutral `Message` list into the Anthropic `system` blocks
 /// plus the user/assistant `messages` array. Adjacent same-role
 /// non-system messages are collapsed into one message carrying multiple
-/// content blocks. The final system block gets an ephemeral
-/// `cache_control` marker so prompt caching kicks in when the stable
-/// prefix is unchanged between turns.
-fn encode_messages(messages: &[Message]) -> (Vec<Value>, Vec<Value>) {
+/// content blocks.
+///
+/// Two cache breakpoints are placed per request:
+/// 1. On the *first* system block (the pinned system prompt). Anthropic
+///    caches everything up to and including the marked block in
+///    `tools → system → messages` order, so this covers all tools + the
+///    stable system prompt.
+/// 2. On the last content block of the message at `cache_anchor_idx`
+///    when provided — the rotating conversation history. This extends
+///    the cached prefix through the end of the prior turn so only the
+///    new user message plus the trailing (volatile) profile summary are
+///    reprocessed each turn.
+fn encode_messages(
+    messages: &[Message],
+    cache_anchor_idx: Option<usize>,
+) -> (Vec<Value>, Vec<Value>) {
     let mut system_blocks: Vec<Value> = Vec::new();
     let mut out: Vec<Value> = Vec::new();
+    // (out_message_index, content_block_index) of the last block that
+    // came from the source message at cache_anchor_idx.
+    let mut anchor_location: Option<(usize, usize)> = None;
 
-    for msg in messages {
+    for (src_idx, msg) in messages.iter().enumerate() {
         if msg.role == Role::System {
             for part in &msg.content {
                 if let Part::Text(t) = part {
@@ -126,21 +141,17 @@ fn encode_messages(messages: &[Message]) -> (Vec<Value>, Vec<Value>) {
 
         let target_role = match msg.role {
             Role::Assistant => "assistant",
-            _ => "user", // user + tool_result blocks both live on user-role messages
+            _ => "user",
         };
 
         let mut blocks: Vec<Value> = Vec::new();
         for part in &msg.content {
             match part {
                 Part::Text(t) => blocks.push(json!({"type": "text", "text": t})),
-                Part::ToolCall {
-                    id,
-                    name,
-                    arguments,
-                } => {
+                Part::ToolCall { id, name, arguments } => {
                     // Anthropic expects `input` as a JSON object, not a
-                    // string. Fall back to an empty object if the
-                    // stored arguments don't parse.
+                    // string. Fall back to an empty object if the stored
+                    // arguments don't parse.
                     let input: Value =
                         serde_json::from_str(arguments).unwrap_or_else(|_| json!({}));
                     blocks.push(json!({
@@ -158,43 +169,69 @@ fn encode_messages(messages: &[Message]) -> (Vec<Value>, Vec<Value>) {
             }
         }
 
-        // Collapse into the previous message if the role matches — keeps
-        // assistant tool_use+text and user tool_result+text pairs in a
-        // single message, which Anthropic prefers.
-        if let Some(last) = out.last_mut() {
-            if last.get("role").and_then(|v| v.as_str()) == Some(target_role) {
-                if let Some(existing) = last.get_mut("content").and_then(|v| v.as_array_mut()) {
-                    existing.extend(blocks);
-                    continue;
-                }
-            }
+        let block_count = blocks.len();
+        let collapse = out
+            .last()
+            .and_then(|v| v.get("role").and_then(|r| r.as_str()))
+            == Some(target_role);
+        let (out_idx, first_new_block_idx) = if collapse {
+            let last_idx = out.len() - 1;
+            let existing = out[last_idx]
+                .get_mut("content")
+                .and_then(|v| v.as_array_mut())
+                .expect("collapsed message always has a content array");
+            let offset = existing.len();
+            existing.extend(blocks);
+            (last_idx, offset)
+        } else {
+            out.push(json!({"role": target_role, "content": blocks}));
+            (out.len() - 1, 0)
+        };
+
+        if cache_anchor_idx == Some(src_idx) && block_count > 0 {
+            anchor_location = Some((out_idx, first_new_block_idx + block_count - 1));
         }
-        out.push(json!({
-            "role": target_role,
-            "content": blocks,
-        }));
     }
 
-    // Cache breakpoint on the final system block. The stable prefix is
-    // system-prompt + earliest rotating history; the trailing profiles
-    // summary is appended as its own system block at turn time and is
-    // the one that changes per turn — so marking the block *before* it
-    // would be ideal, but the loop appends summary last, so every block
-    // up to and including the marker is stable within a turn.
-    if let Some(last) = system_blocks.last_mut() {
-        if let Some(obj) = last.as_object_mut() {
-            obj.insert(
-                "cache_control".to_string(),
-                json!({"type": "ephemeral"}),
-            );
+    // Breakpoint 1: first (pinned, stable) system block → caches tools +
+    // system. Later system blocks (if any) inherit the cache coverage
+    // because they're part of the prefix from that point forward.
+    if let Some(first) = system_blocks.first_mut() {
+        mark_ephemeral(first);
+    }
+
+    // Breakpoint 2: the content block corresponding to cache_anchor_idx
+    // → caches everything through the last stable rotating message. The
+    // trailing profile-summary user message is appended *after* the
+    // anchor in `messages`, so it stays outside the cached prefix and
+    // can change per turn without invalidating the cache.
+    if let Some((msg_i, blk_i)) = anchor_location {
+        if let Some(block) = out
+            .get_mut(msg_i)
+            .and_then(|m| m.get_mut("content"))
+            .and_then(|c| c.as_array_mut())
+            .and_then(|a| a.get_mut(blk_i))
+        {
+            mark_ephemeral(block);
         }
     }
 
     (system_blocks, out)
 }
 
+/// Stamp a JSON object block with an ephemeral `cache_control` marker.
+/// No-op on non-object Values.
+fn mark_ephemeral(block: &mut Value) {
+    if let Some(obj) = block.as_object_mut() {
+        obj.insert("cache_control".to_string(), json!({"type": "ephemeral"}));
+    }
+}
+
 fn encode_tools(tools: &[ToolDef]) -> Vec<Value> {
-    let mut out: Vec<Value> = tools
+    // No tool-array cache_control: the system-block breakpoint in
+    // `encode_messages` already caches `tools + system` because
+    // Anthropic's prefix-caching order is tools → system → messages.
+    tools
         .iter()
         .map(|t| {
             json!({
@@ -203,19 +240,7 @@ fn encode_tools(tools: &[ToolDef]) -> Vec<Value> {
                 "input_schema": t.parameters,
             })
         })
-        .collect();
-    // Cache breakpoint on the last tool definition — the tools array is
-    // identical across turns, so this makes the whole tools blob
-    // cacheable.
-    if let Some(last) = out.last_mut() {
-        if let Some(obj) = last.as_object_mut() {
-            obj.insert(
-                "cache_control".to_string(),
-                json!({"type": "ephemeral"}),
-            );
-        }
-    }
-    out
+        .collect()
 }
 
 fn thinking_block(effort: ReasoningEffort) -> Value {
@@ -310,18 +335,21 @@ mod tests {
     }
 
     #[test]
-    fn encode_messages_puts_system_in_its_own_slot_with_cache_control() {
+    fn encode_messages_puts_first_system_block_cache_control_even_with_later_volatile_block() {
+        // The stable pinned prompt is the first system block; later
+        // system text (were it ever present) would be uncached. The
+        // profile-summary-as-user-message path in production avoids a
+        // second system block altogether, but we still want the
+        // breakpoint on the first block specifically.
         let msgs = vec![
-            Message::system("sys base"),
+            Message::system("pinned stable prompt"),
+            Message::system("later volatile text"),
             Message::user_text("hi"),
         ];
-        let (system, msgs_out) = encode_messages(&msgs);
-        assert_eq!(system.len(), 1);
-        assert_eq!(system[0]["type"], "text");
-        assert_eq!(system[0]["text"], "sys base");
+        let (system, _msgs_out) = encode_messages(&msgs, None);
+        assert_eq!(system.len(), 2);
         assert_eq!(system[0]["cache_control"]["type"], "ephemeral");
-        assert_eq!(msgs_out.len(), 1);
-        assert_eq!(msgs_out[0]["role"], "user");
+        assert!(system[1].get("cache_control").is_none());
     }
 
     #[test]
@@ -330,7 +358,7 @@ mod tests {
             Message::user_text("a"),
             Message::user_text("b"),
         ];
-        let (_sys, out) = encode_messages(&msgs);
+        let (_sys, out) = encode_messages(&msgs, None);
         assert_eq!(out.len(), 1, "two user messages should collapse into one");
         let content = out[0]["content"].as_array().unwrap();
         assert_eq!(content.len(), 2);
@@ -342,7 +370,7 @@ mod tests {
             Message::assistant_tool_call("c1", "a", "{\"x\":1}"),
             Message::tool_result("c1", "ok"),
         ];
-        let (_sys, out) = encode_messages(&msgs);
+        let (_sys, out) = encode_messages(&msgs, None);
         assert_eq!(out.len(), 2);
         assert_eq!(out[0]["role"], "assistant");
         assert_eq!(out[0]["content"][0]["type"], "tool_use");
@@ -355,12 +383,43 @@ mod tests {
     }
 
     #[test]
-    fn encode_tools_puts_cache_control_on_last_tool() {
+    fn cache_anchor_marks_the_last_block_from_that_source_message() {
+        // src indices: 0=system (ignored for anchor), 1=user "hi",
+        // 2=assistant tool_call, 3=user tool_result, 4=user "profile".
+        // Anchor = 3 → the tool_result block should carry cache_control,
+        // and the trailing profile summary (index 4) should not.
+        let msgs = vec![
+            Message::system("sys"),
+            Message::user_text("hi"),
+            Message::assistant_tool_call("c1", "a", "{\"x\":1}"),
+            Message::tool_result("c1", "ok"),
+            Message::user_text("Active profiles: heading_hold"),
+        ];
+        let (_sys, out) = encode_messages(&msgs, Some(3));
+        // user("hi") + assistant(tool_use) + user(tool_result, profile) — tool_result
+        // and profile collapse into one user message.
+        assert_eq!(out.len(), 3);
+        let user_msg = &out[2];
+        assert_eq!(user_msg["role"], "user");
+        let content = user_msg["content"].as_array().unwrap();
+        assert_eq!(content.len(), 2);
+        // The tool_result block has cache_control; the profile text does not.
+        assert_eq!(content[0]["type"], "tool_result");
+        assert_eq!(content[0]["cache_control"]["type"], "ephemeral");
+        assert_eq!(content[1]["type"], "text");
+        assert!(content[1].get("cache_control").is_none());
+    }
+
+    #[test]
+    fn encode_tools_has_no_cache_control() {
+        // Tools are cached transitively via the system-block breakpoint;
+        // placing another marker on the tools array would waste one of
+        // the four available breakpoints.
         let tools = sample_tools();
         let out = encode_tools(&tools);
         assert_eq!(out.len(), 2);
         assert!(out[0].get("cache_control").is_none());
-        assert_eq!(out[1]["cache_control"]["type"], "ephemeral");
+        assert!(out[1].get("cache_control").is_none());
     }
 
     #[test]
