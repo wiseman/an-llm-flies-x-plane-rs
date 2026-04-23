@@ -16,7 +16,7 @@ The live backend talks to X-Plane through the built-in web API and uses X-Plane'
 
 The pilot runs as a standalone executable — no Rust toolchain required. Grab the latest release from [GitHub Releases](https://github.com/wiseman/an-llm-flies-x-plane-rs/releases/latest), extract the archive, and run `./sim-pilot` (or `sim-pilot.exe` on Windows).
 
-By default the executable connects to a running X-Plane 12 (web API on port 8086) and needs an `OPENAI_API_KEY` in a `.env` file (plus an optional `DEEPGRAM_API_KEY` for voice transcription). To run the offline deterministic simulator with no X-Plane and no API key, pass `--backend simple`:
+By default the executable connects to a running X-Plane 12 (web API on port 8086) and needs an API key for one of the supported model providers in a `.env` file — `OPENAI_API_KEY` for OpenAI (default), `ANTHROPIC_API_KEY` for Claude, or `GEMINI_API_KEY` for Gemini (plus an optional `DEEPGRAM_API_KEY` for voice transcription). To run the offline deterministic simulator with no X-Plane and no API key, pass `--backend simple`:
 
 ```bash
 ./sim-pilot --backend simple --crosswind-kt 10
@@ -37,17 +37,39 @@ Live-mode DuckDB uses the spatial extension. The first run that touches the `sql
 
 ### Live X-Plane (default)
 
-Requires X-Plane 12 running with the built-in web API enabled on port 8086, and an `OPENAI_API_KEY` (a `.env` file in the working directory is read at startup). For push-to-talk voice transcription, also set `DEEPGRAM_API_KEY`.
+Requires X-Plane 12 running with the built-in web API enabled on port 8086, and an API key for the chosen provider: `OPENAI_API_KEY` (default), `ANTHROPIC_API_KEY`, or `GEMINI_API_KEY` (a `.env` file in the working directory is read at startup). For push-to-talk voice transcription, also set `DEEPGRAM_API_KEY`.
 
 ```bash
-cargo run --release --                                      # default: --backend xplane, interactive TUI
+cargo run --release --                                      # default: --backend xplane, interactive TUI, OpenAI
 cargo run --release -- \
   --pilot-llm-model gpt-5.4-mini-2026-03-17
+
+# Claude (Anthropic)
+cargo run --release -- --pilot-llm-provider anthropic
+cargo run --release -- --pilot-llm-provider anthropic \
+  --pilot-llm-model claude-opus-4-7
+
+# Gemini
+cargo run --release -- --pilot-llm-provider gemini
+cargo run --release -- --pilot-llm-provider gemini \
+  --pilot-llm-model gemini-2.5-pro
 ```
 
-### Offline simulator (no X-Plane, no OpenAI key)
+#### Model providers
 
-Runs a deterministic pattern mission against a point-mass dynamics model. Nothing to configure beyond the flag.
+| Provider    | Flag value  | API-key env var       | Default model             | Latest API used                   |
+| ----------- | ----------- | --------------------- | ------------------------- | --------------------------------- |
+| OpenAI      | `openai`    | `OPENAI_API_KEY`      | `gpt-5.4-2026-03-05`      | Responses API                     |
+| Anthropic   | `anthropic` | `ANTHROPIC_API_KEY`   | `claude-sonnet-4-6`       | Messages API (`2023-06-01`)       |
+| Google      | `gemini`    | `GEMINI_API_KEY`      | `gemini-2.5-flash`        | `generateContent` (v1beta)        |
+
+`--pilot-llm-model` overrides the default for the selected provider. `--pilot-llm-reasoning-effort low|medium|high` maps to each provider's native knob: `reasoning.effort` on OpenAI, `thinking.budget_tokens` on Anthropic, `thinkingConfig.thinkingBudget` on Gemini.
+
+Prompt caching is on by default for every provider — implicit on OpenAI and Gemini 2.5, explicit `cache_control` breakpoints on the Anthropic system prompt and on the last stable message of the rotating conversation history. The cache-hit rate for each turn lands in the LOG pane alongside per-call token usage.
+
+### Offline simulator (no X-Plane, no LLM)
+
+Runs a deterministic pattern mission against a point-mass dynamics model. No LLM of any flavor is invoked — the flight-control stack runs standalone. Nothing to configure beyond the flag.
 
 ```bash
 cargo run --release -- --backend simple                     # zero-wind pattern → landing
@@ -111,7 +133,7 @@ Every live run produces four timestamped artifacts in `output/`, sharing one ste
 | `.log` | Streamed live                                          | Full transcript (operator, ATC, LLM, radio, heartbeats, tool dispatch, system).     |
 | `.csv` | Streamed live at 1 Hz, flushed per row (crash-safe)    | Per-second fixes: wall time, t_sim, lat, lon, alt MSL/AGL, heading, track, IAS, GS, VS, phase, on-ground. |
 | `.kml` | Written on clean shutdown                              | Google-Earth `gx:Track` with absolute MSL altitudes — drag into Earth for 3D replay. |
-| `.txt` | Overwritten on every Responses API round               | Latest pilot-LLM request + response JSON — useful for inspecting tool calls, reasoning, and prompt-cache stats between turns. |
+| `.txt` | Overwritten on every LLM API round                     | Latest pilot-LLM request + response JSON (in the selected provider's native shape) — useful for inspecting tool calls, reasoning, and prompt-cache stats between turns. |
 
 ## Tool Catalog
 
