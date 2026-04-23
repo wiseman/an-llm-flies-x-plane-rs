@@ -7,12 +7,12 @@ use std::env;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, Result};
 use serde_json::{json, Value};
 
 use crate::llm::backend::{
-    write_transcript, CacheSnapshot, CacheStats, LlmBackend, LlmRequest, LlmResponse, LlmUsage,
-    Message, Part, Role, ToolDef,
+    send_with_body_on_error, write_transcript, CacheSnapshot, CacheStats, LlmBackend, LlmRequest,
+    LlmResponse, LlmUsage, Message, Part, Role, ToolDef,
 };
 
 pub struct OpenAiBackend {
@@ -61,12 +61,11 @@ impl LlmBackend for OpenAiBackend {
         }
 
         let url = format!("{}/responses", self.api_base.trim_end_matches('/'));
-        let resp = ureq::post(&url)
+        let http = ureq::post(&url)
             .set("Authorization", &format!("Bearer {}", api_key))
             .set("Content-Type", "application/json")
-            .timeout(std::time::Duration::from_secs(req.timeout_secs))
-            .send_string(&payload.to_string())
-            .with_context(|| format!("posting to {}", url))?;
+            .timeout(std::time::Duration::from_secs(req.timeout_secs));
+        let resp = send_with_body_on_error(http, &payload.to_string(), &url)?;
         let raw: Value = resp.into_json()?;
         let usage = parse_usage(&raw);
         self.cache_stats

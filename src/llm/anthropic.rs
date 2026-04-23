@@ -10,7 +10,7 @@ use std::env;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, Result};
 use serde_json::{json, Value};
 
 use crate::llm::backend::{
@@ -71,13 +71,13 @@ impl LlmBackend for AnthropicBackend {
             write_transcript(path, &payload, None);
         }
 
-        let resp = ureq::post(API_URL)
+        let http = ureq::post(API_URL)
             .set("x-api-key", &api_key)
             .set("anthropic-version", API_VERSION)
             .set("content-type", "application/json")
-            .timeout(std::time::Duration::from_secs(req.timeout_secs))
-            .send_string(&payload.to_string())
-            .with_context(|| format!("posting to {}", API_URL))?;
+            .timeout(std::time::Duration::from_secs(req.timeout_secs));
+        let resp =
+            crate::llm::backend::send_with_body_on_error(http, &payload.to_string(), API_URL)?;
         let raw: Value = resp.into_json()?;
         let usage = parse_usage(&raw);
         self.cache_stats

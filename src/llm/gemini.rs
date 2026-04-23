@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, Result};
 use serde_json::{json, Value};
 
 use crate::llm::backend::{
@@ -74,11 +74,13 @@ impl LlmBackend for GeminiBackend {
         }
 
         let url = format!("{}/{}:generateContent?key={}", API_BASE, self.model, api_key);
-        let resp = ureq::post(&url)
+        let http = ureq::post(&url)
             .set("Content-Type", "application/json")
-            .timeout(std::time::Duration::from_secs(req.timeout_secs))
-            .send_string(&payload.to_string())
-            .with_context(|| format!("posting to {}:generateContent", self.model))?;
+            .timeout(std::time::Duration::from_secs(req.timeout_secs));
+        // Log URL w/o the API key
+        let log_url = format!("{}:generateContent", self.model);
+        let resp =
+            crate::llm::backend::send_with_body_on_error(http, &payload.to_string(), &log_url)?;
         let raw: Value = resp.into_json()?;
         let usage = parse_usage(&raw);
         self.cache_stats

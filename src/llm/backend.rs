@@ -10,7 +10,7 @@ use std::path::Path;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use clap::ValueEnum;
 use serde_json::Value;
 
@@ -267,6 +267,25 @@ impl CacheStats {
         } else {
             Some(s.total_cached_tokens as f64 / s.total_input_tokens as f64)
         }
+    }
+}
+
+/// Run `req` and return the successful `Response`. On a non-2xx status,
+/// read the response body and bake it into the error so schema / auth /
+/// validation messages from the API surface in the log instead of being
+/// reduced to a bare "status code 4xx".
+pub fn send_with_body_on_error(
+    req: ureq::Request,
+    payload: &str,
+    url: &str,
+) -> Result<ureq::Response> {
+    match req.send_string(payload) {
+        Ok(r) => Ok(r),
+        Err(ureq::Error::Status(code, response)) => {
+            let body = response.into_string().unwrap_or_default();
+            Err(anyhow!("POST {} -> HTTP {}: {}", url, code, body))
+        }
+        Err(e) => Err(anyhow::Error::new(e).context(format!("posting to {}", url))),
     }
 }
 
