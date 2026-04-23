@@ -74,6 +74,48 @@ fn dispatch(name: &str, args: serde_json::Value, ctx: &ToolContext) -> String {
     dispatch_tool(name, &args.to_string(), ctx)
 }
 
+/// Stage a `StatusSnapshot` on the pilot's `latest_snapshot` with
+/// sensible defaults and the given runway-world-frame position and
+/// heading. Groundspeed is 0 and on_ground is true so the takeoff-
+/// position gate treats the aircraft as stopped on the runway.
+fn stage_stopped_snapshot(
+    ctx: &ToolContext,
+    position_ft: xplane_pilot::types::Vec2,
+    heading_deg: f64,
+) {
+    use xplane_pilot::core::mission_manager::StatusSnapshot;
+    use xplane_pilot::types::{ActuatorCommands, AircraftState};
+    let mut state = AircraftState::synthetic_default();
+    state.on_ground = true;
+    state.position_ft = position_ft;
+    state.heading_deg = heading_deg;
+    state.gs_kt = 0.0;
+    ctx.pilot.lock().latest_snapshot = Some(StatusSnapshot {
+        t_sim: 0.0,
+        active_profiles: Vec::new(),
+        phase: None,
+        state,
+        last_commands: ActuatorCommands {
+            aileron: 0.0,
+            elevator: 0.0,
+            rudder: 0.0,
+            throttle: 0.0,
+            flaps: None,
+            gear_down: Some(true),
+            brakes: 0.0,
+            pivot_brake: 0.0,
+        },
+        last_guidance: None,
+        go_around_reason: None,
+        airport_ident: None,
+        runway_id: None,
+        field_elevation_ft: None,
+        debug_lines: Vec::new(),
+        completed_profiles: Vec::new(),
+        profile_mode_line_suffixes: Vec::new(),
+    });
+}
+
 /// Base airports/runways used by every test fixture. Each tuple is:
 ///   (airport_ident, elevation_ft, width_m, surface_code,
 ///    le_ident, le_lat, le_lon, le_disp_m,
@@ -277,8 +319,7 @@ fn engage_takeoff_requires_airport_and_runway_args() {
 
 #[test]
 fn engage_takeoff_refuses_when_not_on_runway() {
-    use xplane_pilot::core::mission_manager::StatusSnapshot;
-    use xplane_pilot::types::{ActuatorCommands, AircraftState, Vec2};
+    use xplane_pilot::types::Vec2;
 
     let dir = TempDir::new().unwrap();
     build_fake_parquet(dir.path(), &[]);
@@ -293,37 +334,7 @@ fn engage_takeoff_refuses_when_not_on_runway() {
         Some(bridge.clone() as Arc<dyn ToolBridge>),
         Some(dir.path().to_path_buf()),
     );
-    // Stage a snapshot 500 ft east of the threshold (far off-centerline
-    // for a runway heading ~180°).
-    let mut state = AircraftState::synthetic_default();
-    state.on_ground = true;
-    state.position_ft = Vec2::new(500.0, 0.0);
-    state.heading_deg = 180.0;
-    state.gs_kt = 0.0;
-    ctx.pilot.lock().latest_snapshot = Some(StatusSnapshot {
-        t_sim: 0.0,
-        active_profiles: Vec::new(),
-        phase: None,
-        state,
-        last_commands: ActuatorCommands {
-            aileron: 0.0,
-            elevator: 0.0,
-            rudder: 0.0,
-            throttle: 0.0,
-            flaps: None,
-            gear_down: Some(true),
-            brakes: 0.0,
-            pivot_brake: 0.0,
-        },
-        last_guidance: None,
-        go_around_reason: None,
-        airport_ident: None,
-        runway_id: None,
-        field_elevation_ft: None,
-        debug_lines: Vec::new(),
-        completed_profiles: Vec::new(),
-        profile_mode_line_suffixes: Vec::new(),
-    });
+    stage_stopped_snapshot(&ctx, Vec2::new(500.0, 0.0), 180.0);
     let r = dispatch(
             "engage_takeoff",
             json!({"airport_ident": "KSEA", "runway_ident": "16L"}),
@@ -333,6 +344,17 @@ fn engage_takeoff_refuses_when_not_on_runway() {
     assert!(
         r.contains("centerline") || r.contains("along-track"),
         "expected a position-check error, got: {}",
+        r
+    );
+    // With override=true the same call should engage.
+    let r = dispatch(
+        "engage_takeoff",
+        json!({"airport_ident": "KSEA", "runway_ident": "16L", "override": true}),
+        &ctx,
+    );
+    assert!(
+        r.starts_with("engaged takeoff"),
+        "override=true should bypass position checks, got: {}",
         r
     );
 }
@@ -453,20 +475,72 @@ fn make_ctx_with_parquet(cache_dir: &std::path::Path) -> (ToolContext, Arc<FakeB
 
 #[test]
 fn engage_pattern_fly_for_takeoff_roll() {
+    use xplane_pilot::types::Vec2;
+
     let dir = TempDir::new().unwrap();
     build_fake_parquet(dir.path(), &[]);
     let (ctx, _bridge) = make_ctx_with_parquet(dir.path());
+    // Takeoff-roll start now runs position guards; staged snapshot gives
+    // the validator something to read. override=true bypasses the
+    // centerline/heading checks since this test just verifies the
+    // profile engages.
+    stage_stopped_snapshot(&ctx, Vec2::new(0.0, 0.0), 0.0);
     let r = dispatch(
-            "engage_pattern_fly",
-            json!({
-                "airport_ident": "KSEA",
-                "runway_ident": "16L",
-                "side": "left",
-                "start_phase": "takeoff_roll",
-            }),
-        &ctx);
+        "engage_pattern_fly",
+        json!({
+            "airport_ident": "KSEA",
+            "runway_ident": "16L",
+            "side": "left",
+            "start_phase": "takeoff_roll",
+            "override": true,
+        }),
+        &ctx,
+    );
     assert!(!r.contains("error"), "got {}", r);
     assert_eq!(ctx.pilot.lock().list_profile_names(), vec!["pattern_fly"]);
+}
+
+#[test]
+fn engage_pattern_fly_takeoff_roll_refuses_off_centerline() {
+    use xplane_pilot::types::Vec2;
+
+    let dir = TempDir::new().unwrap();
+    build_fake_parquet(dir.path(), &[]);
+    let (ctx, _bridge) = make_ctx_with_parquet(dir.path());
+    stage_stopped_snapshot(&ctx, Vec2::new(500.0, 0.0), 180.0);
+    let r = dispatch(
+        "engage_pattern_fly",
+        json!({
+            "airport_ident": "KSEA",
+            "runway_ident": "16L",
+            "side": "left",
+            "start_phase": "takeoff_roll",
+        }),
+        &ctx,
+    );
+    assert!(r.starts_with("error:"), "got: {}", r);
+    assert!(
+        r.contains("centerline") || r.contains("along-track"),
+        "expected a position-check error, got: {}",
+        r
+    );
+    // override=true should let the same call through.
+    let r = dispatch(
+        "engage_pattern_fly",
+        json!({
+            "airport_ident": "KSEA",
+            "runway_ident": "16L",
+            "side": "left",
+            "start_phase": "takeoff_roll",
+            "override": true,
+        }),
+        &ctx,
+    );
+    assert!(
+        r.starts_with("engaged pattern_fly"),
+        "override=true should bypass position checks, got: {}",
+        r
+    );
 }
 
 #[test]
@@ -1693,14 +1767,15 @@ fn choose_runway_exit_records_preference_on_pattern_profile() {
     build_fake_parquet(dir.path(), &[]);
     let (ctx, _bridge) = make_ctx_with_parquet(dir.path());
     dispatch(
-            "engage_pattern_fly",
-            json!({
-                "airport_ident": "KSEA",
-                "runway_ident": "16L",
-                "side": "left",
-                "start_phase": "takeoff_roll",
-            }),
-        &ctx);
+        "engage_pattern_fly",
+        json!({
+            "airport_ident": "KSEA",
+            "runway_ident": "16L",
+            "side": "left",
+            "start_phase": "pattern_entry",
+        }),
+        &ctx,
+    );
     let r = dispatch("choose_runway_exit", json!({"taxiway_name": "A5"}), &ctx);
     assert!(r.contains("A5"), "got: {}", r);
     assert!(r.contains("preferred"), "got: {}", r);
@@ -1733,14 +1808,15 @@ fn choose_runway_exit_rejects_unknown_exit_with_valid_list() {
     build_fake_parquet(dir.path(), &extra);
     let (ctx, _bridge) = make_ctx_with_parquet(dir.path());
     dispatch(
-            "engage_pattern_fly",
-            json!({
-                "airport_ident": "KEXIT",
-                "runway_ident": "09",
-                "side": "left",
-                "start_phase": "takeoff_roll",
-            }),
-        &ctx);
+        "engage_pattern_fly",
+        json!({
+            "airport_ident": "KEXIT",
+            "runway_ident": "09",
+            "side": "left",
+            "start_phase": "pattern_entry",
+        }),
+        &ctx,
+    );
     let r = dispatch("choose_runway_exit", json!({"taxiway_name": "Z"}), &ctx);
     assert!(r.starts_with("error"), "got: {}", r);
     assert!(r.contains("\"Z\""), "got: {}", r);

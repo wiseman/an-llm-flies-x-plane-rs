@@ -727,22 +727,44 @@ pub fn tool_engage_pattern_fly(ctx: &ToolContext, args: &Map<String, Value>) -> 
         Ok(s) => s.to_string(),
         Err(e) => return format!("error: {}", e),
     };
+    let override_position = args
+        .get("override")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     let (runway, field_elev) = match lookup_runway_for_pattern(ctx, &airport, &runway_ident, &side) {
         Ok(v) => v,
         Err(e) => return format!("error: {}", e),
     };
     install_runway_in_pilot_core(ctx, &airport, runway, field_elev);
 
-    let new_config = ctx.config.lock().clone();
-    let runway_frame = ctx.pilot.lock().runway_frame.clone();
-    let mut profile = PatternFlyProfile::new(new_config, runway_frame);
-    match FlightPhase::from_str(&start_phase.to_ascii_lowercase()) {
-        Some(p) => profile.phase = p,
+    let resolved_phase = match FlightPhase::from_str(&start_phase.to_ascii_lowercase()) {
+        Some(p) => p,
         None => {
             let valid: Vec<&'static str> = FlightPhase::all().iter().map(|p| p.value()).collect();
             return format!("error: unknown start_phase {:?}; valid values are {:?}", start_phase, valid);
         }
+    };
+    // Ground-start phases drive a takeoff roll from the current position.
+    // Apply the same position guards as engage_takeoff so we don't roll
+    // from the ramp onto nothing.
+    if matches!(resolved_phase, FlightPhase::Preflight | FlightPhase::TakeoffRoll) {
+        if let Some(msg) = parking_brake_refusal(ctx, "engage_pattern_fly") {
+            return msg;
+        }
+        if let Err(msg) = validate_takeoff_position(
+            ctx,
+            &runway_ident,
+            override_position,
+            "engage_pattern_fly",
+        ) {
+            return msg;
+        }
     }
+
+    let new_config = ctx.config.lock().clone();
+    let runway_frame = ctx.pilot.lock().runway_frame.clone();
+    let mut profile = PatternFlyProfile::new(new_config, runway_frame);
+    profile.phase = resolved_phase;
     let displaced = ctx.pilot.lock().engage_profile(Box::new(profile));
     format!(
         "engaged pattern_fly {}{}",
@@ -751,17 +773,100 @@ pub fn tool_engage_pattern_fly(ctx: &ToolContext, args: &Map<String, Value>) -> 
     )
 }
 
-pub fn tool_engage_takeoff(ctx: &ToolContext, args: &Map<String, Value>) -> String {
-    let pb = parking_brake_ratio(ctx);
-    if let Some(v) = pb {
-        if v >= 0.5 {
-            return format!(
-                "error: parking brake is SET (ratio={:.2}) — call set_parking_brake(engaged=False) first, then retry engage_takeoff",
-                v
-            );
-        }
+/// Fast path brake check — returns an error string if the parking brake
+/// is set, so takeoff / pattern handlers can fail before the expensive
+/// runway-lookup round-trip. None means the brake is released or the
+/// dataref isn't available.
+fn parking_brake_refusal(ctx: &ToolContext, tool_name: &str) -> Option<String> {
+    let v = parking_brake_ratio(ctx)?;
+    if v >= 0.5 {
+        Some(format!(
+            "error: parking brake is SET (ratio={:.2}) — call set_parking_brake(engaged=False) first, then retry {}",
+            v, tool_name
+        ))
+    } else {
+        None
     }
+}
 
+/// Shared takeoff-position gate for engage_takeoff and engage_pattern_fly
+/// (the latter when starting on the ground in takeoff_roll / preflight).
+/// Assumes the runway is already installed in pilot core so `runway_frame`
+/// reflects the intended runway.
+///
+/// Returns `(start_along_ft, usable_length_ft)` on success. `tool_name`
+/// is the name of the calling tool, baked into error messages so the
+/// model sees a remediation keyed to the tool it just called.
+///
+/// `override_position = true` bypasses the centerline, along-track, and
+/// heading-alignment checks for off-field / bush / taxiway departures;
+/// the parking-brake, ground-speed, and minimum-usable-length guards
+/// still apply.
+fn validate_takeoff_position(
+    ctx: &ToolContext,
+    runway_ident: &str,
+    override_position: bool,
+    tool_name: &str,
+) -> Result<(f64, f64), String> {
+    let pilot = ctx.pilot.lock();
+    let Some(snap) = pilot.latest_snapshot.as_ref() else {
+        return Err(
+            "error: no aircraft state yet — call get_status first so the control loop publishes a snapshot".to_string(),
+        );
+    };
+    let runway_frame = &pilot.runway_frame;
+    let pos_rwy = runway_frame.to_runway_frame(snap.state.position_ft);
+    let along = pos_rwy.x;
+    let cross = pos_rwy.y;
+    let length = runway_frame.runway.length_ft;
+    let course = runway_frame.runway.course_deg;
+    let heading_err = crate::types::wrap_degrees_180(course - snap.state.heading_deg).abs();
+
+    if !override_position && cross.abs() > 100.0 {
+        return Err(format!(
+            "error: aircraft is {:.0} ft off runway {} centerline (max 100 ft). Taxi onto the runway first — call engage_line_up runway={} to move into position, or pass override=true to depart from here anyway.",
+            cross.abs(), runway_ident, runway_ident
+        ));
+    }
+    if !override_position && (along < -100.0 || along > length) {
+        return Err(format!(
+            "error: aircraft is at along-track {:.0} ft on runway {} (runway extends 0..{:.0} ft). Position is not on the runway — use engage_taxi or engage_line_up to get here first, or pass override=true to depart from here anyway.",
+            along, runway_ident, length
+        ));
+    }
+    if !override_position && heading_err > 15.0 {
+        return Err(format!(
+            "error: aircraft heading {:.0}° is not aligned with runway {} course {:.0}° (Δ={:.0}° > 15°). Call engage_line_up runway={} and wait for it to finish before {}, or pass override=true to depart on the current heading.",
+            snap.state.heading_deg, runway_ident, course, heading_err, runway_ident, tool_name
+        ));
+    }
+    if snap.state.gs_kt > 3.0 {
+        return Err(format!(
+            "error: aircraft moving at {:.1} kt — stop before {} (usually means engage_line_up is still in progress)",
+            snap.state.gs_kt, tool_name
+        ));
+    }
+    let start_along = along.max(0.0);
+    let usable = length - start_along;
+    // Below this there's no realistic chance of reaching Vr with margin;
+    // refuse rather than let the profile roll off the end. 1000 ft is a
+    // generous C172-at-sea-level floor; density-altitude-aware limit is
+    // a follow-up.
+    const MIN_USABLE_LENGTH_FT: f64 = 1000.0;
+    if usable < MIN_USABLE_LENGTH_FT {
+        return Err(format!(
+            "error: only {:.0} ft of runway {} available from current position (min {:.0} ft). \
+             Not enough room to accelerate to Vr. Taxi back to a position with more runway ahead.",
+            usable, runway_ident, MIN_USABLE_LENGTH_FT
+        ));
+    }
+    Ok((start_along, usable))
+}
+
+pub fn tool_engage_takeoff(ctx: &ToolContext, args: &Map<String, Value>) -> String {
+    if let Some(msg) = parking_brake_refusal(ctx, "engage_takeoff") {
+        return msg;
+    }
     let airport = match arg_str(args, "airport_ident") {
         Ok(s) => s.to_string(),
         Err(e) => return format!("error: {}", e),
@@ -770,6 +875,10 @@ pub fn tool_engage_takeoff(ctx: &ToolContext, args: &Map<String, Value>) -> Stri
         Ok(s) => s.to_string(),
         Err(e) => return format!("error: {}", e),
     };
+    let override_position = args
+        .get("override")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
 
     // Resolve runway from apt.dat and install it into pilot core. This
     // gives runway_frame the correct threshold position, course, and
@@ -781,64 +890,11 @@ pub fn tool_engage_takeoff(ctx: &ToolContext, args: &Map<String, Value>) -> Stri
         Err(e) => return format!("error: {}", e),
     }
 
-    // Verify aircraft is actually on the runway we just installed, not
-    // just happening to be pointed in its direction. Position check
-    // catches the "I forgot to taxi/line up" case where the old
-    // heading-only guard was a false positive.
-    let (start_along_ft, usable_length_ft) = {
-        let pilot = ctx.pilot.lock();
-        let Some(snap) = pilot.latest_snapshot.as_ref() else {
-            return "error: no aircraft state yet — call get_status first so the control loop publishes a snapshot".to_string();
+    let (start_along_ft, usable_length_ft) =
+        match validate_takeoff_position(ctx, &runway_ident, override_position, "engage_takeoff") {
+            Ok(v) => v,
+            Err(msg) => return msg,
         };
-        let runway_frame = &pilot.runway_frame;
-        let pos_rwy = runway_frame.to_runway_frame(snap.state.position_ft);
-        let along = pos_rwy.x;
-        let cross = pos_rwy.y;
-        let length = runway_frame.runway.length_ft;
-        let course = runway_frame.runway.course_deg;
-        let heading_err = crate::types::wrap_degrees_180(course - snap.state.heading_deg).abs();
-
-        if cross.abs() > 100.0 {
-            return format!(
-                "error: aircraft is {:.0} ft off runway {} centerline (max 100 ft). Taxi onto the runway first — call engage_line_up runway={} to move into position.",
-                cross.abs(), runway_ident, runway_ident
-            );
-        }
-        if along < -100.0 || along > length {
-            return format!(
-                "error: aircraft is at along-track {:.0} ft on runway {} (runway extends 0..{:.0} ft). Position is not on the runway — use engage_taxi or engage_line_up to get here first.",
-                along, runway_ident, length
-            );
-        }
-        if heading_err > 15.0 {
-            return format!(
-                "error: aircraft heading {:.0}° is not aligned with runway {} course {:.0}° (Δ={:.0}° > 15°). Call engage_line_up runway={} and wait for it to finish before engage_takeoff.",
-                snap.state.heading_deg, runway_ident, course, heading_err, runway_ident
-            );
-        }
-        if snap.state.gs_kt > 3.0 {
-            return format!(
-                "error: aircraft moving at {:.1} kt — stop on the runway centerline before engage_takeoff (usually means engage_line_up is still in progress)",
-                snap.state.gs_kt
-            );
-        }
-        let start_along = along.max(0.0);
-        (start_along, length - start_along)
-    };
-
-    // Guard against intersection departures with insufficient remaining
-    // runway. 1000 ft is a generous C172-at-sea-level floor; below this
-    // there's no realistic chance of reaching Vr with margin, so refuse
-    // rather than let the profile roll off the end. (Density-altitude
-    // aware limit is a follow-up.)
-    const MIN_USABLE_LENGTH_FT: f64 = 1000.0;
-    if usable_length_ft < MIN_USABLE_LENGTH_FT {
-        return format!(
-            "error: only {:.0} ft of runway {} available from current position (min {:.0} ft). \
-             Not enough room to accelerate to Vr. Taxi back to a position with more runway ahead.",
-            usable_length_ft, runway_ident, MIN_USABLE_LENGTH_FT
-        );
-    }
 
     let new_config = ctx.config.lock().clone();
     let runway_frame = ctx.pilot.lock().runway_frame.clone();
@@ -2462,23 +2518,25 @@ pub fn tool_schemas() -> Vec<ToolDef> {
         ),
         schema(
             "engage_pattern_fly",
-            "Engage the deterministic mission pilot anchored at a specific runway. Owns all three axes. The tool looks up the runway in the database, anchors the pattern geometry at its real threshold, and positions the phase machine at start_phase. All four arguments are REQUIRED — if you don't know which runway you're on, call get_status + sql_query first. Pick start_phase to match the aircraft's CURRENT physical state — the phase machine auto-advances when the aircraft reaches each leg's trigger altitude/position, so do NOT skip ahead to a leg the aircraft hasn't reached yet (e.g. start_phase='crosswind' while still climbing out on upwind will command an immediate 90° crosswind turn at whatever altitude you're at). Common values: 'takeoff_roll' (on the ground, about to roll), 'initial_climb' (just airborne after rotation, still climbing below pattern altitude — this is the right choice when handing off from engage_takeoff), 'pattern_entry' (joining from cruise), or 'crosswind'/'downwind'/'base'/'final' only when the aircraft is already established on that leg. Typical takeoff call: engage_pattern_fly(airport_ident='KSEA', runway_ident='16L', side='left', start_phase='takeoff_roll'). Typical hand-off-from-takeoff call: engage_pattern_fly(..., start_phase='initial_climb'). Typical join-from-cruise call: engage_pattern_fly(..., start_phase='pattern_entry').",
+            "Engage the deterministic mission pilot anchored at a specific runway. Owns all three axes. The tool looks up the runway in the database, anchors the pattern geometry at its real threshold, and positions the phase machine at start_phase. If you don't know which runway you're on, call get_status + sql_query first. Pick start_phase to match the aircraft's CURRENT physical state — the phase machine auto-advances when the aircraft reaches each leg's trigger altitude/position, so do NOT skip ahead to a leg the aircraft hasn't reached yet (e.g. start_phase='crosswind' while still climbing out on upwind will command an immediate 90° crosswind turn at whatever altitude you're at). Common values: 'takeoff_roll' (on the ground, about to roll), 'initial_climb' (just airborne after rotation, still climbing below pattern altitude — this is the right choice when handing off from engage_takeoff), 'pattern_entry' (joining from cruise), or 'crosswind'/'downwind'/'base'/'final' only when the aircraft is already established on that leg. When start_phase='takeoff_roll', the same position guards as engage_takeoff apply (on the runway's centerline, inside the runway's along-track length, heading within 15° of course, ground speed < 3 kt, parking brake released, ≥1000 ft of usable runway ahead); pass override=true to bypass the centerline / along-track / heading checks for off-field, bush, or taxiway departures. Typical takeoff call: engage_pattern_fly(airport_ident='KSEA', runway_ident='16L', side='left', start_phase='takeoff_roll'). Typical hand-off-from-takeoff call: engage_pattern_fly(..., start_phase='initial_climb'). Typical join-from-cruise call: engage_pattern_fly(..., start_phase='pattern_entry').",
             json!({
                 "airport_ident": {"type": "string", "description": "ICAO airport code (e.g. 'KSEA')."},
                 "runway_ident": {"type": "string", "description": "Runway end identifier (e.g. '16L', '34R')."},
                 "side": {"type": "string", "description": "Traffic pattern side: 'left' (standard US) or 'right'."},
-                "start_phase": {"type": "string", "description": "Initial phase for the phase machine. Pick the leg the aircraft is currently on, not the one it's about to transition to — the phase machine auto-advances. 'takeoff_roll' on the ground, 'initial_climb' airborne but below pattern altitude, 'pattern_entry' joining from cruise, 'crosswind'/'downwind'/'base'/'final' only when physically established on that leg. Skipping ahead (e.g. 'crosswind' while still on upwind) forces an immediate premature turn."}
+                "start_phase": {"type": "string", "description": "Initial phase for the phase machine. Pick the leg the aircraft is currently on, not the one it's about to transition to — the phase machine auto-advances. 'takeoff_roll' on the ground, 'initial_climb' airborne but below pattern altitude, 'pattern_entry' joining from cruise, 'crosswind'/'downwind'/'base'/'final' only when physically established on that leg. Skipping ahead (e.g. 'crosswind' while still on upwind) forces an immediate premature turn."},
+                "override": {"type": ["boolean", "null"], "description": "Only meaningful when start_phase='takeoff_roll'. Pass true to bypass the centerline, along-track, and heading-alignment checks for off-field / bush / taxiway departures. Pass null (or false) otherwise."}
             }),
-            &["airport_ident", "runway_ident", "side", "start_phase"],
+            &["airport_ident", "runway_ident", "side", "start_phase", "override"],
         ),
         schema(
             "engage_takeoff",
-            "Start the takeoff sequence on the specified airport + runway: resolve the runway's threshold and course from apt.dat, verify the aircraft is actually on that runway (within 100 ft of centerline, inside the runway's along-track length, heading within 15° of course, ground speed < 3 kt), then go full power, hold centerline via the rollout controller, rotate at Vr, and climb at Vy along the runway track. Owns all three axes. Does NOT auto-disengage — once you're safely airborne, transition by engaging another profile (engage_heading_hold, engage_altitude_hold, engage_pattern_fly, etc.), which will displace this one via axis-ownership conflict. REFUSES to engage if the parking brake is set, the aircraft is not on the specified runway, or heading is off course — the error message names the specific check. Call takeoff_checklist first to see a human-readable status summary.",
+            "Start the takeoff sequence on the specified airport + runway: resolve the runway's threshold and course from apt.dat, verify the aircraft is actually on that runway (within 100 ft of centerline, inside the runway's along-track length, heading within 15° of course, ground speed < 3 kt), then go full power, hold centerline via the rollout controller, rotate at Vr, and climb at Vy along the runway track. Owns all three axes. Does NOT auto-disengage — once you're safely airborne, transition by engaging another profile (engage_heading_hold, engage_altitude_hold, engage_pattern_fly, etc.), which will displace this one via axis-ownership conflict. REFUSES to engage if the parking brake is set, the aircraft is not on the specified runway, or heading is off course — the error message names the specific check. Pass override=true to bypass the position/heading checks for off-field, bush, or taxiway departures; the parking-brake, ground-speed, and minimum-usable-length guards still apply. Call takeoff_checklist first to see a human-readable status summary.",
             json!({
                 "airport_ident": {"type": "string", "description": "Airport identifier as stored in apt.dat (e.g. 'KSFO')."},
-                "runway_ident": {"type": "string", "description": "Runway end ident you're departing on (e.g. '12', '28R')."}
+                "runway_ident": {"type": "string", "description": "Runway end ident you're departing on (e.g. '12', '28R')."},
+                "override": {"type": ["boolean", "null"], "description": "Pass true to bypass the centerline, along-track, and heading-alignment checks. Use for off-field / bush / taxiway departures where the aircraft isn't lined up on a paved runway. Pass null (or false) for a normal runway departure."}
             }),
-            &["airport_ident", "runway_ident"],
+            &["airport_ident", "runway_ident", "override"],
         ),
         schema(
             "takeoff_checklist",
