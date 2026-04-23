@@ -60,7 +60,10 @@ fn parse_log(text: &str) -> Vec<RawEntry> {
         } else {
             (String::new(), rest)
         };
-        let (source, body) = if kind == "log" {
+        // `[log]` and `[radio]` both carry a nested `[source]` tag that
+        // names the subsystem (llm-worker, heartbeat, atc, COM1 …).
+        let nests_source = kind == "log" || kind == "radio";
+        let (source, body) = if nests_source {
             if let Some(stripped) = after_kind.strip_prefix('[') {
                 if let Some(end) = stripped.find(']') {
                     (
@@ -145,11 +148,45 @@ fn categorize(raw: &[RawEntry], input: &std::path::Path) -> (Meta, Vec<TimedEven
                 first_ts = Some(ts.clone());
             }
         }
-        if r.kind == "status" || r.body.is_empty() || r.kind != "log" {
+        if r.kind == "status" {
             continue;
         }
         let src = r.source.as_deref().unwrap_or("");
         let body = &r.body;
+
+        if r.kind == "radio" {
+            // Radio entries land in the file as `[radio] [<src>] <body>`.
+            // Route ATC side to the existing atc channel; everything else
+            // (pilot broadcasts, tune confirmations) goes to a dedicated
+            // radio channel so the two sides of the conversation are
+            // visually distinct.
+            if src == "atc" {
+                push(
+                    &mut events,
+                    &last_ts,
+                    EventKind::Input { channel: "atc".into(), text: body.clone() },
+                );
+            } else {
+                let text = if body.is_empty() {
+                    src.to_string()
+                } else if src.is_empty() {
+                    body.clone()
+                } else {
+                    format!("[{}] {}", src, body)
+                };
+                if !text.is_empty() {
+                    push(
+                        &mut events,
+                        &last_ts,
+                        EventKind::Input { channel: "radio".into(), text },
+                    );
+                }
+            }
+            continue;
+        }
+        if r.kind != "log" || r.body.is_empty() {
+            continue;
+        }
 
         match src {
             "" => {
@@ -427,6 +464,7 @@ fn render_event(e: &TimedEvent) -> String {
             let label = match channel.as_str() {
                 "atc" => "ATC",
                 "operator" => "OPS",
+                "radio" => "RADIO",
                 _ => channel.as_str(),
             };
             row(&format!("input input-{}", channel), ts, label, &escape(text))
@@ -722,6 +760,10 @@ main.transcript {
 }
 .evt.input.input-atc { border-left-color: #8a3c12; }
 .evt.input.input-atc .tag { color: #8a3c12; }
+/* Pilot talking on the radio — royal accent so the transcript reads like
+   a back-and-forth between ATC (orange-amber) and the pilot (navy). */
+.evt.input.input-radio { border-left-color: var(--royal); }
+.evt.input.input-radio .tag { color: var(--royal); }
 
 /* mode switches */
 .evt.mode .tag { color: var(--mauve); font-weight: 600; }
