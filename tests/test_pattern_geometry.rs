@@ -1,5 +1,3 @@
-//! Port of tests/test_pattern_geometry.py.
-
 use approx::assert_abs_diff_eq;
 
 use xplane_pilot::config::load_default_config_bundle;

@@ -1,5 +1,3 @@
-//! Port of tests/test_safety_monitor.py.
-
 mod common;
 use common::state_with;
 

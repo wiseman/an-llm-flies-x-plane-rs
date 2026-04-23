@@ -1,5 +1,4 @@
-//! Shared test helpers — a Rust translation of the per-test `make_state`
-//! factories in the Python suite.
+//! Shared test helpers — per-test `make_state` factories.
 
 use xplane_pilot::types::{
     heading_to_vector, AircraftState, FlightPhase, Vec2, KT_TO_FPS,

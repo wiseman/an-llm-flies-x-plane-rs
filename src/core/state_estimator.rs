@@ -1,5 +1,4 @@
 //! Raw dynamics snapshot → normalized `AircraftState`.
-//! Mirrors sim_pilot/core/state_estimator.py.
 
 use crate::config::ConfigBundle;
 use crate::guidance::runway_geometry::RunwayFrame;

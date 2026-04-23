@@ -1,16 +1,15 @@
-//! Guidance profiles composed by `PilotCore`. Mirrors core/profiles.py.
+//! Guidance profiles composed by `PilotCore`.
 //!
 //! Each profile owns a set of axes (lateral / vertical / speed) and emits a
 //! `ProfileContribution` per tick. `PilotCore` merges per-axis contributions
 //! from all active profiles into a single `GuidanceTargets`. The LLM engages
 //! profiles; axis-ownership conflicts auto-displace older profiles.
 //!
-//! Unlike the Python version where `PatternFlyProfile.contribute()` can
-//! directly call `pilot.engage_profile(...)` to swap itself for three
-//! single-axis holds mid-tick, Rust profiles return a `hand_off` request and
-//! `PilotCore` applies the swap after all contributions are collected. That
-//! avoids reentrant `&mut` borrows on the pilot from inside one of its
-//! profiles.
+//! When a profile needs to swap itself for different profiles mid-tick (e.g.
+//! `PatternFlyProfile` replacing itself with three single-axis holds after a
+//! go-around settles), it returns a `hand_off` request and `PilotCore`
+//! applies the swap after all contributions are collected. That avoids
+//! reentrant `&mut` borrows on the pilot from inside one of its profiles.
 
 use std::collections::BTreeSet;
 
@@ -1283,9 +1282,8 @@ impl GuidanceProfile for ApproachRunwayProfile {
         all_three_axes()
     }
     fn contribute(&mut self, _state: &AircraftState, _dt: f64) -> ProfileTick {
-        // Stub: the Python version raises NotImplementedError. Here we yield
-        // zeros so the control loop keeps running if somebody accidentally
-        // engages us.
+        // Stub: yield zeros so the control loop keeps running if somebody
+        // accidentally engages us.
         ProfileTick::contribution_only(ProfileContribution::default())
     }
 }

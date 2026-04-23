@@ -1,4 +1,4 @@
-//! Runway-relative coordinate frame. Mirrors guidance/runway_geometry.py.
+//! Runway-relative coordinate frame.
 
 use crate::types::{heading_to_vector, Runway, StraightLeg, Vec2};
 

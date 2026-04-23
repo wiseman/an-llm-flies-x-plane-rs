@@ -1,5 +1,3 @@
-//! Port of tests/test_tecs_lite.py.
-
 use xplane_pilot::config::load_default_config_bundle;
 use xplane_pilot::control::tecs_lite::TECSLite;
 use xplane_pilot::types::FlightPhase;

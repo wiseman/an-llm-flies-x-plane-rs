@@ -1,4 +1,4 @@
-//! CSV scenario log writer. Mirrors sim_pilot/sim/logging.py.
+//! CSV scenario log writer.
 
 use std::path::{Path, PathBuf};
 

@@ -16,7 +16,7 @@
 
 ## Coding Style & Naming Conventions
 
-Use standard Rust formatting with `rustfmt` defaults. Keep files and modules in `snake_case`, types and traits in `UpperCamelCase`, and constants in `SCREAMING_SNAKE_CASE`. Keep flight-law changes in `control/` or `guidance/`, and tool-surface changes in `llm/` or `core/`. Preserve the file-level `//!` notes that map Rust modules to their Python counterparts when porting behavior. If you add a Python helper with PEP 723 inline dependencies, run it with `uv run script.py`.
+Use standard Rust formatting with `rustfmt` defaults. Keep files and modules in `snake_case`, types and traits in `UpperCamelCase`, and constants in `SCREAMING_SNAKE_CASE`. Keep flight-law changes in `control/` or `guidance/`, and tool-surface changes in `llm/` or `core/`. If you add a Python helper with PEP 723 inline dependencies, run it with `uv run script.py`.
 
 ## Testing Guidelines
 

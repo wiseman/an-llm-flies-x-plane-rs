@@ -1,4 +1,4 @@
-//! Approach-phase safety checks. Mirrors core/safety_monitor.py.
+//! Approach-phase safety checks.
 
 use crate::config::ConfigBundle;
 use crate::types::{clamp, AircraftState, FlightPhase, GuidanceTargets};

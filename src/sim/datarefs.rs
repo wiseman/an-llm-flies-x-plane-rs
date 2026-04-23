@@ -1,5 +1,4 @@
-//! X-Plane dataref names resolved by the live bridge. Mirrors
-//! sim_pilot/sim/datarefs.py.
+//! X-Plane dataref names resolved by the live bridge.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct DatarefSpec {
@@ -61,8 +60,7 @@ pub const RIGHT_BRAKE_RATIO: DatarefSpec = DatarefSpec::new("sim/cockpit2/contro
 pub const PARKING_BRAKE_RATIO: DatarefSpec = DatarefSpec::new("sim/cockpit2/controls/parking_brake_ratio");
 
 /// Required override: writes to yoke_heading_ratio don't reach the rudder /
-/// nosewheel unless this override is set. See the Python docstring for the
-/// investigation notes.
+/// nosewheel unless this override is set.
 pub const OVERRIDE_JOYSTICK_HEADING: DatarefSpec =
     DatarefSpec::new("sim/operation/override/override_joystick_heading");
 

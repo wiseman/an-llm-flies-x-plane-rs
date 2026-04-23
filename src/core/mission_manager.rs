@@ -1,6 +1,5 @@
 //! `PilotCore` — the per-tick composer that reads dynamics, composes
-//! guidance from active profiles, and emits actuator commands. Mirrors
-//! sim_pilot/core/mission_manager.py.
+//! guidance from active profiles, and emits actuator commands.
 //!
 //! Thread model: callers lock `PilotCore` through a single `Mutex` held by
 //! the control loop on every `update()`. Tool handlers (LLM worker, TUI)
@@ -113,8 +112,8 @@ impl PilotCore {
 
     /// Engage several profiles atomically under one logical step. Returns the
     /// set of displaced profile names (excluding any profile that was itself
-    /// reinstalled in the same call — the Python `engage_profiles` does the
-    /// same de-dup so "displaced" reflects only real removals).
+    /// reinstalled in the same call — "displaced" reflects only real
+    /// removals).
     pub fn engage_profiles(&mut self, new_profiles: Vec<Box<dyn GuidanceProfile>>) -> Vec<String> {
         let new_names: BTreeSet<&'static str> = new_profiles.iter().map(|p| p.name()).collect();
         let mut all_displaced: BTreeSet<String> = BTreeSet::new();

@@ -1,4 +1,4 @@
-//! Pitch-angle PID. Mirrors control/pitch_hold.py.
+//! Pitch-angle PID.
 
 use crate::config::PIDGains;
 use crate::control::pid::PIDController;

@@ -1,4 +1,4 @@
-//! apt.dat → zstd GeoParquet cache. No Python counterpart.
+//! apt.dat → zstd GeoParquet cache.
 //!
 //! Builds three parquet files (`airports.parquet`, `runways.parquet`,
 //! `comms.parquet`) in a per-apt.dat cache directory under

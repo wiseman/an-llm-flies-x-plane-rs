@@ -1,5 +1,4 @@
-//! Ground speed controller for taxiing. No Python counterpart (the
-//! Python pilot does not taxi).
+//! Ground speed controller for taxiing.
 //!
 //! On the ground, TECS is the wrong tool: there's no pitch/altitude
 //! coupling. Instead, a proportional throttle-and-brake controller tracks

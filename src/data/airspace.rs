@@ -1,4 +1,4 @@
-//! airspace.txt streaming parser. No Python counterpart.
+//! airspace.txt streaming parser.
 //!
 //! X-Plane 12 ships a global airspace dataset at
 //! `Resources/default data/airspaces/airspace.txt` (~18 MB, ~24k

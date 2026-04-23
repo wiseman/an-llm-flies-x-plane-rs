@@ -1,4 +1,4 @@
-//! Tool handlers + JSON schemas for the LLM. Mirrors sim_pilot/llm/tools.py.
+//! Tool handlers + JSON schemas for the LLM.
 //!
 //! Each tool is dispatched from a parsed `function_call` item returned by the
 //! Responses API. Handlers mutate `PilotCore` state (engaging/disengaging
@@ -995,10 +995,9 @@ fn with_pattern_profile<R>(ctx: &ToolContext, f: impl FnOnce(&mut PatternFlyProf
         // SAFETY-ish: we downcast by casting through Any. We use a
         // declarative trait method instead — `pattern_metadata()` is
         // always set on PatternFlyProfile — but mutating access needs
-        // a concrete reference. The Python version uses isinstance().
-        // Here we rely on the fact that only PatternFlyProfile
-        // registers as "pattern_fly", and transmute to the concrete
-        // type via a helper.
+        // a concrete reference. We rely on the fact that only
+        // PatternFlyProfile registers as "pattern_fly", and transmute
+        // to the concrete type via a helper.
         let ptr = p as *mut dyn crate::core::profiles::GuidanceProfile as *mut u8;
         let concrete = ptr as *mut PatternFlyProfile;
         // SAFETY: `pilot.find_profile_mut` guarantees the pointer points
@@ -2851,11 +2850,10 @@ If the airport has no taxi network in apt.dat (small uncontrolled strips), \
 this tool errors. Use sql_query against the `taxi_nodes` / `taxi_edges` \
 tables for ad-hoc exploration.";
 
-// Derived from sim_pilot/llm/tools.py::SQL_QUERY_DESCRIPTION. Rust-side
-// departures from the Python version:
+// SQL query description notes:
 //   * Source is X-Plane's apt.dat parsed into three zstd GeoParquet tables
-//     (airports, runways, comms) instead of the ourairports CSV. Endpoints
-//     are 8-decimal; headings and lengths are derived from endpoint geodesy.
+//     (airports, runways, comms). Endpoints are 8-decimal; headings and
+//     lengths are derived from endpoint geodesy.
 //   * "ALWAYS prefix spatial functions with ST_" — the LLM was observed
 //     emitting bare POINT(...) which fails on DuckDB.
 //   * ST_Distance_Sphere-only-accepts-POINT warning + crosstrack /

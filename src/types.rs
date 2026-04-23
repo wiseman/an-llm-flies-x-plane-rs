@@ -1,7 +1,7 @@
 //! Core numeric + mission types shared across the pilot layers.
 //!
-//! Mirrors sim_pilot/core/types.py. Units stay in feet, knots, and degrees
-//! throughout; the sim backend converts at the edges.
+//! Units stay in feet, knots, and degrees throughout; the sim backend
+//! converts at the edges.
 
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -455,9 +455,8 @@ pub struct AircraftState {
 }
 
 impl AircraftState {
-    /// Builder-style factory for tests, mirroring the Python `make_state`
-    /// helpers: produces a plausible mid-pattern default that callers override
-    /// selectively.
+    /// Builder-style factory for tests: produces a plausible mid-pattern
+    /// default that callers override selectively.
     pub fn synthetic_default() -> Self {
         AircraftState {
             t_sim: 0.0,

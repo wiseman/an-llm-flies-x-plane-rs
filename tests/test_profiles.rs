@@ -1,4 +1,4 @@
-//! Port of tests/test_profiles.py — profile composition and PatternFlyProfile behavior.
+//! Profile composition and PatternFlyProfile behavior.
 
 use std::collections::BTreeSet;
 

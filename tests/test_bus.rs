@@ -1,5 +1,3 @@
-//! Port of tests/test_bus.py.
-
 use std::thread;
 use tempfile::TempDir;
 

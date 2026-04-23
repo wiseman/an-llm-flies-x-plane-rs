@@ -1,4 +1,4 @@
-//! PID controller with anti-windup. Mirrors sim_pilot/control/pid.py.
+//! PID controller with anti-windup.
 
 use crate::types::clamp;
 

@@ -1,5 +1,3 @@
-//! Port of tests/test_plotting.py.
-
 use tempfile::TempDir;
 
 use xplane_pilot::config::load_default_config_bundle;

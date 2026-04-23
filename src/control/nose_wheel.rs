@@ -1,4 +1,4 @@
-//! Nose-wheel steering controller for taxiing. No Python counterpart.
+//! Nose-wheel steering controller for taxiing.
 //!
 //! On the ground, rudder input is coupled to the nose wheel in most
 //! X-Plane aircraft, so a single rudder command steers the aircraft. The

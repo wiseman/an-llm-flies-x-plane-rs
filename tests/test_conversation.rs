@@ -1,5 +1,3 @@
-//! Port of tests/test_conversation.py.
-//!
 //! The conversation loop uses the OpenAI Responses API via a
 //! `ResponsesBackend` trait so we can swap in a scripted stub.
 

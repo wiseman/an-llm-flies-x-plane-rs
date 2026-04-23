@@ -1,4 +1,4 @@
-//! L1 path follower + direct-to. Mirrors guidance/lateral.py.
+//! L1 path follower + direct-to.
 
 use crate::types::{
     clamp, course_between, wrap_degrees_180, wrap_degrees_360, AircraftState, StraightLeg, Vec2,

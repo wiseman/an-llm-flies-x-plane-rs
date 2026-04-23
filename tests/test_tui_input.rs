@@ -1,5 +1,3 @@
-//! Port of tests/test_tui_input.py.
-
 use xplane_pilot::tui::parse_input_source;
 
 #[test]

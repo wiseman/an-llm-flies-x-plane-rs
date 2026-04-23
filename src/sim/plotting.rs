@@ -1,10 +1,10 @@
-//! SVG plot writer for scenario runs. Mirrors sim_pilot/sim/plotting.py.
+//! SVG plot writer for scenario runs.
 //!
-//! The Python version produced two SVGs: a 5-panel overview (altitude, speed,
-//! attitude, throttle, heading + phase timeline) and a north-up ground path
-//! with runway overlay. This Rust port matches the structure the tests check
-//! for — phase labels, runway threshold label, "phase by time", "north-up
-//! world frame" — without trying to reproduce every pixel.
+//! Produces two SVGs: a 5-panel overview (altitude, speed, attitude,
+//! throttle, heading + phase timeline) and a north-up ground path with
+//! runway overlay. The structure the tests check for — phase labels,
+//! runway threshold label, "phase by time", "north-up world frame" — is
+//! preserved.
 
 use std::fs;
 use std::path::{Path, PathBuf};

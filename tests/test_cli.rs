@@ -1,5 +1,3 @@
-//! Port of tests/test_cli.py.
-
 use xplane_pilot::types::Vec2;
 
 // Re-implement resolve_scenario_name here to keep the test independent of the

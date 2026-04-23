@@ -1,4 +1,4 @@
-//! Thin OpenAI Responses API client. Mirrors llm/responses_client.py.
+//! Thin OpenAI Responses API client.
 //!
 //! Uses `ureq` so we stay on blocking HTTP — the LLM worker runs on its own
 //! thread; there is no async runtime needed.

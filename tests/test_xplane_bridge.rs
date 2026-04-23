@@ -1,4 +1,4 @@
-//! Port of tests/test_xplane_bridge.py — exercises the pure helpers only.
+//! Exercises the pure helpers only.
 
 use approx::assert_abs_diff_eq;
 use serde_json::json;

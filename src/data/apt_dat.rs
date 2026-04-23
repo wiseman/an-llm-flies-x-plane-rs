@@ -1,4 +1,4 @@
-//! apt.dat streaming parser. No Python counterpart.
+//! apt.dat streaming parser.
 //!
 //! X-Plane ships all runway and comm truth in `Global Scenery/Global
 //! Airports/Earth nav data/apt.dat` (~360 MB, ~38k airports, ~38k runways,

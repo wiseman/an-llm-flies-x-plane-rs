@@ -1,6 +1,5 @@
 //! Live X-Plane runner: bootstrap probe, bridge, pilot core, LLM worker
 //! thread, heartbeat pump, control loop, and (optionally) interactive TUI.
-//! Mirrors sim_pilot/live_runner.py.
 
 use std::sync::{
     atomic::{AtomicU64, Ordering},

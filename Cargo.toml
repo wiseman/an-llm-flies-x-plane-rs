@@ -2,7 +2,7 @@
 name = "an-llm-flies-xplane"
 version = "0.5.0"
 edition = "2021"
-description = "An LLM-driven pilot for X-Plane 12. Rust port of the Python sim_pilot project."
+description = "An LLM-driven pilot for X-Plane 12."
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/wiseman/an-llm-flies-x-plane-rs"
 readme = "README.md"

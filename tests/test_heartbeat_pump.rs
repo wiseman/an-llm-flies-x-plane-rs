@@ -1,5 +1,3 @@
-//! Port of tests/test_heartbeat_pump.py.
-
 use std::sync::Arc;
 
 use crossbeam_channel::{unbounded, TryRecvError};

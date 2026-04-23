@@ -1,4 +1,4 @@
-//! Pattern geometry + glidepath math. Mirrors guidance/pattern_manager.py.
+//! Pattern geometry + glidepath math.
 
 use crate::guidance::runway_geometry::RunwayFrame;
 use crate::types::{
@@ -124,9 +124,9 @@ pub fn build_pattern_geometry(
 }
 
 /// Target altitude along the 3° (or other) glidepath at a given runway-frame
-/// `runway_x_ft`, clamped at field elevation behind the threshold. Mirrors the
-/// `glidepath_target_altitude_ft` Python helper including the ground-level
-/// aim-point default (threshold crossing falls out as aim_x * tan(slope)).
+/// `runway_x_ft`, clamped at field elevation behind the threshold. The
+/// ground-level aim-point default makes threshold crossing fall out as
+/// `aim_x * tan(slope)`.
 pub fn glidepath_target_altitude_ft(
     runway_frame: &RunwayFrame,
     runway_x_ft: f64,
@@ -168,7 +168,7 @@ pub fn glidepath_target_altitude_leading_ft(
     field_elevation_ft + path_height.max(0.0)
 }
 
-// Unused-name suppression (the original Python code exposes the TrafficSide
-// constants through build_pattern_geometry; Rust's use brings them in).
+// Unused-name suppression: keeps `TrafficSide` in scope for downstream
+// re-exports even when no local code names it.
 #[allow(dead_code)]
 fn _traffic_side_reference(_s: TrafficSide) {}

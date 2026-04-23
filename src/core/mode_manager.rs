@@ -1,10 +1,10 @@
-//! Flight-phase state machine. Mirrors core/mode_manager.py.
+//! Flight-phase state machine.
 //!
 //! Each tick takes the current phase plus the aircraft state and decides what
 //! the next phase should be. Pattern geometry and the route manager feed
 //! decision gates like "ready for base turn" / "pattern_entry waypoint
-//! reached". Keeps the full list of regressions the Python version carries
-//! (airborne bailout, stale-AGL ground short-circuit, touch-and-go routing).
+//! reached". Covers airborne bailout, stale-AGL ground short-circuit, and
+//! touch-and-go routing.
 
 use crate::config::ConfigBundle;
 use crate::core::safety_monitor::SafetyStatus;

@@ -1,8 +1,8 @@
-//! X-Plane 12 web API bridge (REST + WebSocket). Mirrors sim/xplane_bridge.py.
+//! X-Plane 12 web API bridge (REST + WebSocket).
 //!
-//! The high-level shape is the same: one-shot REST resolves dataref IDs via
-//! `/api/capabilities` + `/datarefs?filter[name]=...`, then a WebSocket on
-//! `/api/v3` streams `dataref_update_values` deltas which we merge into a
+//! One-shot REST resolves dataref IDs via `/api/capabilities` +
+//! `/datarefs?filter[name]=...`, then a WebSocket on `/api/v3` streams
+//! `dataref_update_values` deltas which we merge into a
 //! cache; writes go out as `dataref_set_values`. Runtime behavior that
 //! requires a live X-Plane — the full `XPlaneWebBridge` struct — is behind
 //! the `new` constructor and left as a thin wrapper; the pure helpers

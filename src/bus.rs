@@ -1,9 +1,9 @@
 //! SimBus: thread-safe output bus with status / log / radio channels.
 //!
-//! Mirrors sim_pilot/bus.py. Used by the live control loop, the LLM worker,
-//! and the TUI to exchange text updates without stepping on each other's
-//! stdout. When `echo = true` every push also prints to stdout — set it to
-//! false when the TUI is rendering.
+//! Used by the live control loop, the LLM worker, and the TUI to exchange
+//! text updates without stepping on each other's stdout. When `echo = true`
+//! every push also prints to stdout — set it to false when the TUI is
+//! rendering.
 //!
 //! Log entries carry a `LogKind` so the TUI can style operator input vs
 //! LLM output vs verbose worker chatter independently. `snapshot()` and

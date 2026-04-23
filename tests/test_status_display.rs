@@ -1,4 +1,4 @@
-//! Port of tests/test_status_display.py — the headless status panel formatter.
+//! Headless status panel formatter.
 
 use xplane_pilot::config::load_default_config_bundle;
 use xplane_pilot::core::mission_manager::{PilotCore, StatusSnapshot};

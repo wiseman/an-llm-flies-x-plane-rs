@@ -1,5 +1,4 @@
 //! Point-mass aircraft dynamics for the offline `simple` backend.
-//! Mirrors sim_pilot/sim/simple_dynamics.py.
 
 use crate::config::ConfigBundle;
 use crate::guidance::runway_geometry::RunwayFrame;

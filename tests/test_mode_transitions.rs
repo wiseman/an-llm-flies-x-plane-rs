@@ -1,5 +1,3 @@
-//! Port of tests/test_mode_transitions.py.
-
 mod common;
 use common::state_with;
 

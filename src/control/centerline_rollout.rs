@@ -1,6 +1,6 @@
-//! Takeoff/rollout rudder controller. Mirrors control/centerline_rollout.py.
+//! Takeoff/rollout rudder controller.
 //!
-//! Sign conventions (see the Python comment for history):
+//! Sign conventions:
 //!   centerline_error_ft  — positive when right of centerline
 //!   track_error_deg      — positive when runway course > current track
 //!   yaw_rate_deg_s       — positive when yawing right

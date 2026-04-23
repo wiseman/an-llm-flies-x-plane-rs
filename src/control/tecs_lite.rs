@@ -1,7 +1,6 @@
-//! Simplified TECS (Total Energy Control System). Mirrors
-//! sim_pilot/control/tecs_lite.py. Phase-dependent trims and weights keep the
-//! commanded pitch / throttle plausible across takeoff, climb, cruise,
-//! descent, pattern, base, and final.
+//! Simplified TECS (Total Energy Control System). Phase-dependent trims
+//! and weights keep the commanded pitch / throttle plausible across
+//! takeoff, climb, cruise, descent, pattern, base, and final.
 
 use crate::config::TECSGains;
 use crate::types::{clamp, FlightPhase};

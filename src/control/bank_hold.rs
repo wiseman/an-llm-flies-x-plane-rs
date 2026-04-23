@@ -1,4 +1,4 @@
-//! Bank-angle PID + turn-coordination rudder. Mirrors control/bank_hold.py.
+//! Bank-angle PID + turn-coordination rudder.
 
 use crate::config::PIDGains;
 use crate::control::pid::PIDController;

@@ -1,4 +1,4 @@
-//! Waypoint sequencer. Mirrors guidance/route_manager.py.
+//! Waypoint sequencer.
 
 use crate::types::{Vec2, Waypoint};
 

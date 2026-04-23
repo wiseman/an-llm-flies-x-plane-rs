@@ -1,6 +1,4 @@
-//! Ground dynamics for taxi scenarios. No Python counterpart (the Python
-//! pilot does not taxi, so neither its SimplePointMass dynamics nor our
-//! port model the regime).
+//! Ground dynamics for taxi scenarios.
 //!
 //! ## Why a separate model from `SimpleAircraftModel`
 //!

@@ -1,4 +1,4 @@
-//! Live flight-track recorder. No Python counterpart.
+//! Live flight-track recorder.
 //!
 //! Streams a per-second position CSV to disk (crash-safe: each row is
 //! flushed before we move on) and keeps a parallel in-memory buffer that

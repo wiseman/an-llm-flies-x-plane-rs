@@ -1,5 +1,4 @@
-//! Offline scenario runner for the simple backend. Mirrors
-//! sim_pilot/sim/scenario.py.
+//! Offline scenario runner for the simple backend.
 
 use crate::config::ConfigBundle;
 use crate::core::mission_manager::PilotCore;

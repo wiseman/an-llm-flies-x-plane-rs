@@ -1,4 +1,4 @@
-//! `sim-pilot` CLI. Mirrors sim_pilot/__main__.py.
+//! `sim-pilot` CLI.
 
 use std::fs;
 use std::path::{Path, PathBuf};

@@ -1,4 +1,4 @@
-//! Port of tests/test_scenario.py — the end-to-end deterministic pattern mission.
+//! End-to-end deterministic pattern mission.
 
 use xplane_pilot::config::load_default_config_bundle;
 use xplane_pilot::sim::scenario::ScenarioRunner;

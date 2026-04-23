@@ -1,5 +1,5 @@
-//! Port of tests/test_tool_dispatch.py. Covers the full tool surface the LLM
-//! uses, backed by a `FakeBridge` for writes that would otherwise hit X-Plane.
+//! Covers the full tool surface the LLM uses, backed by a `FakeBridge` for
+//! writes that would otherwise hit X-Plane.
 
 use std::collections::HashMap;
 use std::path::PathBuf;

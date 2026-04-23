@@ -1,4 +1,4 @@
-//! Multi-turn Responses-API conversation loop. Mirrors llm/conversation.py.
+//! Multi-turn Responses-API conversation loop.
 //!
 //! `Conversation` holds the pinned system prompt + rotating message history.
 //! History grows unbounded — there is no compaction.

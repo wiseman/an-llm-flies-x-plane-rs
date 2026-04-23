@@ -1,4 +1,4 @@
-//! Port of tests/test_lateral_rescue.py — L1 far/near behavior.
+//! L1 far/near behavior.
 
 mod common;
 

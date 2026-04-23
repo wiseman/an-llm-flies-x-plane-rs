@@ -1,4 +1,4 @@
-//! Terminal UI + status-line formatter. Mirrors sim_pilot/tui.py.
+//! Terminal UI + status-line formatter.
 //!
 //! Two surfaces live here:
 //!   - `format_snapshot_display` / `parse_input_source`: pure functions used
@@ -1575,9 +1575,9 @@ fn render_status_fragments(
 
     let mut lines: Vec<Line> = Vec::with_capacity(10);
 
-    // Header line (phase + rwy info + profiles).
-    // Python pads phase to 24 chars only when there's no rwy_info, and
-    // separates phase/rwy/profiles with explicit two-space spans.
+    // Header line (phase + rwy info + profiles). Phase is padded to 24
+    // chars only when there's no rwy_info, and phase/rwy/profiles are
+    // separated by explicit two-space spans.
     let mut rwy_parts: Vec<String> = Vec::new();
     if let Some(a) = &snap.airport_ident {
         rwy_parts.push(a.clone());
@@ -1691,8 +1691,8 @@ fn render_status_fragments(
     )));
 
     // Bottom config row. Label spans use the shared lbl style
-    // (Gray); numeric values use val (White + BOLD). Gap strings match
-    // the Python layout ("   flaps " / "   gear " — three spaces).
+    // (Gray); numeric values use val (White + BOLD). Gap strings are
+    // "   flaps " / "   gear " — three spaces.
     let lbl_style = Style::default().fg(Color::Gray);
     let thr_width = 8usize;
     let filled = (commands.throttle * thr_width as f64).round() as usize;

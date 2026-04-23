@@ -1,5 +1,3 @@
-//! Port of tests/test_live_intents.py.
-
 mod common;
 use common::state_with;
 

@@ -1,5 +1,4 @@
-//! Airspace containment + trajectory projection query. No Python
-//! counterpart.
+//! Airspace containment + trajectory projection query.
 //!
 //! Given a DuckDB connection with the `airspaces` view registered (see
 //! `llm::tools::open_apt_dat_parquet`) and an aircraft state, returns

@@ -1,4 +1,4 @@
-//! Flare-phase pitch schedule. Mirrors guidance/flare_profile.py.
+//! Flare-phase pitch schedule.
 
 use crate::config::FlareConfig;
 use crate::types::clamp;

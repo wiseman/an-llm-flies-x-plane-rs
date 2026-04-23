@@ -1,5 +1,3 @@
-//! Port of tests/test_centerline_rollout.py.
-
 use xplane_pilot::control::centerline_rollout::CenterlineRolloutController;
 
 fn upd(

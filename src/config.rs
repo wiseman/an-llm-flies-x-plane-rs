@@ -1,4 +1,4 @@
-//! Configuration loading. Mirrors sim_pilot/core/config.py.
+//! Configuration loading.
 //!
 //! The YAML files live under `config/` and are embedded via `include_str!`
 //! so the compiled binary is self-contained. On-disk overrides go through
