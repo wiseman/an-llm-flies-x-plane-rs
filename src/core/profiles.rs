@@ -26,8 +26,24 @@ use crate::guidance::route_manager::RouteManager;
 use crate::guidance::runway_geometry::RunwayFrame;
 use crate::types::{
     clamp, wrap_degrees_180, wrap_degrees_360, AircraftState, FlightPhase, Glidepath,
-    GuidanceTargets, LateralMode, StraightLeg, TrafficSide, VerticalMode, Waypoint,
+    GuidanceTargets, LateralMode, StraightLeg, TrafficSide, Vec2, VerticalMode, Waypoint,
+    NM_TO_FT,
 };
+
+/// Base/final descent only engages inside this range from the landing
+/// threshold. Outside the gate the aircraft holds pattern altitude, so an
+/// extended downwind or a long base doesn't start sinking the plane early.
+const PATTERN_DESCENT_GATE_FT: f64 = 1.2 * NM_TO_FT;
+
+/// 2D runway-frame range from the aircraft to the landing threshold, or
+/// `INFINITY` if the runway frame hasn't resolved yet (so the caller fails
+/// the descent gate and holds pattern altitude).
+fn range_to_threshold_ft(state: &AircraftState) -> f64 {
+    match (state.runway_x_ft, state.runway_y_ft) {
+        (Some(x), Some(y)) => Vec2::new(x, y).length(),
+        _ => f64::INFINITY,
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Axis {
@@ -1009,59 +1025,74 @@ impl PatternFlyProfile {
                 (0.0, 1.0),
                 Some(0),
             ),
-            FlightPhase::Downwind => {
-                // Real VFR pattern descent: power back and start a gentle
-                // descent abeam the numbers, so we arrive at the base turn
-                // already partway down rather than forcing a 600 ft step
-                // drop into the base target. Lerp the altitude target from
-                // pattern altitude at abeam (x=0) down to `field+500` at
-                // the base-turn x. Before abeam (x>0) we hold pattern
-                // altitude; the clamp handles the missing-runway-frame
-                // case and any overshoot past the base-turn point.
-                let pattern_alt = self.config.pattern_altitude_msl_ft();
-                let base_turn_intercept_alt_ft =
-                    self.config.airport.field_elevation_ft + 500.0;
-                let base_turn_x = self.pattern.base_turn_x_ft;
-                let target_alt = match state.runway_x_ft {
-                    Some(x) if base_turn_x < 0.0 => {
-                        let frac = (x / base_turn_x).clamp(0.0, 1.0);
-                        pattern_alt + (base_turn_intercept_alt_ft - pattern_alt) * frac
-                    }
-                    _ => pattern_alt,
-                };
-                (
-                    target_alt,
-                    self.config.performance.downwind_speed_kt,
-                    VerticalMode::Tecs,
-                    None,
-                    (0.0, 1.0),
-                    Some(10),
-                )
-            }
-            FlightPhase::Base => (
-                self.config.airport.field_elevation_ft + 400.0,
-                self.config.performance.base_speed_kt,
+            FlightPhase::Downwind => (
+                // Hold pattern altitude across the whole downwind. Descent
+                // is deferred to base/final and further gated on being
+                // inside `PATTERN_DESCENT_GATE_FT` of the threshold, so an
+                // extended downwind doesn't smuggle an early descent in.
+                self.config.pattern_altitude_msl_ft(),
+                self.config.performance.downwind_speed_kt,
                 VerticalMode::Tecs,
                 None,
                 (0.0, 1.0),
-                Some(20),
+                Some(10),
             ),
+            FlightPhase::Base => {
+                let pattern_alt = self.config.pattern_altitude_msl_ft();
+                let field_elev_ft = self.config.airport.field_elevation_ft;
+                let range_ft = range_to_threshold_ft(state);
+                let target_alt = if range_ft > PATTERN_DESCENT_GATE_FT {
+                    pattern_alt
+                } else {
+                    let base_turn_x = self.pattern.base_turn_x_ft;
+                    let base_end_alt = glidepath_target_altitude_ft_default(
+                        &self.runway_frame,
+                        base_turn_x,
+                        field_elev_ft,
+                    );
+                    let downwind_y_abs = self.pattern.downwind_y_ft.abs();
+                    let y_abs = state.runway_y_ft.unwrap_or(0.0).abs();
+                    let frac = if downwind_y_abs > 1.0 {
+                        (1.0 - y_abs / downwind_y_abs).clamp(0.0, 1.0)
+                    } else {
+                        1.0
+                    };
+                    pattern_alt + (base_end_alt - pattern_alt) * frac
+                };
+                (
+                    target_alt,
+                    self.config.performance.base_speed_kt,
+                    VerticalMode::Tecs,
+                    None,
+                    (0.0, 1.0),
+                    Some(20),
+                )
+            }
             FlightPhase::Final => {
                 let final_slope = 3.0;
-                let target_altitude = glidepath_target_altitude_ft_default(
-                    &self.runway_frame,
-                    state.runway_x_ft.unwrap_or(-3000.0),
-                    self.config.airport.field_elevation_ft,
-                );
-                (
-                    target_altitude,
-                    self.config.performance.final_speed_kt,
-                    VerticalMode::GlidepathTrack,
-                    Some(Glidepath {
+                let pattern_alt = self.config.pattern_altitude_msl_ft();
+                let field_elev_ft = self.config.airport.field_elevation_ft;
+                let range_ft = range_to_threshold_ft(state);
+                let (target_altitude, vmode, gp) = if range_ft > PATTERN_DESCENT_GATE_FT {
+                    (pattern_alt, VerticalMode::Tecs, None)
+                } else {
+                    let alt = glidepath_target_altitude_ft_default(
+                        &self.runway_frame,
+                        state.runway_x_ft.unwrap_or(-3000.0),
+                        field_elev_ft,
+                    );
+                    let glidepath = Glidepath {
                         slope_deg: final_slope,
                         threshold_crossing_height_ft: 0.0,
                         aimpoint_ft_from_threshold: self.runway_frame.touchdown_runway_x_ft(),
-                    }),
+                    };
+                    (alt, VerticalMode::GlidepathTrack, Some(glidepath))
+                };
+                (
+                    target_altitude,
+                    self.config.performance.final_speed_kt,
+                    vmode,
+                    gp,
                     (0.0, 1.0),
                     Some(30),
                 )
