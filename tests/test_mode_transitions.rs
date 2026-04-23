@@ -327,7 +327,7 @@ fn crosswind_transitions_to_downwind_when_captured_and_at_offset() {
     let state = state_with(|s| {
         s.alt_agl_ft = 950.0;
         s.runway_x_ft = Some(5000.0);
-        s.runway_y_ft = Some(-3500.0);
+        s.runway_y_ft = Some(pattern.downwind_y_ft);
         s.heading_deg = 270.0;
         s.track_deg = 270.0;
         s.on_ground = false;

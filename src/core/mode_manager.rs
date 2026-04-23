@@ -306,7 +306,14 @@ impl ModeManager {
         let speed_shortfall_kt =
             (self.config.performance.downwind_speed_kt - state.gs_kt).max(0.0);
         let max_relief_ft = (earliest_turn_x_ft - nominal_turn_x_ft).max(0.0);
-        let relief_ft = clamp(speed_shortfall_kt * 140.0, 0.0, max_relief_ft);
+        // Relief saturates at a 30-kt shortfall (aircraft limping along at
+        // half speed or worse gets full relief, meaning "turn base as soon
+        // as abeam"). Scaling by max_relief_ft keeps the behavior the same
+        // across pattern widths — tighter patterns need less absolute
+        // relief to cover the same shortfall.
+        let saturation_shortfall_kt = 30.0;
+        let relief_frac = clamp(speed_shortfall_kt / saturation_shortfall_kt, 0.0, 1.0);
+        let relief_ft = relief_frac * max_relief_ft;
         let adaptive_turn_x_ft = nominal_turn_x_ft + relief_ft;
         rx <= adaptive_turn_x_ft
     }

@@ -414,11 +414,13 @@ fn base_descends_inside_descent_gate() {
     let mut profile = PatternFlyProfile::new(cfg.clone(), pilot.runway_frame.clone());
     let pattern_alt = cfg.pattern_altitude_msl_ft();
     let field_elev = cfg.airport.field_elevation_ft;
+    let offset = cfg.pattern.downwind_offset_ft;
+    let base_turn_x = -offset;
     // Base turn point, just starting the leg: target should still be
     // ~pattern altitude (progress along base = 0).
     let at_turn = AircraftState {
-        runway_x_ft: Some(-3500.0),
-        runway_y_ft: Some(-3500.0),
+        runway_x_ft: Some(base_turn_x),
+        runway_y_ft: Some(-offset),
         alt_msl_ft: pattern_alt,
         ..AircraftState::synthetic_default()
     };
@@ -429,14 +431,14 @@ fn base_descends_inside_descent_gate() {
         epsilon = 1e-6
     );
     let at_final = AircraftState {
-        runway_x_ft: Some(-3500.0),
+        runway_x_ft: Some(base_turn_x),
         runway_y_ft: Some(0.0),
         alt_msl_ft: pattern_alt,
         ..AircraftState::synthetic_default()
     };
     let g_final = profile.guidance_for_phase(&at_final, FlightPhase::Base);
     let expected =
-        glidepath_target_altitude_ft_default(&pilot.runway_frame, -3500.0, field_elev);
+        glidepath_target_altitude_ft_default(&pilot.runway_frame, base_turn_x, field_elev);
     assert_abs_diff_eq!(
         g_final.target_altitude_ft.unwrap(),
         expected,

@@ -13,7 +13,7 @@ vref_kt: 61
 vso_landing_kt: 48
 pattern:
   altitude_agl_ft: 1000
-  downwind_offset_ft: 3500
+  downwind_offset_ft: 6000
   abeam_window_ft: 750
   default_extension_ft: 0
 flare:
