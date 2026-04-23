@@ -98,6 +98,22 @@ fn setup() -> (
     (pilot, clock, rx, pump)
 }
 
+fn setup_with_bus() -> (
+    Arc<Mutex<PilotCore>>,
+    Arc<FakeClock>,
+    SimBus,
+    crossbeam_channel::Receiver<IncomingMessage>,
+    HeartbeatPump,
+) {
+    let cfg = load_default_config_bundle();
+    let pilot = Arc::new(Mutex::new(PilotCore::new(cfg)));
+    let clock = Arc::new(FakeClock::new());
+    let bus = SimBus::new(false);
+    let (tx, rx) = unbounded::<IncomingMessage>();
+    let pump = HeartbeatPump::new(pilot.clone(), Some(bus.clone()), tx, 30.0, clock.clone());
+    (pilot, clock, bus, rx, pump)
+}
+
 fn seed(pilot: &Arc<Mutex<PilotCore>>, profiles: &[&str], phase: Option<FlightPhase>) {
     pilot.lock().latest_snapshot = Some(make_snapshot(profiles, phase, 1500.0, None));
 }
@@ -232,6 +248,46 @@ fn periodic_heartbeat_resets_its_own_timer() {
     pump.check_and_emit();
     assert!(drain(&rx).is_empty());
     clock.advance_secs(25.0);
+    pump.check_and_emit();
+    assert_eq!(drain(&rx).len(), 1);
+}
+
+#[test]
+fn llm_busy_suppresses_periodic_heartbeat() {
+    let (pilot, clock, bus, rx, pump) = setup_with_bus();
+    pilot.lock().latest_snapshot = Some(make_snapshot(
+        &["idle_lateral", "idle_vertical", "idle_speed"],
+        None,
+        1500.0,
+        None,
+    ));
+    pump.check_and_emit();
+    bus.set_llm_busy(true);
+    clock.advance_secs(45.0);
+    pump.check_and_emit();
+    assert!(drain(&rx).is_empty());
+}
+
+#[test]
+fn periodic_heartbeat_waits_until_interval_after_llm_call_ends() {
+    let (pilot, clock, bus, rx, pump) = setup_with_bus();
+    pilot.lock().latest_snapshot = Some(make_snapshot(
+        &["idle_lateral", "idle_vertical", "idle_speed"],
+        None,
+        1500.0,
+        None,
+    ));
+    pump.check_and_emit();
+    bus.set_llm_busy(true);
+    clock.advance_secs(60.0);
+    pump.check_and_emit();
+    assert!(drain(&rx).is_empty(), "busy must suppress periodic fire");
+    bus.set_llm_busy(false);
+    pump.check_and_emit();
+    clock.advance_secs(25.0);
+    pump.check_and_emit();
+    assert!(drain(&rx).is_empty(), "must not fire before interval elapses from end-of-call");
+    clock.advance_secs(10.0);
     pump.check_and_emit();
     assert_eq!(drain(&rx).len(), 1);
 }

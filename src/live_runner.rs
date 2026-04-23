@@ -50,6 +50,14 @@ impl Clock for FakeClock {
 struct HeartbeatState {
     last_user_input_s: f64,
     last_heartbeat_s: f64,
+    /// Wall-clock seconds when the LLM worker last finished a
+    /// `create_response` round-trip. The idle-cadence heartbeat waits
+    /// `heartbeat_interval_s` after this point before firing again, so a
+    /// long turn doesn't immediately re-wake the model.
+    last_llm_end_s: f64,
+    /// Tracks the previous tick's busy state so we can detect the
+    /// busy→idle edge and stamp `last_llm_end_s`.
+    was_llm_busy: bool,
     last_seen_phase: Option<FlightPhase>,
     last_seen_profiles: Option<Vec<String>>,
     last_seen_completed: Option<Vec<String>>,
@@ -97,6 +105,8 @@ impl HeartbeatPump {
             state: Mutex::new(HeartbeatState {
                 last_user_input_s: now,
                 last_heartbeat_s: now,
+                last_llm_end_s: now,
+                was_llm_busy: false,
                 last_seen_phase: None,
                 last_seen_profiles: None,
                 last_seen_completed: None,
@@ -146,8 +156,13 @@ impl HeartbeatPump {
             .as_deref()
             .and_then(|b| b.get_dataref_value(crate::sim::datarefs::HAS_CRASHED.name))
             .map(|v| v >= 0.5);
+        let llm_busy = self.bus.as_ref().map(|b| b.is_llm_busy()).unwrap_or(false);
 
         let mut st = self.state.lock().unwrap();
+        if st.was_llm_busy && !llm_busy {
+            st.last_llm_end_s = now;
+        }
+        st.was_llm_busy = llm_busy;
         if st.last_seen_profiles.is_none() {
             st.last_seen_phase = current_phase;
             st.last_seen_profiles = Some(current_profiles);
@@ -226,7 +241,18 @@ impl HeartbeatPump {
             return;
         }
 
-        let last_input = st.last_user_input_s.max(st.last_heartbeat_s);
+        // Idle heartbeat is suppressed while the LLM is mid-call, and the
+        // interval is measured from whichever anchor is latest: last user
+        // input, last heartbeat we already sent, or the moment the LLM
+        // finished its most recent call. That last term is what prevents
+        // queuing a new turn the instant a long one finishes.
+        if llm_busy {
+            return;
+        }
+        let last_input = st
+            .last_user_input_s
+            .max(st.last_heartbeat_s)
+            .max(st.last_llm_end_s);
         if now - last_input >= self.heartbeat_interval_s && now >= st.idle_suppress_until_s {
             st.last_heartbeat_s = now;
             // Periodic check-in now threads the bridge through so the
