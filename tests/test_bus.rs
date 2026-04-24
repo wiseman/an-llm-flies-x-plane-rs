@@ -156,7 +156,7 @@ mod regex_lite {
             // Scan for "YYYY-MM-DDTHH:MM:SS [status] hello" anywhere.
             if let Some(idx) = text.find(" [status] hello") {
                 let ts = &text[..idx];
-                if let Some(start) = ts.rfind(|c: char| c == '\n' || c == '\r') {
+                if let Some(start) = ts.rfind(['\n', '\r']) {
                     let ts = &ts[start + 1..];
                     return looks_like_iso(ts);
                 }

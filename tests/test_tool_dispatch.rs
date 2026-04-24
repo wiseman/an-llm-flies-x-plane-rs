@@ -120,20 +120,21 @@ fn stage_stopped_snapshot(
 ///   (airport_ident, elevation_ft, width_m, surface_code,
 ///    le_ident, le_lat, le_lon, le_disp_m,
 ///    he_ident, he_lat, he_lon, he_disp_m)
-const BASE_RUNWAYS: &[(
-    &str,
+type BaseRunwayRow = (
+    &'static str,
     u32,
     f64,
     u8,
-    &str,
+    &'static str,
     f64,
     f64,
     f64,
-    &str,
+    &'static str,
     f64,
     f64,
     f64,
-)] = &[
+);
+const BASE_RUNWAYS: &[BaseRunwayRow] = &[
     ("KSEA", 432, 45.72, 1, "16L", 47.4638, -122.308, 0.0, "34R", 47.4312, -122.308, 0.0),
     ("KSEA", 432, 45.72, 2, "16C", 47.4638, -122.311, 0.0, "34C", 47.4380, -122.311, 0.0),
     ("KSEA", 432, 45.72, 2, "16R", 47.4638, -122.318, 0.0, "34L", 47.4405, -122.318, 0.0),
@@ -1309,7 +1310,7 @@ fn engage_taxi_prepends_pullout_leg_when_far_from_nearest_node() {
         threshold_lon_deg: -121.997500,
     };
     let expected_start: Vec2 = geodetic_offset_ft(start_lat, start_lon, georef);
-    let (legs, _names, pullout) = xplane_pilot::llm::tools::build_taxi_legs_with_pullout(
+    let plan = xplane_pilot::llm::tools::build_taxi_legs_with_pullout(
         expected_start,
         0.0,
         &[], // empty stand-in; we exercise the full path via the dispatch above
@@ -1318,8 +1319,8 @@ fn engage_taxi_prepends_pullout_leg_when_far_from_nearest_node() {
     )
     .expect("empty plan never errors");
     // Empty plan → empty legs list, no pullout.
-    assert!(legs.is_empty());
-    assert!(pullout.is_none());
+    assert!(plan.legs.is_empty());
+    assert!(plan.pullout_ft.is_none());
 }
 
 /// Off the runway, a pullout lead-in that requires a big turn is just a

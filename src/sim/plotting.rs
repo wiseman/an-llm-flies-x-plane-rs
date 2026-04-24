@@ -200,7 +200,9 @@ fn build_overview_svg(result: &ScenarioResult, scenario_name: &str) -> String {
     };
     let segments = phase_segments(rows);
 
-    let panels: Vec<(&str, Vec<(&str, &str, Vec<f64>)>, Option<(f64, f64)>)> = vec![
+    type Series<'a> = (&'a str, &'a str, Vec<f64>);
+    type Panel<'a> = (&'a str, Vec<Series<'a>>, Option<(f64, f64)>);
+    let panels: Vec<Panel> = vec![
         (
             "Altitude AGL (ft)",
             vec![("altitude_agl_ft", "#0f766e", rows.iter().map(|r| r.altitude_agl_ft).collect())],

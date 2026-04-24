@@ -249,7 +249,7 @@ fn single_tool_call_then_text_ends_turn() {
     tx.send(IncomingMessage::operator("fly heading 270")).unwrap();
     let stop = Arc::new(AtomicBool::new(false));
 
-    let _ = std::thread::scope(|s| {
+    std::thread::scope(|s| {
         let handle = s.spawn({
             let stop = stop.clone();
             || {

@@ -72,6 +72,10 @@ impl TrackRecorder {
         self.points.len()
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.points.is_empty()
+    }
+
     /// Append a single fix. Flushes the CSV before returning so a crash
     /// loses at most the last sample.
     pub fn record(&mut self, pt: TrackPoint) -> Result<()> {

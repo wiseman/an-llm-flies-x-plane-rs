@@ -227,13 +227,13 @@ fn airspace_emission_enabled(on_ground: bool, phase: Option<FlightPhase>) -> boo
     if on_ground {
         return false;
     }
-    match phase {
+    !matches!(
+        phase,
         Some(FlightPhase::Preflight)
-        | Some(FlightPhase::TakeoffRoll)
-        | Some(FlightPhase::Rollout)
-        | Some(FlightPhase::TaxiClear) => false,
-        _ => true,
-    }
+            | Some(FlightPhase::TakeoffRoll)
+            | Some(FlightPhase::Rollout)
+            | Some(FlightPhase::TaxiClear)
+    )
 }
 
 /// Open (or reuse) the airspace DuckDB connection, run the query, and
@@ -1305,13 +1305,19 @@ pub fn tool_broadcast_on_radio(ctx: &ToolContext, args: &Map<String, Value>) -> 
 ///
 /// Returned `pullout_ft` is `None` when no pullout was needed, or `Some(d)`
 /// where `d` is the distance of the inserted leg in feet.
+pub struct TaxiLegsPlan {
+    pub legs: Vec<StraightLeg>,
+    pub names: Vec<String>,
+    pub pullout_ft: Option<f64>,
+}
+
 pub fn build_taxi_legs_with_pullout(
     aircraft_pos_ft: crate::types::Vec2,
     aircraft_heading_deg: f64,
     plan_legs: &[taxi_route::TaxiLeg],
     georef: GeoReference,
     on_runway: bool,
-) -> Result<(Vec<StraightLeg>, Vec<String>, Option<f64>), String> {
+) -> Result<TaxiLegsPlan, String> {
     const PULLOUT_THRESHOLD_FT: f64 = 20.0;
     // On a runway, reject pullouts that require more than ~135° of turn:
     // that means the first graph node is behind the aircraft, which on
@@ -1335,12 +1341,12 @@ pub fn build_taxi_legs_with_pullout(
     let mut names: Vec<String> = plan_legs.iter().map(|l| l.taxiway_name.clone()).collect();
 
     let Some(first) = legs_ft.first().copied() else {
-        return Ok((legs_ft, names, None));
+        return Ok(TaxiLegsPlan { legs: legs_ft, names, pullout_ft: None });
     };
     let offset = first.start_ft - aircraft_pos_ft;
     let d_ft = offset.length();
     if d_ft <= PULLOUT_THRESHOLD_FT {
-        return Ok((legs_ft, names, None));
+        return Ok(TaxiLegsPlan { legs: legs_ft, names, pullout_ft: None });
     }
     let pullout_heading_deg = crate::types::vector_to_heading(offset);
     let turn_deg = crate::types::wrap_degrees_180(
@@ -1361,7 +1367,7 @@ pub fn build_taxi_legs_with_pullout(
         },
     );
     names.insert(0, String::new());
-    Ok((legs_ft, names, Some(d_ft)))
+    Ok(TaxiLegsPlan { legs: legs_ft, names, pullout_ft: Some(d_ft) })
 }
 
 pub fn tool_engage_line_up(ctx: &ToolContext, args: &Map<String, Value>) -> String {
@@ -1660,7 +1666,7 @@ pub fn tool_engage_taxi(ctx: &ToolContext, args: &Map<String, Value>) -> String 
         let conn = guard.as_ref().unwrap();
         taxi_route::position_on_runway(conn, &airport, start_lat, start_lon)
     };
-    let (legs_ft, names, pullout_ft) = match build_taxi_legs_with_pullout(
+    let TaxiLegsPlan { legs: legs_ft, names, pullout_ft } = match build_taxi_legs_with_pullout(
         aircraft_pos_ft,
         aircraft_heading_deg,
         &plan.legs,
@@ -1959,7 +1965,7 @@ pub fn tool_engage_park(ctx: &ToolContext, args: &Map<String, Value>) -> String 
         let conn = guard.as_ref().unwrap();
         taxi_route::position_on_runway(conn, &airport, start_lat, start_lon)
     };
-    let (mut legs_ft, mut names, pullout_ft) = match build_taxi_legs_with_pullout(
+    let TaxiLegsPlan { legs: mut legs_ft, mut names, pullout_ft } = match build_taxi_legs_with_pullout(
         aircraft_pos_ft,
         aircraft_heading_deg,
         &plan.legs,

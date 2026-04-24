@@ -24,6 +24,7 @@ impl TECSLite {
     }
 
     /// Returns (pitch_cmd_deg, throttle_cmd).
+    #[allow(clippy::too_many_arguments)]
     pub fn update(
         &mut self,
         phase: FlightPhase,

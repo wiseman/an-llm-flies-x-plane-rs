@@ -119,6 +119,7 @@ impl FlightPhase {
         }
     }
 
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Option<FlightPhase> {
         Some(match s {
             "preflight" => FlightPhase::Preflight,
@@ -181,6 +182,7 @@ pub enum TrafficSide {
 }
 
 impl TrafficSide {
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Option<TrafficSide> {
         match s.to_ascii_lowercase().as_str() {
             "left" => Some(TrafficSide::Left),

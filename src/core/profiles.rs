@@ -547,6 +547,7 @@ pub enum PatternLeg {
 }
 
 impl PatternLeg {
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Option<Self> {
         match s.to_ascii_lowercase().as_str() {
             "crosswind" => Some(Self::Crosswind),
@@ -580,6 +581,7 @@ pub enum PatternClearanceGate {
 }
 
 impl PatternClearanceGate {
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Option<Self> {
         match s.to_ascii_lowercase().as_str() {
             "turn_crosswind" => Some(Self::TurnCrosswind),
@@ -819,9 +821,7 @@ impl PatternFlyProfile {
                         .runway_x_ft
                         .map(|x| x > length_ft - 500.0)
                         .unwrap_or(false);
-                    if near_end && state.gs_kt > 1.0 {
-                        0.75
-                    } else if state.gs_kt > target + 2.0 {
+                    if (near_end && state.gs_kt > 1.0) || state.gs_kt > target + 2.0 {
                         0.75
                     } else if state.gs_kt > target {
                         0.35

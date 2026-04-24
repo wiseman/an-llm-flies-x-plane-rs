@@ -125,12 +125,14 @@ enum EventKind {
 }
 
 fn categorize(raw: &[RawEntry], input: &std::path::Path) -> (Meta, Vec<TimedEvent>) {
-    let mut meta = Meta::default();
-    meta.filename = input
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("transcript")
-        .to_string();
+    let mut meta = Meta {
+        filename: input
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("transcript")
+            .to_string(),
+        ..Default::default()
+    };
 
     let mut events: Vec<TimedEvent> = Vec::new();
     let mut last_ts = String::new();

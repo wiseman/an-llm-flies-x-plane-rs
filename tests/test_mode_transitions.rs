@@ -31,6 +31,7 @@ fn fixtures() -> (
     (config, mode_manager, pattern, route, safe)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn update(
     mm: &ModeManager,
     phase: FlightPhase,

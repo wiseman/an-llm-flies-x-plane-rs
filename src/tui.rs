@@ -2659,12 +2659,14 @@ mod tests {
         // a pending tap. We test classification only — the dismiss happens
         // in the event loop, so here we just check that a Release without
         // prior recording is a no-op as expected.
-        let mut tracker = PttKeyTracker::default();
-        tracker.pending = Some(PendingPtt {
-            key: PttKey::Space,
-            recording: false,
-            last_seen: Instant::now(),
-        });
+        let mut tracker = PttKeyTracker {
+            pending: Some(PendingPtt {
+                key: PttKey::Space,
+                recording: false,
+                last_seen: Instant::now(),
+            }),
+            ..Default::default()
+        };
         let mut buf = String::new();
         let mut cursor = 0;
         let ptt = FakePtt::default();

@@ -266,6 +266,7 @@ impl Conversation {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn run_conversation_loop(
     client: &dyn LlmBackend,
     tool_context: &ToolContext,
@@ -308,6 +309,7 @@ pub fn run_conversation_loop(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn handle_message(
     conv: &mut Conversation,
     client: &dyn LlmBackend,

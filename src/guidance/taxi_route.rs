@@ -853,13 +853,13 @@ pub fn plan(
     }
     impl PartialOrd for Entry {
         fn partial_cmp(&self, o: &Self) -> Option<Ordering> {
-            // Min-heap via reversed comparison.
-            o.dist.partial_cmp(&self.dist)
+            Some(self.cmp(o))
         }
     }
     impl Ord for Entry {
         fn cmp(&self, o: &Self) -> Ordering {
-            self.partial_cmp(o).unwrap_or(Ordering::Equal)
+            // Min-heap via reversed comparison.
+            o.dist.partial_cmp(&self.dist).unwrap_or(Ordering::Equal)
         }
     }
 
@@ -1280,7 +1280,7 @@ mod tests {
         nodes.insert(2, mk(2, 37.0001, -122.0000));
         nodes.insert(3, mk(3, 37.0002, -122.0000));
         nodes.insert(4, mk(4, 37.0003, -122.0000));
-        let edges = vec![
+        let edges = [
             mk_taxiway_edge(1, 2, "B", ""),
             mk_taxiway_edge(2, 3, "B", "departure:12,30"),
             mk_runway_edge(3, 4, "12/30", "departure:12,30"),
