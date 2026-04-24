@@ -144,7 +144,7 @@ impl ModeManager {
                 let runway_course_deg = pattern.runway_frame.runway.course_deg;
                 let side_sign = if pattern.downwind_y_ft < 0.0 { -1.0 } else { 1.0 };
                 let crosswind_course_deg =
-                    ((runway_course_deg + side_sign * 90.0).rem_euclid(360.0));
+                    (runway_course_deg + side_sign * 90.0).rem_euclid(360.0);
                 let heading_error_deg =
                     wrap_degrees_180(state.track_deg - crosswind_course_deg).abs();
                 let heading_captured = heading_error_deg <= 15.0;
