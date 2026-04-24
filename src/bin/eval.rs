@@ -247,14 +247,7 @@ fn main() -> Result<()> {
         result.tool_stats.total, result.tool_stats.failed,
     );
     if !result.tool_stats.per_tool.is_empty() {
-        let breakdown = result
-            .tool_stats
-            .per_tool
-            .iter()
-            .map(|(n, s)| format!("{}={}/{}", n, s.failures, s.calls))
-            .collect::<Vec<_>>()
-            .join(" ");
-        println!("tool_breakdown:  {}", breakdown);
+        println!("tool_breakdown:  {}", result.tool_stats.format_breakdown());
     }
     if let Some(p) = &result.summary_json {
         println!("summary:         {}", p.display());

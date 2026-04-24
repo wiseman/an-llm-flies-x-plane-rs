@@ -800,13 +800,10 @@ pub fn run_eval_core(
         ),
     );
     if !tool_stats.per_tool.is_empty() {
-        let breakdown = tool_stats
-            .per_tool
-            .iter()
-            .map(|(name, s)| format!("{}={}/{}", name, s.failures, s.calls))
-            .collect::<Vec<_>>()
-            .join(" ");
-        bus.push_log_kind(LogKind::System, format!("tool breakdown: {}", breakdown));
+        bus.push_log_kind(
+            LogKind::System,
+            format!("tool breakdown: {}", tool_stats.format_breakdown()),
+        );
     }
 
     // --- write summary JSON ---

@@ -83,6 +83,19 @@ pub struct ToolCountersSnapshot {
     pub per_tool: Vec<(String, ToolStat)>,
 }
 
+impl ToolCountersSnapshot {
+    /// Render `per_tool` as a single-line `name=failures/calls ...`
+    /// string for the CLI + bus log. Empty string when no tools were
+    /// called, so callers can skip the prefix.
+    pub fn format_breakdown(&self) -> String {
+        self.per_tool
+            .iter()
+            .map(|(name, s)| format!("{}={}/{}", name, s.failures, s.calls))
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+}
+
 impl ToolCounters {
     pub fn record(&self, name: &str, ok: bool) {
         self.total.fetch_add(1, Ordering::Relaxed);
