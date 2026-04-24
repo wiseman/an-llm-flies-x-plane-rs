@@ -3,6 +3,7 @@ pub mod config;
 pub mod control;
 pub mod core;
 pub mod data;
+pub mod eval_runner;
 pub mod guidance;
 pub mod live_runner;
 pub mod llm;

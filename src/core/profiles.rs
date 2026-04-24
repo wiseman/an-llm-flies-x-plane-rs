@@ -1475,7 +1475,22 @@ impl TaxiProfile {
             return;
         };
         let dist_to_end = (state.position_ft - current.end_ft).length();
-        if dist_to_end < self.leg_advance_distance_ft {
+        // Also advance if past the endpoint along-track: a sideways
+        // overshoot can leave Euclidean distance > threshold even
+        // though the aircraft has crossed the leg end.
+        let to_end = current.end_ft - current.start_ft;
+        let leg_len = to_end.length();
+        let passed = if leg_len > 1.0 {
+            let inv = 1.0 / leg_len;
+            let dir_x = to_end.x * inv;
+            let dir_y = to_end.y * inv;
+            let delta = state.position_ft - current.end_ft;
+            let along = delta.x * dir_x + delta.y * dir_y;
+            along > 0.0
+        } else {
+            false
+        };
+        if dist_to_end < self.leg_advance_distance_ft || passed {
             // Always increment. If that pushes us past the last leg, the
             // contribute path checks for a pose target; absent one, it
             // sets `finished`. This split lets the pose phase take over

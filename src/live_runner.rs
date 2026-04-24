@@ -52,6 +52,44 @@ impl Clock for FakeClock {
     }
 }
 
+/// Sim clock for the eval harness. Unlike `FakeClock`, this is
+/// `Clone`able and advances atomically so the control-loop thread and
+/// the heartbeat pump can share the same time source.
+#[derive(Clone)]
+pub struct SimClock {
+    now_ms: Arc<AtomicU64>,
+}
+
+impl Default for SimClock {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl SimClock {
+    pub fn new() -> Self {
+        Self { now_ms: Arc::new(AtomicU64::new(0)) }
+    }
+
+    pub fn advance_secs(&self, dt: f64) {
+        if dt <= 0.0 {
+            return;
+        }
+        let ms = (dt * 1000.0) as u64;
+        self.now_ms.fetch_add(ms, Ordering::Relaxed);
+    }
+
+    pub fn seconds(&self) -> f64 {
+        self.now_ms.load(Ordering::Relaxed) as f64 / 1000.0
+    }
+}
+
+impl Clock for SimClock {
+    fn now_secs_f64(&self) -> f64 {
+        self.seconds()
+    }
+}
+
 #[derive(Default)]
 struct HeartbeatState {
     last_user_input_s: f64,
@@ -588,6 +626,8 @@ pub fn run_live_xplane(base_config: ConfigBundle, runtime: LiveRunConfig) -> Res
         bus: Some(bus.clone()),
         runway_conn: shared_duck_conn.clone(),
         heartbeat_pump: heartbeat_pump.clone(),
+        mission_complete_tx: None,
+        turn_counter: None,
     });
 
     let llm_stop = Arc::new(AtomicBool::new(false));

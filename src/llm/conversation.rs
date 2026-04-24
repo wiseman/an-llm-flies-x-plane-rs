@@ -290,6 +290,11 @@ pub fn run_conversation_loop(
             Err(crossbeam_channel::RecvTimeoutError::Timeout) => continue,
             Err(crossbeam_channel::RecvTimeoutError::Disconnected) => return,
         };
+        // Gate llm_busy for the whole handle_message window (tool
+        // dispatch + inner tool-call loop), not just the HTTP round-
+        // trip — the eval harness's SimClock only advances while idle,
+        // so `sleep(N)` stays anchored to sim time.
+        let _busy = LlmBusyGuard::new(bus);
         if let Err(e) = handle_message(
             &mut conv,
             client,
@@ -299,6 +304,7 @@ pub fn run_conversation_loop(
             total_wall_budget_s,
             reasoning_effort,
             bus,
+            &stop,
         ) {
             emit_log_kind(
                 bus,
@@ -319,6 +325,7 @@ fn handle_message(
     total_wall_budget_s: u64,
     reasoning_effort: Option<ReasoningEffort>,
     bus: Option<&SimBus>,
+    stop: &AtomicBool,
 ) -> anyhow::Result<()> {
     match &message.source {
         IncomingSource::Operator => conv.append_operator_message(&message.text),
@@ -345,10 +352,13 @@ fn handle_message(
     }
 
     let deadline = Instant::now() + Duration::from_secs(total_wall_budget_s);
-    let tools = tool_schemas();
+    let tools = tool_schemas(tool_context.mission_complete_tx.is_some());
     loop {
         if Instant::now() >= deadline {
             emit_log_kind(bus, LogKind::Error, "wall-clock budget exceeded; ending turn");
+            return Ok(());
+        }
+        if stop.load(Ordering::Acquire) {
             return Ok(());
         }
         let profiles = tool_context.pilot.lock().list_profile_names().join(", ");
@@ -356,16 +366,16 @@ fn handle_message(
         let cache_anchor_idx = conv.cache_anchor_idx();
         let remaining = deadline.saturating_duration_since(Instant::now()).as_secs();
         let timeout = per_request_timeout_s.min(remaining.max(1));
-        let response = {
-            let _busy = LlmBusyGuard::new(bus);
-            client.create_response(&LlmRequest {
-                messages: &messages,
-                tools: &tools,
-                reasoning_effort,
-                timeout_secs: timeout,
-                cache_anchor_idx,
-            })?
-        };
+        if let Some(counter) = tool_context.turn_counter.as_ref() {
+            counter.fetch_add(1, Ordering::Relaxed);
+        }
+        let response = client.create_response(&LlmRequest {
+            messages: &messages,
+            tools: &tools,
+            reasoning_effort,
+            timeout_secs: timeout,
+            cache_anchor_idx,
+        })?;
         log_usage(&response, client, bus);
         emit_assistant_text(&response.output, bus);
         conv.append_response(&response.output);
@@ -396,7 +406,9 @@ fn handle_message(
                 continue;
             }
             let result = dispatch_tool(&name, &arguments, tool_context);
-            if name == "sleep" {
+            // Both tools end the current turn — sleep yields to
+            // profiles, mission_complete signals eval shutdown.
+            if name == "sleep" || name == "mission_complete" {
                 slept = true;
             }
             emit_log_kind(

@@ -7,14 +7,17 @@
 //! spatial extension loaded so the agent can do real geospatial lookups.
 
 use std::path::PathBuf;
+use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, Mutex};
 
 use anyhow::{anyhow, Result};
+use crossbeam_channel::Sender;
 use parking_lot::Mutex as PLMutex;
 use serde_json::{json, Map, Value};
 
 use crate::bus::SimBus;
 use crate::config::ConfigBundle;
+use crate::eval_runner::{try_send_outcome, MissionOutcome};
 use crate::llm::backend::ToolDef;
 use crate::core::mission_manager::{PilotCore, StatusSnapshot};
 use crate::core::profiles::{
@@ -60,6 +63,15 @@ pub struct ToolContext {
     /// Handle into the live heartbeat pump. Only `sleep(suppress_idle_heartbeat_s=...)`
     /// needs it today. `None` when heartbeats are disabled or in tests.
     pub heartbeat_pump: Option<Arc<crate::live_runner::HeartbeatPump>>,
+    /// Eval harness hook: when set, the `mission_complete` tool is
+    /// registered in the schema list + dispatch table and, when called,
+    /// ships a `MissionOutcome` down this channel. `None` in the live
+    /// X-Plane runtime — the tool is then invisible to the LLM.
+    pub mission_complete_tx: Option<Sender<MissionOutcome>>,
+    /// Eval harness hook: incremented once per `create_response` call in
+    /// `run_conversation_loop`. `None` outside the eval harness — the
+    /// conversation loop is expected to no-op when absent.
+    pub turn_counter: Option<Arc<AtomicUsize>>,
 }
 
 impl ToolContext {
@@ -76,6 +88,8 @@ impl ToolContext {
             bus: None,
             runway_conn: Arc::new(Mutex::new(None)),
             heartbeat_pump: None,
+            mission_complete_tx: None,
+            turn_counter: None,
         }
     }
 }
@@ -2406,6 +2420,25 @@ fn duckdb_value_to_str(value: &duckdb::types::Value) -> String {
     }
 }
 
+pub fn tool_mission_complete(ctx: &ToolContext, args: &Map<String, Value>) -> String {
+    let Some(tx) = ctx.mission_complete_tx.as_ref() else {
+        return "error: mission_complete is only available in the eval harness".to_string();
+    };
+    let success = match arg_bool(args, "success") {
+        Ok(v) => v,
+        Err(e) => return format!("error: {}", e),
+    };
+    let summary = match arg_str(args, "summary") {
+        Ok(s) => s.to_string(),
+        Err(e) => return format!("error: {}", e),
+    };
+    try_send_outcome(tx, MissionOutcome::from_llm(success, summary.clone()));
+    format!(
+        "mission_complete recorded (success={}). The harness will shut down after the current turn.",
+        success,
+    )
+}
+
 // ---------- dispatch ----------
 
 pub fn dispatch_tool(name: &str, arguments: &str, ctx: &ToolContext) -> String {
@@ -2450,13 +2483,18 @@ pub fn dispatch_tool(name: &str, arguments: &str, ctx: &ToolContext) -> String {
         "choose_runway_exit" => tool_choose_runway_exit(ctx, &map),
         "list_runway_exits" => tool_list_runway_exits(ctx, &map),
         "engage_line_up" => tool_engage_line_up(ctx, &map),
+        "mission_complete" => tool_mission_complete(ctx, &map),
         other => format!("error: unknown tool {:?}", other),
     }
 }
 
 // ---------- tool schemas ----------
 
-pub fn tool_schemas() -> Vec<ToolDef> {
+/// Build the list of tool schemas advertised to the LLM. Set
+/// `include_mission_complete=true` only when running under the eval
+/// harness — the live X-Plane runtime should not advertise it, since
+/// there's no outcome channel to receive the result on.
+pub fn tool_schemas(include_mission_complete: bool) -> Vec<ToolDef> {
     fn schema(name: &str, description: &str, properties: Value, required: &[&str]) -> ToolDef {
         ToolDef {
             name: name.to_string(),
@@ -2469,7 +2507,7 @@ pub fn tool_schemas() -> Vec<ToolDef> {
             }),
         }
     }
-    vec![
+    let mut schemas = vec![
         schema(
             "get_status",
             "Return a JSON snapshot of aircraft state, phase, and active profiles.",
@@ -2813,7 +2851,25 @@ pub fn tool_schemas() -> Vec<ToolDef> {
             }),
             &["airport_ident", "runway_ident"],
         ),
-    ]
+    ];
+    if include_mission_complete {
+        schemas.push(schema(
+            "mission_complete",
+            "Eval-harness only: report that you have finished the assigned mission. The harness records the outcome and shuts the run down after this turn. Call this exactly once, when you believe the mission (as given in the initial briefing) is complete — success=true if you accomplished it, false if you are giving up or believe it cannot be completed. Do NOT call this in the middle of a flight; use `sleep` to yield between actions instead.",
+            json!({
+                "success": {
+                    "type": "boolean",
+                    "description": "true if the assigned mission was accomplished, false if you are giving up."
+                },
+                "summary": {
+                    "type": "string",
+                    "description": "One- or two-sentence recap of what you did and what state the aircraft is in."
+                }
+            }),
+            &["success", "summary"],
+        ));
+    }
+    schemas
 }
 
 const ENGAGE_LINE_UP_DESCRIPTION: &str = "Cross the hold-short onto the \
