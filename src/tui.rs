@@ -115,7 +115,7 @@ pub fn format_snapshot_display(snapshot: Option<&StatusSnapshot>) -> String {
     let tgt_str = |v: Option<f64>, width: usize, unit: &str| -> String {
         match v {
             Some(val) => format!("{}{}", fmt_right(&format!("{:.0}", val), width), fmt_left(unit, 5)),
-            None => format!("{}", fmt_right("—", width)),
+            None => fmt_right("—", width).to_string(),
         }
     };
 
@@ -541,9 +541,7 @@ pub fn run_tui(
                         );
                     }
                     KeyCode::Left => {
-                        if input_cursor > 0 {
-                            input_cursor -= 1;
-                        }
+                        input_cursor = input_cursor.saturating_sub(1);
                     }
                     KeyCode::Right => {
                         let total = input_buffer.chars().count();
@@ -1099,9 +1097,7 @@ fn row_start_char(row: usize, width: u16) -> usize {
 /// total char count of the buffer.
 fn row_end_char(row: usize, width: u16, total: usize) -> usize {
     let w = (width as usize).max(1);
-    ((row + 1) * w)
-        .checked_sub(PROMPT_COLS)
-        .unwrap_or(0)
+    ((row + 1) * w).saturating_sub(PROMPT_COLS)
         .min(total)
 }
 

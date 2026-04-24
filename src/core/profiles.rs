@@ -1446,7 +1446,7 @@ impl TaxiProfile {
             if n.is_empty() || n.starts_with('(') {
                 continue;
             }
-            if out.last().map_or(true, |last| *last != n) {
+            if out.last().is_none_or(|last| *last != n) {
                 out.push(n);
             }
         }

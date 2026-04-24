@@ -99,7 +99,7 @@ impl ModeManager {
                 if !state.on_ground && state.ias_kt >= self.config.performance.vr_kt {
                     return FlightPhase::InitialClimb;
                 }
-                return FlightPhase::TakeoffRoll;
+                FlightPhase::TakeoffRoll
             }
             FlightPhase::TakeoffRoll => {
                 // Airborne bailout: if the wheels are off the ground at or
@@ -114,13 +114,13 @@ impl ModeManager {
                 {
                     return FlightPhase::Rotate;
                 }
-                return phase;
+                phase
             }
             FlightPhase::Rotate => {
                 if !state.on_ground && state.alt_agl_ft >= 20.0 && state.vs_fpm > 100.0 {
                     return FlightPhase::InitialClimb;
                 }
-                return phase;
+                phase
             }
             FlightPhase::InitialClimb => {
                 if stay_in_pattern {
@@ -136,7 +136,7 @@ impl ModeManager {
                 if state.alt_agl_ft >= 400.0 && state.vs_fpm > 250.0 {
                     return FlightPhase::EnrouteClimb;
                 }
-                return phase;
+                phase
             }
             FlightPhase::Crosswind => {
                 let Some(y) = state.runway_y_ft else { return phase };
@@ -144,7 +144,7 @@ impl ModeManager {
                 let runway_course_deg = pattern.runway_frame.runway.course_deg;
                 let side_sign = if pattern.downwind_y_ft < 0.0 { -1.0 } else { 1.0 };
                 let crosswind_course_deg =
-                    ((runway_course_deg + side_sign * 90.0).rem_euclid(360.0)) as f64;
+                    ((runway_course_deg + side_sign * 90.0).rem_euclid(360.0));
                 let heading_error_deg =
                     wrap_degrees_180(state.track_deg - crosswind_course_deg).abs();
                 let heading_captured = heading_error_deg <= 15.0;
@@ -153,13 +153,13 @@ impl ModeManager {
                 if triggers.turn_downwind || (clearances.turn_downwind && auto_ready) {
                     return FlightPhase::Downwind;
                 }
-                return phase;
+                phase
             }
             FlightPhase::EnrouteClimb => {
                 if state.alt_msl_ft >= self.config.cruise_altitude_ft() - 150.0 {
                     return FlightPhase::Cruise;
                 }
-                return phase;
+                phase
             }
             FlightPhase::Cruise => {
                 if let Some(wp) = route_manager.active_waypoint() {
@@ -167,7 +167,7 @@ impl ModeManager {
                         return FlightPhase::Descent;
                     }
                 }
-                return phase;
+                phase
             }
             FlightPhase::Descent => {
                 if let Some(wp) = route_manager.active_waypoint() {
@@ -178,7 +178,7 @@ impl ModeManager {
                         return FlightPhase::PatternEntry;
                     }
                 }
-                return phase;
+                phase
             }
             FlightPhase::PatternEntry => {
                 if let (Some(rx), Some(ry)) = (state.runway_x_ft, state.runway_y_ft) {
@@ -194,14 +194,14 @@ impl ModeManager {
                         return FlightPhase::Downwind;
                     }
                 }
-                return phase;
+                phase
             }
             FlightPhase::Downwind => {
                 let auto_ready = self.downwind_base_turn_ready(state, pattern);
                 if triggers.turn_base || (clearances.turn_base && auto_ready) {
                     return FlightPhase::Base;
                 }
-                return phase;
+                phase
             }
             FlightPhase::Base => {
                 let on_final = pattern.is_established_on_final(
@@ -219,7 +219,7 @@ impl ModeManager {
                 if triggers.turn_final || (clearances.turn_final && auto_ready) {
                     return FlightPhase::Final;
                 }
-                return phase;
+                phase
             }
             FlightPhase::Final | FlightPhase::Roundout | FlightPhase::Flare => {
                 if state.on_ground {
@@ -234,15 +234,15 @@ impl ModeManager {
                         if state.alt_agl_ft <= self.config.flare.roundout_height_ft {
                             return FlightPhase::Roundout;
                         }
-                        return phase;
+                        phase
                     }
                     FlightPhase::Roundout => {
                         if state.alt_agl_ft <= self.config.flare.flare_start_ft {
                             return FlightPhase::Flare;
                         }
-                        return phase;
+                        phase
                     }
-                    FlightPhase::Flare => return phase,
+                    FlightPhase::Flare => phase,
                     _ => unreachable!(),
                 }
             }
@@ -278,7 +278,7 @@ impl ModeManager {
                 if state.gs_kt <= 1.0 && past_end {
                     return FlightPhase::TaxiClear;
                 }
-                return phase;
+                phase
             }
             FlightPhase::RunwayExit => {
                 // Full stop = clear of runway + brakes down. Alternately,
@@ -292,10 +292,10 @@ impl ModeManager {
                 if lateral_off > RUNWAY_CLEAR_OFFSET_FT {
                     return FlightPhase::TaxiClear;
                 }
-                return phase;
+                phase
             }
-            FlightPhase::TaxiClear => return phase,
-            FlightPhase::GoAround => return phase,
+            FlightPhase::TaxiClear => phase,
+            FlightPhase::GoAround => phase,
         }
     }
 

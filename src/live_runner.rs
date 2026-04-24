@@ -33,6 +33,12 @@ impl Clock for RealClock {
 pub struct FakeClock {
     pub now_ms: AtomicU64,
 }
+impl Default for FakeClock {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl FakeClock {
     pub fn new() -> Self { Self { now_ms: AtomicU64::new(0) } }
     pub fn advance_secs(&self, dt: f64) {

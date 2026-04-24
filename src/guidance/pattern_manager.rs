@@ -52,7 +52,7 @@ impl PatternGeometry {
     }
 
     pub fn base_turn_ready(&self, runway_x_ft: Option<f64>) -> bool {
-        runway_x_ft.map_or(false, |x| x <= self.base_turn_x_ft)
+        runway_x_ft.is_some_and(|x| x <= self.base_turn_x_ft)
     }
 
     pub fn is_established_on_final(

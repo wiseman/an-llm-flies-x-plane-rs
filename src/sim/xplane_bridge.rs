@@ -596,9 +596,6 @@ fn set_stream_read_timeout(
     stream: &mut MaybeTlsStream<std::net::TcpStream>,
     timeout: Option<std::time::Duration>,
 ) -> Result<()> {
-    match stream {
-        MaybeTlsStream::Plain(s) => s.set_read_timeout(timeout)?,
-        _ => {}
-    }
+    if let MaybeTlsStream::Plain(s) = stream { s.set_read_timeout(timeout)? }
     Ok(())
 }
