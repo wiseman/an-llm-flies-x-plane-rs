@@ -242,6 +242,20 @@ fn main() -> Result<()> {
     );
     println!("crashed:         {}", result.crashed);
     println!("max_alt_agl_ft:  {:.0}", result.max_alt_agl_ft);
+    println!(
+        "tool_calls:      {} ({} failed)",
+        result.tool_stats.total, result.tool_stats.failed,
+    );
+    if !result.tool_stats.per_tool.is_empty() {
+        let breakdown = result
+            .tool_stats
+            .per_tool
+            .iter()
+            .map(|(n, s)| format!("{}={}/{}", n, s.failures, s.calls))
+            .collect::<Vec<_>>()
+            .join(" ");
+        println!("tool_breakdown:  {}", breakdown);
+    }
     if let Some(p) = &result.summary_json {
         println!("summary:         {}", p.display());
     }

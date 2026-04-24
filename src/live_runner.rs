@@ -628,6 +628,7 @@ pub fn run_live_xplane(base_config: ConfigBundle, runtime: LiveRunConfig) -> Res
         heartbeat_pump: heartbeat_pump.clone(),
         mission_complete_tx: None,
         turn_counter: None,
+        tool_counters: None,
     });
 
     let llm_stop = Arc::new(AtomicBool::new(false));

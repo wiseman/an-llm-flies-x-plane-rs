@@ -406,6 +406,9 @@ fn handle_message(
                 continue;
             }
             let result = dispatch_tool(&name, &arguments, tool_context);
+            if let Some(counters) = tool_context.tool_counters.as_ref() {
+                counters.record(&name, result.ok);
+            }
             // Both tools end the current turn — sleep yields to
             // profiles, mission_complete signals eval shutdown.
             if name == "sleep" || name == "mission_complete" {
@@ -414,9 +417,9 @@ fn handle_message(
             emit_log_kind(
                 bus,
                 LogKind::ToolCall,
-                &format!("tool {} -> {}", name, result),
+                &format!("tool {} -> {}", name, result.output),
             );
-            conv.append_tool_result(&call_id, &result)?;
+            conv.append_tool_result(&call_id, &result.output)?;
         }
         if slept {
             return Ok(());

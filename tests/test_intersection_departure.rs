@@ -183,7 +183,8 @@ fn engage_line_up_at_intersection_uses_on_runway_point_not_threshold() {
         })
         .to_string(),
         &ctx,
-    );
+    )
+    .output;
     assert!(
         r.starts_with("engaged line_up KEMT runway 19 at C"),
         "got: {r}"
@@ -235,7 +236,8 @@ fn engage_line_up_rejects_when_aircraft_is_far_from_entry_point() {
         })
         .to_string(),
         &ctx,
-    );
+    )
+    .output;
     assert!(r.starts_with("error:"), "expected error, got: {r}");
     assert!(
         r.contains("engage_taxi") && r.contains("intersection"),

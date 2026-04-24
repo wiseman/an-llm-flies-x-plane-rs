@@ -70,8 +70,11 @@ fn make_ctx(bridge: Option<Arc<dyn ToolBridge>>, cache_dir: Option<PathBuf>) -> 
 }
 
 /// Test helper: invoke `dispatch_tool` with a named tool and JSON args.
+/// Returns the raw output string so the existing substring-based
+/// assertions keep working; tests that want the structural ok flag can
+/// call `dispatch_tool` directly.
 fn dispatch(name: &str, args: serde_json::Value, ctx: &ToolContext) -> String {
-    dispatch_tool(name, &args.to_string(), ctx)
+    dispatch_tool(name, &args.to_string(), ctx).output
 }
 
 /// Stage a `StatusSnapshot` on the pilot's `latest_snapshot` with
@@ -188,15 +191,15 @@ fn build_fake_parquet(dir: &std::path::Path, extra_blocks: &[String]) -> PathBuf
 fn unknown_tool_returns_error() {
     let ctx = make_ctx(None, None);
     let r = dispatch_tool("not_a_tool", "{}", &ctx);
-    assert!(r.starts_with("error:"));
-    assert!(r.contains("unknown tool"));
+    assert!(!r.ok);
+    assert!(r.output.contains("unknown tool"));
 }
 
 #[test]
 fn invalid_arguments_json_returns_error() {
     let ctx = make_ctx(None, None);
     let r = dispatch_tool("engage_heading_hold", "not-json", &ctx);
-    assert!(r.starts_with("error:"));
+    assert!(!r.ok);
 }
 
 #[test]

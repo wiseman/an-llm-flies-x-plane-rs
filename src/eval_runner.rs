@@ -28,7 +28,7 @@ use crate::llm::backend::{LlmBackend, LlmProvider, ReasoningEffort};
 use crate::llm::conversation::{run_conversation_loop, IncomingMessage, PilotMode};
 use crate::llm::gemini::GeminiBackend;
 use crate::llm::openai::OpenAiBackend;
-use crate::llm::tools::{ToolBridge, ToolContext};
+use crate::llm::tools::{ToolBridge, ToolContext, ToolCounters, ToolCountersSnapshot};
 use crate::sim::datarefs::{HAS_CRASHED, PARKING_BRAKE_RATIO};
 use crate::sim::simple_bridge::SimpleToolBridge;
 use crate::sim::simple_dynamics::{DynamicsState, SimpleAircraftModel};
@@ -191,6 +191,7 @@ pub struct EvalResult {
     pub crashed: bool,
     pub max_alt_agl_ft: f64,
     pub final_fuel_kg: f64,
+    pub tool_stats: ToolCountersSnapshot,
     pub log_file: Option<PathBuf>,
     pub transcript_file: Option<PathBuf>,
     pub summary_json: Option<PathBuf>,
@@ -679,6 +680,7 @@ pub fn run_eval_core(
     );
 
     let turn_counter = Arc::new(AtomicUsize::new(0));
+    let tool_counters = Arc::new(ToolCounters::default());
 
     let tool_ctx = Arc::new(ToolContext {
         pilot: pilot_arc.clone(),
@@ -691,6 +693,7 @@ pub fn run_eval_core(
         heartbeat_pump: Some(pump.clone()),
         mission_complete_tx: Some(outcome_tx.clone()),
         turn_counter: Some(turn_counter.clone()),
+        tool_counters: Some(tool_counters.clone()),
     });
 
     // --- deliver startup messages ---
@@ -778,14 +781,17 @@ pub fn run_eval_core(
     let sim_duration_s = dynamics.lock().time_s;
     let turn_count = turn_counter.load(Ordering::Relaxed);
     let token_totals = cache_stats.as_ref().map(|s| s.snapshot()).unwrap_or_default();
+    let tool_stats = tool_counters.snapshot();
 
     bus.push_log_kind(
         LogKind::System,
         format!(
-            "eval finished: {:?} success={} turns={} tokens(in={} cached={} out={}) sim={:.1}s wall={:.1}s",
+            "eval finished: {:?} success={} turns={} tools={}/{} (failed/total) tokens(in={} cached={} out={}) sim={:.1}s wall={:.1}s",
             outcome.source,
             outcome.success,
             turn_count,
+            tool_stats.failed,
+            tool_stats.total,
             token_totals.total_input_tokens,
             token_totals.total_cached_tokens,
             token_totals.total_output_tokens,
@@ -793,8 +799,27 @@ pub fn run_eval_core(
             wall_duration_s,
         ),
     );
+    if !tool_stats.per_tool.is_empty() {
+        let breakdown = tool_stats
+            .per_tool
+            .iter()
+            .map(|(name, s)| format!("{}={}/{}", name, s.failures, s.calls))
+            .collect::<Vec<_>>()
+            .join(" ");
+        bus.push_log_kind(LogKind::System, format!("tool breakdown: {}", breakdown));
+    }
 
     // --- write summary JSON ---
+    let tool_breakdown_json: serde_json::Map<String, serde_json::Value> = tool_stats
+        .per_tool
+        .iter()
+        .map(|(name, s)| {
+            (
+                name.clone(),
+                serde_json::json!({ "calls": s.calls, "failures": s.failures }),
+            )
+        })
+        .collect();
     let summary = serde_json::json!({
         "session_stem": cfg.session_stem,
         "airport": cfg.airport,
@@ -817,6 +842,9 @@ pub fn run_eval_core(
         "crashed": crashed,
         "max_alt_agl_ft": max_alt_agl_ft,
         "final_fuel_kg": final_fuel_kg,
+        "tool_calls": tool_stats.total,
+        "tool_failures": tool_stats.failed,
+        "tool_breakdown": tool_breakdown_json,
     });
     std::fs::write(&summary_path, serde_json::to_string_pretty(&summary)?)
         .with_context(|| format!("writing {}", summary_path.display()))?;
@@ -835,6 +863,7 @@ pub fn run_eval_core(
         crashed,
         max_alt_agl_ft,
         final_fuel_kg,
+        tool_stats,
         log_file: Some(log_path),
         transcript_file: Some(transcript_path),
         summary_json: Some(summary_path),

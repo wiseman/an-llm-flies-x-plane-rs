@@ -324,3 +324,49 @@ fn sim_budget_triggers_timeout_when_llm_idle() {
     );
     assert!(result.sim_duration_s >= 5.0);
 }
+
+#[test]
+fn tool_failures_are_counted_in_eval_result() {
+    // Script a mix: one bad call (unknown tool) + one good call
+    // (get_status) + mission_complete. Counters should record 3 total
+    // calls, 1 failure, with a breakdown per tool name.
+    let tmp = TempDir::new().unwrap();
+    let script = vec![
+        tool_call("not_a_real_tool", json!({}), "call_bad_1"),
+        tool_call("get_status", json!({}), "call_good_1"),
+        tool_call(
+            "mission_complete",
+            json!({"success": true, "summary": "done"}),
+            "call_mc_1",
+        ),
+    ];
+    let backend = Arc::new(StubClient::new(script));
+    let cfg = make_eval_config(&tmp, "eval-stub-tool-failures");
+
+    let result = run_eval_core(
+        load_default_config_bundle(),
+        cfg,
+        kwhp_resolved(),
+        backend as Arc<dyn LlmBackend>,
+    )
+    .expect("run_eval_core should succeed");
+
+    assert_eq!(result.tool_stats.total, 3, "three tools called");
+    assert_eq!(result.tool_stats.failed, 1, "one tool failed");
+    let bad = result
+        .tool_stats
+        .per_tool
+        .iter()
+        .find(|(n, _)| n == "not_a_real_tool")
+        .expect("bad tool recorded");
+    assert_eq!(bad.1.calls, 1);
+    assert_eq!(bad.1.failures, 1);
+    let good = result
+        .tool_stats
+        .per_tool
+        .iter()
+        .find(|(n, _)| n == "get_status")
+        .expect("good tool recorded");
+    assert_eq!(good.1.calls, 1);
+    assert_eq!(good.1.failures, 0);
+}

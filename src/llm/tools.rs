@@ -6,8 +6,9 @@
 //! (radio, parking brake, flaps). The SQL query tool uses DuckDB with the
 //! spatial extension loaded so the agent can do real geospatial lookups.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{anyhow, Result};
@@ -39,6 +40,74 @@ use crate::sim::xplane_bridge::{geodetic_offset_ft, GeoReference};
 use crate::types::{heading_to_vector, FlightPhase, Runway, StraightLeg, TrafficSide, Vec2};
 
 pub const SQL_QUERY_MAX_ROWS: usize = 50;
+
+/// Prefix every tool handler uses for error returns. Checked at the
+/// dispatch boundary (one place) to derive `ToolResult.ok`.
+pub const TOOL_ERROR_PREFIX: &str = "error:";
+
+/// Structured return of `dispatch_tool`. `output` is the exact string
+/// handed back to the LLM; `ok` is the structural success flag the
+/// harness and counters use without substring-matching.
+#[derive(Debug, Clone)]
+pub struct ToolResult {
+    pub output: String,
+    pub ok: bool,
+}
+
+impl ToolResult {
+    pub fn from_output(output: String) -> Self {
+        let ok = !output.starts_with(TOOL_ERROR_PREFIX);
+        Self { output, ok }
+    }
+}
+
+/// Per-tool + aggregate counters. Handed to `ToolContext` via an
+/// `Arc` so the conversation loop and the eval harness share it.
+#[derive(Debug, Default)]
+pub struct ToolCounters {
+    total: AtomicUsize,
+    failed: AtomicUsize,
+    per_tool: PLMutex<HashMap<String, ToolStat>>,
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct ToolStat {
+    pub calls: usize,
+    pub failures: usize,
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct ToolCountersSnapshot {
+    pub total: usize,
+    pub failed: usize,
+    pub per_tool: Vec<(String, ToolStat)>,
+}
+
+impl ToolCounters {
+    pub fn record(&self, name: &str, ok: bool) {
+        self.total.fetch_add(1, Ordering::Relaxed);
+        if !ok {
+            self.failed.fetch_add(1, Ordering::Relaxed);
+        }
+        let mut map = self.per_tool.lock();
+        let entry = map.entry(name.to_string()).or_default();
+        entry.calls += 1;
+        if !ok {
+            entry.failures += 1;
+        }
+    }
+
+    pub fn snapshot(&self) -> ToolCountersSnapshot {
+        let per_tool_map = self.per_tool.lock().clone();
+        let mut per_tool: Vec<(String, ToolStat)> = per_tool_map.into_iter().collect();
+        per_tool.sort_by(|a, b| b.1.calls.cmp(&a.1.calls).then_with(|| a.0.cmp(&b.0)));
+        ToolCountersSnapshot {
+            total: self.total.load(Ordering::Relaxed),
+            failed: self.failed.load(Ordering::Relaxed),
+            per_tool,
+        }
+    }
+}
 
 /// Write-capable view over the bridge. The real `XPlaneWebBridge` is one
 /// implementation; tests use a fake that records writes. The abstraction
@@ -72,6 +141,9 @@ pub struct ToolContext {
     /// `run_conversation_loop`. `None` outside the eval harness — the
     /// conversation loop is expected to no-op when absent.
     pub turn_counter: Option<Arc<AtomicUsize>>,
+    /// Per-tool call / failure counters, incremented by the conversation
+    /// loop when a tool returns. `None` outside the eval harness.
+    pub tool_counters: Option<Arc<ToolCounters>>,
 }
 
 impl ToolContext {
@@ -90,6 +162,7 @@ impl ToolContext {
             heartbeat_pump: None,
             mission_complete_tx: None,
             turn_counter: None,
+            tool_counters: None,
         }
     }
 }
@@ -2441,19 +2514,21 @@ pub fn tool_mission_complete(ctx: &ToolContext, args: &Map<String, Value>) -> St
 
 // ---------- dispatch ----------
 
-pub fn dispatch_tool(name: &str, arguments: &str, ctx: &ToolContext) -> String {
+pub fn dispatch_tool(name: &str, arguments: &str, ctx: &ToolContext) -> ToolResult {
     if name.is_empty() {
-        return "error: tool call missing name".to_string();
+        return ToolResult::from_output("error: tool call missing name".to_string());
     }
     let args_json = if arguments.is_empty() { "{}" } else { arguments };
     let args: Value = match serde_json::from_str(args_json) {
         Ok(v) => v,
-        Err(e) => return format!("error: invalid arguments JSON: {}", e),
+        Err(e) => {
+            return ToolResult::from_output(format!("error: invalid arguments JSON: {}", e));
+        }
     };
     let Value::Object(map) = args else {
-        return "error: arguments must be an object".to_string();
+        return ToolResult::from_output("error: arguments must be an object".to_string());
     };
-    match name {
+    let output = match name {
         "get_status" => tool_get_status(ctx, &map),
         "sleep" => tool_sleep(ctx, &map),
         "engage_heading_hold" => tool_engage_heading_hold(ctx, &map),
@@ -2485,7 +2560,8 @@ pub fn dispatch_tool(name: &str, arguments: &str, ctx: &ToolContext) -> String {
         "engage_line_up" => tool_engage_line_up(ctx, &map),
         "mission_complete" => tool_mission_complete(ctx, &map),
         other => format!("error: unknown tool {:?}", other),
-    }
+    };
+    ToolResult::from_output(output)
 }
 
 // ---------- tool schemas ----------
