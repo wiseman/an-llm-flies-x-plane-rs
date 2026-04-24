@@ -256,20 +256,17 @@ fn parse_usage(response: &Value) -> LlmUsage {
     let Some(usage) = response.get("usage") else {
         return LlmUsage::default();
     };
-    let input_tokens = usage.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
-    let output_tokens = usage.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
-    // Anthropic reports cache reads and cache writes as separate
-    // counters. For parity with OpenAI's `cached_tokens` we meter the
-    // read side — that's the portion that costs less this turn because
-    // it was already populated.
-    let cached_tokens = usage
-        .get("cache_read_input_tokens")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0);
+    let field = |k: &str| usage.get(k).and_then(|v| v.as_u64()).unwrap_or(0);
+    // Anthropic partitions input across three disjoint counters. Sum all
+    // three into `input_tokens` so `cached / input` is a comparable hit
+    // rate across providers.
+    let uncached = field("input_tokens");
+    let cache_read = field("cache_read_input_tokens");
+    let cache_creation = field("cache_creation_input_tokens");
     LlmUsage {
-        input_tokens,
-        cached_tokens,
-        output_tokens,
+        input_tokens: uncached + cache_read + cache_creation,
+        cached_tokens: cache_read,
+        output_tokens: field("output_tokens"),
     }
 }
 
@@ -448,7 +445,10 @@ mod tests {
     }
 
     #[test]
-    fn parse_usage_reads_cache_read_as_cached_tokens() {
+    fn parse_usage_sums_uncached_cache_read_and_creation_into_input() {
+        // Anthropic partitions input across three counters; LlmUsage.input
+        // is the total so cached/input is a comparable hit rate across
+        // providers.
         let payload = json!({
             "usage": {
                 "input_tokens": 100,
@@ -458,7 +458,7 @@ mod tests {
             }
         });
         let u = parse_usage(&payload);
-        assert_eq!(u.input_tokens, 100);
+        assert_eq!(u.input_tokens, 185);
         assert_eq!(u.cached_tokens, 75);
         assert_eq!(u.output_tokens, 20);
     }
