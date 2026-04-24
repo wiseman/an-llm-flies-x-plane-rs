@@ -210,12 +210,13 @@ fn categorize(raw: &[RawEntry], input: &std::path::Path) -> (Meta, Vec<TimedEven
                         let name = rest[..arrow].trim().to_string();
                         let result = rest[arrow + 4..].to_string();
                         let summary = summarize_tool(&name, &result);
-                        let res = if result_is_interesting(&name, &result)
-                            && !summary.contains(&result)
+                        let res = if name == "get_status"
+                            || result.is_empty()
+                            || summary.contains(&result)
                         {
-                            Some(result)
-                        } else {
                             None
+                        } else {
+                            Some(result)
                         };
                         push(
                             &mut events,
@@ -313,42 +314,27 @@ fn parse_phase_change(summary: &str) -> Option<EventKind> {
 }
 
 fn summarize_tool(name: &str, result: &str) -> String {
-    let first_line = result.lines().next().unwrap_or(result).trim_end();
-    if first_line.starts_with("error") {
-        return format!("{} → {}", name, truncate_chars(first_line, 160));
-    }
     if name == "get_status" {
         return name.to_string();
-    }
-    if name == "sleep" {
-        return format!("{} ({})", name, truncate_chars(first_line, 80));
-    }
-    if name.starts_with("engage_") || name.starts_with("disengage_") || name.starts_with("set_") {
-        return format!("{} — {}", name, truncate_chars(first_line, 140));
     }
     if name == "sql_query" {
         let rows = result.lines().count().saturating_sub(1);
         return format!("{} ({} row{})", name, rows, if rows == 1 { "" } else { "s" });
     }
-    name.to_string()
-}
-
-fn result_is_interesting(name: &str, result: &str) -> bool {
-    let trimmed = result.trim_start();
-    if trimmed.starts_with("error") {
-        return true;
+    let first_line = result.lines().next().unwrap_or(result).trim_end();
+    let multi_line = result.lines().count() > 1;
+    // Single-line results wrap inline via the body column's word-wrap,
+    // so don't truncate them — the 500-char cap is just a runaway guard.
+    // Multi-line results get a terse head; the <details> block carries
+    // the rest so the timeline stays skimmable.
+    let body = truncate_chars(first_line, if multi_line { 140 } else { 500 });
+    if first_line.starts_with("error") {
+        format!("{} → {}", name, body)
+    } else if name == "sleep" {
+        format!("{} ({})", name, body)
+    } else {
+        format!("{} — {}", name, body)
     }
-    if name == "get_status" {
-        return false;
-    }
-    if name.starts_with("engage_")
-        || name.starts_with("disengage_")
-        || name.starts_with("set_")
-        || name == "sleep"
-    {
-        return false;
-    }
-    result.lines().count() > 1
 }
 
 fn truncate_chars(s: &str, n: usize) -> String {
