@@ -124,8 +124,6 @@ The input pane shows a steady (non-blinking) block cursor when idle. During PTT
 the cursor is replaced by an animated audio-level glyph, and a live dimmed
 transcription preview streams alongside the text you've typed.
 
-Slash commands (typed into the INPUT pane and submitted with Enter):
-
 Push-to-talk transcription requires the `DEEPGRAM_API_KEY` environment variable
 be set. Disable with `--no-voice` or by omitting the key.
 
