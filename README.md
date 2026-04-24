@@ -20,10 +20,10 @@ deterministic ground controllers to drive the airplane across the airport
 surface and onto the runway centerline.
 
 The live backend talks to X-Plane through the built-in web API and uses
-X-Plane's own `apt.dat` as the source of truth. That data is parsed into
-DuckDB-backed parquet views for airports, runways, comms, taxi nodes, taxi
-edges, and optional airspaces, so the LLM can query real airport geometry
-instead of guessing runway numbers, frequencies, or taxi routes.
+X-Plane's own data files as the source of truth. That data is parsed into
+DuckDB-backed parquet views for airports, runways, comms, taxiways, parking
+spots, and airspaces, so the LLM can query real airport geometry instead of
+guessing runway numbers, frequencies, or taxi routes.
 
 ## Getting the binary
 
@@ -34,16 +34,6 @@ latest release from [GitHub
 Releases](https://github.com/wiseman/an-llm-flies-x-plane-rs/releases/latest),
 extract the archive, and run `./sim-pilot` (or `sim-pilot.exe` on Windows).
 
-By default the executable connects to a running X-Plane 12 (web API on port 8086) and needs an API key for one of the supported model providers in a `.env`
-file — `OPENAI_API_KEY` for OpenAI (default), `ANTHROPIC_API_KEY` for Claude, or
-`GEMINI_API_KEY` for Gemini (plus an optional `DEEPGRAM_API_KEY` for voice
-transcription). To run the offline deterministic simulator with no X-Plane and
-no API key, pass `--backend simple`:
-
-```bash
-./sim-pilot --backend simple --crosswind-kt 10
-```
-
 ### Building from source
 
 Requires a recent stable Rust toolchain. Always build with `--release` — the
@@ -52,22 +42,18 @@ far faster.
 
 ```bash
 cargo build --release
-cargo test  --release        # ~380 tests, runs in ~3 seconds
+cargo test  --release        # ~450 tests, runs in ~4 seconds
 ```
-
-Live-mode DuckDB uses the spatial extension. The first run that touches the
-`sql_query` tool downloads it from the DuckDB repo into `~/.duckdb/extensions/`;
-after that it's cached and runs offline.
 
 ## Running
 
-### Live X-Plane (default)
+### Live X-Plane
 
-Requires X-Plane 12 running with the built-in web API enabled on port 8086, and
-an API key for the chosen provider: `OPENAI_API_KEY` (default),
-`ANTHROPIC_API_KEY`, or `GEMINI_API_KEY` (a `.env` file in the working directory
-is read at startup). For push-to-talk voice transcription, also set
-`DEEPGRAM_API_KEY`.
+By default the executable connects to a running X-Plane 12 and needs an API key
+for one of the supported LLM model providers in a `.env` file — `OPENAI_API_KEY`
+for OpenAI, `ANTHROPIC_API_KEY` for Claude, or `GEMINI_API_KEY` for Gemini.
+`DEEPGRAM_API_KEY` is optional, but if you add it then you get voice
+transcription.
 
 ```bash
 cargo run --release --                                      # default: --backend xplane, interactive TUI, OpenAI
@@ -85,26 +71,11 @@ cargo run --release -- --pilot-llm-provider gemini \
   --pilot-llm-model gemini-2.5-pro
 ```
 
-#### Model providers
-
-| Provider  | Flag value  | API-key env var     | Default model        | Latest API used             |
-| --------- | ----------- | ------------------- | -------------------- | --------------------------- |
-| OpenAI    | `openai`    | `OPENAI_API_KEY`    | `gpt-5.4-2026-03-05` | Responses API               |
-| Anthropic | `anthropic` | `ANTHROPIC_API_KEY` | `claude-sonnet-4-6`  | Messages API (`2023-06-01`) |
-| Google    | `gemini`    | `GEMINI_API_KEY`    | `gemini-2.5-flash`   | `generateContent` (v1beta)  |
-
-`--pilot-llm-model` overrides the default for the selected provider.
 `--pilot-llm-reasoning-effort low|medium|high` maps to each provider's native
 knob: `reasoning.effort` on OpenAI, `thinking.budget_tokens` on Anthropic,
 `thinkingConfig.thinkingBudget` on Gemini.
 
-Prompt caching is on by default for every provider — implicit on OpenAI and
-Gemini 2.5, explicit `cache_control` breakpoints on the Anthropic system prompt
-and on the last stable message of the rotating conversation history. The
-cache-hit rate for each turn lands in the LOG pane alongside per-call token
-usage.
-
-### Offline simulator (no X-Plane, no LLM)
+### Offline simulator testing (no X-Plane, no LLM)
 
 Runs a deterministic pattern mission against a point-mass dynamics model. No LLM
 of any flavor is invoked — the flight-control stack runs standalone. Nothing to
@@ -141,16 +112,13 @@ The interactive TUI is four stacked panes:
 
 Keys:
 
-| Key                 | Action                                                                                                     |
-| ------------------- | ---------------------------------------------------------------------------------------------------------- |
-| Enter               | Send the typed line. Prefix with `[atc]` (or the `atc:` colon form) to inject as ATC; default is operator. |
-| Hold Space          | Push-to-talk as operator. Releasing finalizes the transcription.                                           |
-| Hold Tab            | Push-to-talk as ATC (auto-prefixed `[atc]`).                                                               |
-| Ctrl-T              | Toggle log-pane detail (compact vs full).                                                                  |
-| Left / Right        | Move the input cursor one character.                                                                       |
-| Up / Down           | Walk backward/forward through the submitted-line history. The in-progress draft is preserved.              |
-| PgUp / PgDn / End   | Scroll the log pane. Home view auto-pins to the tail.                                                      |
-| Ctrl-C, Ctrl-D, Esc | Exit cleanly (flushes the flight-track KML).                                                               |
+| Key               | Action                                                                                                     |
+| ----------------- | ---------------------------------------------------------------------------------------------------------- |
+| Enter             | Send the typed line. Prefix with `[atc]` (or the `atc:` colon form) to inject as ATC; default is operator. |
+| Hold Space        | Push-to-talk as operator. Releasing finalizes the transcription.                                           |
+| Hold Tab          | Push-to-talk as ATC (auto-prefixed `[atc]`).                                                               |
+| Ctrl-T            | Toggle log-pane detail (compact vs full).                                                                  |
+| PgUp / PgDn / End | Scroll the log pane. Home view auto-pins to the tail.                                                      |
 
 The input pane shows a steady (non-blinking) block cursor when idle. During PTT
 the cursor is replaced by an animated audio-level glyph, and a live dimmed
@@ -158,16 +126,13 @@ transcription preview streams alongside the text you've typed.
 
 Slash commands (typed into the INPUT pane and submitted with Enter):
 
-| Command           | Action                                                                                                                                                                                  |
-| ----------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `/mode normal`    | Switch the pilot persona to normal mode. Injected as a `[MODE_SWITCH]` user message in conversation history; the system prompt prefix stays byte-stable so prompt caching is preserved. |
-| `/mode realistic` | Switch to realistic mode (real-world ATC phraseology, readbacks, procedural discipline). Same delivery as above.                                                                        |
-
-Push-to-talk transcription requires `DEEPGRAM_API_KEY` in `.env`. Disable with `--no-voice` or by omitting the key.
+Push-to-talk transcription requires the `DEEPGRAM_API_KEY` environment variable
+be set. Disable with `--no-voice` or by omitting the key.
 
 ### Outputs
 
-Every live run produces four timestamped artifacts in `output/`, sharing one stem (`sim_pilot-YYYYMMDD-HHMMSS`):
+Every live run produces four timestamped artifacts in `output/`, sharing one
+stem (`sim_pilot-YYYYMMDD-HHMMSS`):
 
 | File   | When written                                        | Contents                                                                                                                                                                |
 | ------ | --------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
