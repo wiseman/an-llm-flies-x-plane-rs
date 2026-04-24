@@ -1,4 +1,10 @@
 //! Shared test helpers — per-test `make_state` factories.
+//!
+//! Each integration-test binary compiles this module separately, so any
+//! helper a given binary doesn't reference trips the dead-code lint.
+//! The helpers here are a shared palette — not every test uses every
+//! one — so disable the lint at the module level.
+#![allow(dead_code)]
 
 use xplane_pilot::types::{
     heading_to_vector, AircraftState, FlightPhase, Vec2, KT_TO_FPS,

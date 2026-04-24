@@ -250,7 +250,7 @@ pub fn extract_output_text(response_payload: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::llm::backend::{Message, ReasoningEffort, ToolDef};
+    use crate::llm::backend::{Message, ToolDef};
     use serde_json::json;
 
     fn sample_tools() -> Vec<ToolDef> {

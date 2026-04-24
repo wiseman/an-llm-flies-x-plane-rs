@@ -338,7 +338,7 @@ fn pattern_fly_route_has_only_pattern_entry_waypoint() {
 
 #[test]
 fn pattern_fly_go_around_targets_runway_course() {
-    let (cfg, mut pilot) = make_pilot();
+    let (cfg, pilot) = make_pilot();
     let mut profile = PatternFlyProfile::new(cfg.clone(), pilot.runway_frame.clone());
     let state = AircraftState {
         track_deg: 200.0,
