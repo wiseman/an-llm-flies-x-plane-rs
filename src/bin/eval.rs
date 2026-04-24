@@ -186,10 +186,19 @@ fn main() -> Result<()> {
     let session_dir = args.output_dir.join(&session_stem);
 
     let (source, text) = parse_input_source(&args.initial_prompt);
-    let startup_messages = vec![match source.as_str() {
-        "atc" => IncomingMessage::atc(text.clone()),
-        _ => IncomingMessage::operator(text.clone()),
-    }];
+    let mission_complete_reminder = "When the aircraft reaches the end state described in the mission \
+                                     above (parked at a gate, at altitude, holding short, whatever was \
+                                     asked), call mission_complete(success=true, summary=...) instead of \
+                                     sleep — sleep waits for more work, mission_complete ends the run. \
+                                     If you decide the mission cannot be completed, call \
+                                     mission_complete(success=false, ...).";
+    let startup_messages = vec![
+        match source.as_str() {
+            "atc" => IncomingMessage::atc(text.clone()),
+            _ => IncomingMessage::operator(text.clone()),
+        },
+        IncomingMessage::operator(mission_complete_reminder.to_string()),
+    ];
 
     println!("eval session: {}", session_stem);
     println!("session dir:  {}", session_dir.display());

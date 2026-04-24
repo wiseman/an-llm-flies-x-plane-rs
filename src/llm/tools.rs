@@ -1676,6 +1676,18 @@ fn bridge_heading_or_arg(ctx: &ToolContext, args: &Map<String, Value>) -> f64 {
     0.0
 }
 
+fn format_runway_taxi_plan_error(e: impl std::fmt::Display) -> String {
+    let msg = e.to_string();
+    if msg.contains("no taxi route") {
+        format!(
+            "error: {} — hint: engage_taxi and plan_taxi_route route only to a runway hold-short (outbound). To reach a parking spot from your current position (e.g. after landing), use engage_park instead.",
+            msg
+        )
+    } else {
+        format!("error: {}", msg)
+    }
+}
+
 pub fn tool_engage_taxi(ctx: &ToolContext, args: &Map<String, Value>) -> String {
     let bridge = match ctx.bridge.as_ref() {
         Some(b) => b.clone(),
@@ -1753,7 +1765,7 @@ pub fn tool_engage_taxi(ctx: &ToolContext, args: &Map<String, Value>) -> String 
             &forbidden_directional,
         ) {
             Ok(p) => p,
-            Err(e) => return format!("error: {}", e),
+            Err(e) => return format_runway_taxi_plan_error(e),
         };
         let face = dest.face_toward_for(plan.destination_node);
         (plan, face)
@@ -1913,7 +1925,7 @@ pub fn tool_plan_taxi_route(ctx: &ToolContext, args: &Map<String, Value>) -> Str
         &forbidden_directional,
     ) {
         Ok(p) => p,
-        Err(e) => return format!("error: {}", e),
+        Err(e) => return format_runway_taxi_plan_error(e),
     };
     format_taxi_plan(&plan)
 }
@@ -2599,13 +2611,13 @@ pub fn tool_schemas(include_mission_complete: bool) -> Vec<ToolDef> {
     let mut schemas = vec![
         schema(
             "get_status",
-            "Return a JSON snapshot of aircraft state, phase, and active profiles.",
+            "Return a JSON snapshot of aircraft state, phase, and active profiles. Completes immediately. Heartbeat messages already embed this payload — only call get_status when you have changed state within the same turn and need fresh values.",
             json!({}),
             &[],
         ),
         schema(
             "sleep",
-            "End this turn explicitly. The pilot continues flying the active profiles; you wake up when the next operator/ATC message arrives, when a flight-phase or profile change fires a state-change heartbeat, or when the idle-cadence heartbeat fires (default every 30 s). Pass suppress_idle_heartbeat_s=N to skip the idle cadence for the next N seconds when you're confident the current state is stable for a while (capped at 600 s; state-change heartbeats still fire immediately). Use null when you have no reason to extend the default cadence.",
+            "End this turn; the pilot keeps flying whatever profiles are active. You wake on operator/ATC messages, on state-change heartbeats (phase change, profile engage/disengage, `completed: taxi` / `completed: line_up`), or on the idle-cadence heartbeat (default every 30 s). Pass suppress_idle_heartbeat_s=N to skip idle heartbeats for the next N seconds when state is stable for a while (capped at 600 s; state-change heartbeats still fire immediately). Preconditions: refuses if the aircraft is moving (>0.5 kt) while only idle_* profiles are active — engage a real profile first; do not route around the refusal. Completes immediately (yields the turn).",
             json!({
                 "suppress_idle_heartbeat_s": {
                     "type": ["number", "null"],
@@ -2616,7 +2628,7 @@ pub fn tool_schemas(include_mission_complete: bool) -> Vec<ToolDef> {
         ),
         schema(
             "engage_heading_hold",
-            "Engage heading-hold on the lateral axis. Displaces any other lateral-axis profile. By default takes the shortest-path turn to the target heading. If the operator or ATC specifies a turn direction (e.g. 'turn right to 290'), pass turn_direction='right' or 'left' to force that direction even when the other way is shorter; the direction lock clears automatically once within 5 degrees of target so the autopilot will not overshoot.",
+            "Engage heading-hold on the lateral axis. By default takes the shortest-path turn to the target heading; pass turn_direction='left'|'right' to force that direction when ATC or the operator specifies one (the direction lock auto-clears within 5° of target so the autopilot will not overshoot). Completes by engaging a holding loop; remains active until displaced by another lateral-axis profile.",
             json!({
                 "heading_deg": {"type": "number", "description": "Target heading in degrees true, 0-360."},
                 "turn_direction": {
@@ -2629,19 +2641,19 @@ pub fn tool_schemas(include_mission_complete: bool) -> Vec<ToolDef> {
         ),
         schema(
             "engage_altitude_hold",
-            "Engage altitude-hold on the vertical axis using TECS. Displaces any other vertical-axis profile.",
+            "Engage altitude-hold on the vertical axis (TECS). Completes by engaging a holding loop; remains active until displaced by another vertical-axis profile.",
             json!({"altitude_ft": {"type": "number", "description": "Target altitude in feet MSL."}}),
             &["altitude_ft"],
         ),
         schema(
             "engage_speed_hold",
-            "Engage speed-hold on the speed axis. Displaces any other speed-axis profile.",
+            "Engage speed-hold on the speed axis. Completes by engaging a holding loop; remains active until displaced by another speed-axis profile.",
             json!({"speed_kt": {"type": "number", "description": "Target indicated airspeed in knots."}}),
             &["speed_kt"],
         ),
         schema(
             "engage_cruise",
-            "Atomically install heading_hold + altitude_hold + speed_hold in a single tool call. Use this when transitioning out of a three-axis profile (takeoff, pattern_fly) into a steady cross-country leg — engaging the three single-axis holds separately briefly leaves the vertical and speed axes uncovered between calls, while this installs them under one lock so the control loop never sees an intermediate state. Displaces any lateral-, vertical-, or speed-axis profile currently engaged (including takeoff and pattern_fly, which own all three).",
+            "Atomically install heading_hold + altitude_hold + speed_hold in one call. Use when transitioning out of a three-axis profile (takeoff, pattern_fly) into a steady cross-country leg — engaging the three single-axis holds separately briefly leaves the vertical and speed axes uncovered between calls, while this installs all three under one lock. Displaces any lateral-, vertical-, or speed-axis profile currently engaged (including takeoff and pattern_fly, which own all three). Completes by engaging three holding loops; each remains active until displaced.",
             json!({
                 "heading_deg": {"type": "number", "description": "Target true heading, 0-360."},
                 "altitude_ft": {"type": "number", "description": "Target altitude MSL in feet."},
@@ -2651,7 +2663,7 @@ pub fn tool_schemas(include_mission_complete: bool) -> Vec<ToolDef> {
         ),
         schema(
             "engage_pattern_fly",
-            "Engage the deterministic mission pilot anchored at a specific runway. Owns all three axes. The tool looks up the runway in the database, anchors the pattern geometry at its real threshold, and positions the phase machine at start_phase. If you don't know which runway you're on, call get_status + sql_query first. Pick start_phase to match the aircraft's CURRENT physical state — the phase machine auto-advances when the aircraft reaches each leg's trigger altitude/position, so do NOT skip ahead to a leg the aircraft hasn't reached yet (e.g. start_phase='crosswind' while still climbing out on upwind will command an immediate 90° crosswind turn at whatever altitude you're at). Common values: 'takeoff_roll' (on the ground, about to roll), 'initial_climb' (just airborne after rotation, still climbing below pattern altitude — this is the right choice when handing off from engage_takeoff), 'pattern_entry' (joining from cruise), or 'crosswind'/'downwind'/'base'/'final' only when the aircraft is already established on that leg. When start_phase='takeoff_roll', the same position guards as engage_takeoff apply (on the runway's centerline, inside the runway's along-track length, heading within 15° of course, ground speed < 3 kt, parking brake released, ≥1000 ft of usable runway ahead); pass override=true to bypass the centerline / along-track / heading checks for off-field, bush, or taxiway departures. Typical takeoff call: engage_pattern_fly(airport_ident='KSEA', runway_ident='16L', side='left', start_phase='takeoff_roll'). Typical hand-off-from-takeoff call: engage_pattern_fly(..., start_phase='initial_climb'). Typical join-from-cruise call: engage_pattern_fly(..., start_phase='pattern_entry').",
+            "Engage the deterministic mission pilot anchored at a specific runway; owns all three axes and runs the full phase machine (takeoff_roll → rotate → climb → pattern legs → flare → rollout → taxi_clear). Preconditions: runway must exist in apt.dat; if you don't know which runway you're on, call get_status + the closest-runway sql_query first. Pick start_phase to match the aircraft's CURRENT physical state — the phase machine auto-advances when the aircraft reaches each leg's trigger altitude/position, so skipping ahead (e.g. start_phase='crosswind' while still climbing on upwind) forces an immediate premature turn. When start_phase='takeoff_roll' the same position guards as engage_takeoff apply (parking brake released, on centerline within 100 ft, inside the along-track length, heading within 15° of course, ground speed < 3 kt, ≥1000 ft usable runway ahead); override=true bypasses the centerline/along-track/heading checks for off-field, bush, or taxiway departures (brake/GS/length guards still apply). Completes by driving the phase machine; state-change heartbeats fire on every phase transition. start_phase picks: 'takeoff_roll' (on the ground), 'initial_climb' (just airborne below pattern altitude — right choice when handing off from engage_takeoff), 'pattern_entry' (joining from cruise, not aligned with a specific leg), 'crosswind'/'downwind'/'base'/'final' only when physically established on that leg. Typical calls: engage_pattern_fly(airport_ident='KSEA', runway_ident='16L', side='left', start_phase='takeoff_roll') for a ground takeoff; same args with start_phase='initial_climb' when handing off from engage_takeoff; same args with start_phase='pattern_entry' when joining mid-flight from cruise.",
             json!({
                 "airport_ident": {"type": "string", "description": "ICAO airport code (e.g. 'KSEA')."},
                 "runway_ident": {"type": "string", "description": "Runway end identifier (e.g. '16L', '34R')."},
@@ -2663,7 +2675,7 @@ pub fn tool_schemas(include_mission_complete: bool) -> Vec<ToolDef> {
         ),
         schema(
             "engage_takeoff",
-            "Start the takeoff sequence on the specified airport + runway: resolve the runway's threshold and course from apt.dat, verify the aircraft is actually on that runway (within 100 ft of centerline, inside the runway's along-track length, heading within 15° of course, ground speed < 3 kt), then go full power, hold centerline via the rollout controller, rotate at Vr, and climb at Vy along the runway track. Owns all three axes. Does NOT auto-disengage — once you're safely airborne, transition by engaging another profile (engage_heading_hold, engage_altitude_hold, engage_pattern_fly, etc.), which will displace this one via axis-ownership conflict. REFUSES to engage if the parking brake is set, the aircraft is not on the specified runway, or heading is off course — the error message names the specific check. Pass override=true to bypass the position/heading checks for off-field, bush, or taxiway departures; the parking-brake, ground-speed, and minimum-usable-length guards still apply. Call takeoff_checklist first to see a human-readable status summary.",
+            "Start the takeoff sequence on the named airport + runway: full power, hold centerline via the rollout controller, rotate at Vr, climb at Vy along the runway track. Owns all three axes. Preconditions: parking brake released, aircraft on the named runway's centerline within 100 ft, inside the along-track length, heading within 15° of course, ground speed < 3 kt, ≥1000 ft usable runway ahead. Refuses with an error naming the failing check. override=true bypasses the centerline/along-track/heading checks for off-field, bush, or taxiway departures; brake, ground-speed, and length guards still apply. Does NOT auto-disengage — transition out by engaging another profile once safely airborne (engage_pattern_fly with start_phase='initial_climb', engage_cruise, or a single-axis hold), which displaces takeoff via axis-ownership conflict. Call takeoff_checklist first to see a human-readable readiness summary.",
             json!({
                 "airport_ident": {"type": "string", "description": "Airport identifier as stored in apt.dat (e.g. 'KSFO')."},
                 "runway_ident": {"type": "string", "description": "Runway end ident you're departing on (e.g. '12', '28R')."},
@@ -2673,25 +2685,25 @@ pub fn tool_schemas(include_mission_complete: bool) -> Vec<ToolDef> {
         ),
         schema(
             "takeoff_checklist",
-            "Return a takeoff-readiness checklist with each item marked [OK], [ACTION], [ERROR], or [REMINDER]. Reads live state (parking brake, flaps, gear, on-ground, active profiles). Call this before engage_takeoff and address every [ACTION] item — the most common miss is a set parking brake, which will also cause engage_takeoff to refuse.",
+            "Return a takeoff-readiness checklist with each item marked [OK], [ACTION], [ERROR], or [REMINDER]. Reads live state (parking brake, flaps, gear, on-ground, active profiles). Completes immediately. Run before engage_takeoff and address every [ACTION] item — the most common miss is a set parking brake, which also causes engage_takeoff to refuse.",
             json!({}),
             &[],
         ),
         schema(
             "disengage_profile",
-            "Remove the profile with the given name. Orphaned axes fall back to idle profiles.",
+            "Remove the profile with the given name; orphaned axes fall back to idle profiles. Completes immediately.",
             json!({"name": {"type": "string", "description": "Profile name, e.g. 'heading_hold'."}}),
             &["name"],
         ),
         schema(
             "list_profiles",
-            "Return a comma-separated list of currently active profile names.",
+            "Return a comma-separated list of currently active profile names. Completes immediately.",
             json!({}),
             &[],
         ),
         schema(
             "extend_pattern_leg",
-            "Lengthen a traffic-pattern leg. Use for ATC instructions like 'extend your downwind 2 miles' or 'extend crosswind'. Only 'crosswind' and 'downwind' are extensible. Crosswind extension widens the effective downwind offset (the pattern is flown further out to the side); downwind extension pushes the base-turn point further past the threshold. Requires pattern_fly to be active. mode='add' (default) accumulates onto the current extension; mode='set' replaces it with the exact value.",
+            "Lengthen a traffic-pattern leg. Only 'crosswind' and 'downwind' are extensible: crosswind extension widens the effective downwind offset (the pattern is flown further out to the side); downwind extension pushes the base-turn point further past the threshold. mode='add' (default) accumulates onto the current extension; mode='set' replaces it with the exact value. Preconditions: pattern_fly must be active. Completes immediately — the next pattern loop tick applies the extension.",
             json!({
                 "leg": {"type": "string", "enum": ["crosswind", "downwind"], "description": "Which leg to extend."},
                 "extension_ft": {"type": "number", "description": "Extension in feet. With mode='add' adds to the current extension; with mode='set' replaces it (clamped to >= 0)."},
@@ -2701,7 +2713,7 @@ pub fn tool_schemas(include_mission_complete: bool) -> Vec<ToolDef> {
         ),
         schema(
             "execute_pattern_turn",
-            "Force an immediate pattern-phase turn, bypassing the automatic geometric trigger. Use for ATC instructions like 'turn base now', 'turn final', 'turn crosswind early'. For 'base' in the DOWNWIND phase the base leg is rebuilt dynamically from the aircraft's current runway-frame position, so it works correctly even after an extended downwind. Valid legs: crosswind (InitialClimb->Crosswind), downwind (Crosswind->Downwind), base (Downwind->Base), final (Base->Final). Requires pattern_fly to be active.",
+            "Force an immediate pattern-phase turn, bypassing the automatic geometric trigger. Valid legs: crosswind (InitialClimb→Crosswind), downwind (Crosswind→Downwind), base (Downwind→Base), final (Base→Final). For 'base' in the DOWNWIND phase the base leg is rebuilt dynamically from the aircraft's current runway-frame position, so this works correctly even after an extended downwind. Preconditions: pattern_fly must be active. Completes by executing the turn on the next control loop tick.",
             json!({
                 "leg": {"type": "string", "enum": ["crosswind", "downwind", "base", "final"], "description": "The turn to execute immediately."}
             }),
@@ -2709,7 +2721,7 @@ pub fn tool_schemas(include_mission_complete: bool) -> Vec<ToolDef> {
         ),
         schema(
             "set_pattern_clearance",
-            "Grant or revoke an ATC clearance gate for a pattern-phase transition. Revoking a gate holds the aircraft on its current leg until ATC calls it (e.g. ATC says 'I'll call your base' => set_pattern_clearance(gate='turn_base', granted=false)). Granting re-enables the automatic transition. The 'land' gate records (but does not enforce) landing authorization — the LLM is responsible for calling go_around if landing isn't cleared. Defaults: all gates granted. Use runway_id only when gate='land'.",
+            "Grant or revoke an ATC clearance gate for a pattern-phase transition. Revoking a gate holds the aircraft on its current leg until ATC calls it (e.g. 'I'll call your base' → gate='turn_base', granted=false); granting re-enables the automatic transition. The 'land' gate records (but does not enforce) landing authorization — you are responsible for calling go_around if the aircraft reaches short final without a landing clearance at a towered field. Defaults: all gates granted. runway_id is only used when gate='land'. Preconditions: pattern_fly must be active. Completes immediately — the pattern loop reads the new gate state on the next tick.",
             json!({
                 "gate": {"type": "string", "enum": ["turn_crosswind", "turn_downwind", "turn_base", "turn_final", "land"], "description": "Which clearance gate to set."},
                 "granted": {"type": "boolean", "description": "true to grant (auto-transition enabled); false to revoke (aircraft holds on current leg until execute_pattern_turn is called or clearance is granted)."},
@@ -2719,25 +2731,25 @@ pub fn tool_schemas(include_mission_complete: bool) -> Vec<ToolDef> {
         ),
         schema(
             "go_around",
-            "Command an immediate go-around. Requires pattern_fly to be active.",
+            "Command an immediate go-around. Preconditions: pattern_fly must be active. Completes by driving pattern_fly into a climb to pattern altitude; a state-change heartbeat fires on the phase transition.",
             json!({}),
             &[],
         ),
         schema(
             "execute_touch_and_go",
-            "Declare that the upcoming landing is a touch-and-go. Must be called during BASE or FINAL (before the wheels touch). On touchdown the phase machine will skip ROLLOUT (braking) and transition directly to TAKEOFF_ROLL: full throttle, flaps retract to 10°, no brakes. The aircraft re-accelerates, rotates, and flies another pattern. The flag auto-clears on TAKEOFF_ROLL → ROTATE so the next approach defaults to a normal full-stop landing unless you call execute_touch_and_go again. Requires pattern_fly to be active.",
+            "Arm the upcoming landing as a touch-and-go: on touchdown the phase machine will skip ROLLOUT (braking) and transition directly to TAKEOFF_ROLL (full throttle, flaps retract to 10°, no brakes). The flag auto-clears on TAKEOFF_ROLL→ROTATE, so the next approach defaults to a full-stop landing unless you call this again. Preconditions: pattern_fly must be active; call during BASE or FINAL, before the wheels touch. Completes immediately (flag armed).",
             json!({}),
             &[],
         ),
         schema(
             "join_pattern",
-            "Acknowledge a pattern join instruction. Requires pattern_fly to be active.",
+            "Record acknowledgment of an ATC pattern-join instruction. This is a pure acknowledgment — to actually reconfigure the pilot for a new runway, call engage_pattern_fly. Preconditions: pattern_fly must be active. Completes immediately.",
             json!({"runway_id": {"type": "string", "description": "Runway identifier for the pattern."}}),
             &["runway_id"],
         ),
         schema(
             "tune_radio",
-            "Tune a COM radio to a frequency in MHz.",
+            "Tune a COM radio to a frequency in MHz. Use com1 as primary (tower, ground, CTAF, departure, approach, ATIS); com2 as monitor/secondary. Completes immediately. Call before broadcast_on_radio when switching facilities.",
             json!({
                 "radio": {"type": "string", "description": "Radio name: 'com1' or 'com2'."},
                 "frequency_mhz": {"type": "number", "description": "Frequency in MHz, e.g. 118.30."}
@@ -2746,7 +2758,7 @@ pub fn tool_schemas(include_mission_complete: bool) -> Vec<ToolDef> {
         ),
         schema(
             "broadcast_on_radio",
-            "Transmit a text message over a COM radio. This is the ONLY way your words reach ATC or anyone outside the cockpit — plain-text replies are visible to the operator only and are not transmitted. Always use this tool to acknowledge clearances, read back ATC instructions, make position calls, or make any external radio call. Use standard aviation phraseology. Typically com1 is the active comm radio.",
+            "Transmit a text message over a COM radio. This is the ONLY way your words reach ATC or anyone outside the cockpit — plain-text replies are visible to the operator only and are not transmitted. Use for every clearance acknowledgment, readback, position call, or external radio call, in standard aviation phraseology. A readback satisfies ATC; the corresponding tool call satisfies the aircraft — both are required. Completes immediately (the message is queued for transmission on the next sim tick).",
             json!({
                 "radio": {"type": "string", "description": "Radio name: 'com1' or 'com2'."},
                 "message": {"type": "string", "description": "The exact words to transmit, e.g. 'Seattle Tower, Cessna 123AB, runway 16L cleared for takeoff'."}
@@ -2755,13 +2767,13 @@ pub fn tool_schemas(include_mission_complete: bool) -> Vec<ToolDef> {
         ),
         schema(
             "set_parking_brake",
-            "Engage or release the parking brake. Unlike the toe brakes, the parking brake holds its state without continuous input, so this is the right tool for 'set the brake and hold it'.",
+            "Engage or release the parking brake. Unlike the toe brakes, the parking brake holds its state without continuous input — this is the right tool for 'set the brake and hold it'. Completes immediately. Note: engage_taxi and engage_park auto-release the brake if set, so there is no need to release it before calling those tools.",
             json!({"engaged": {"type": "boolean", "description": "True to engage (set) the parking brake, false to release it."}}),
             &["engaged"],
         ),
         schema(
             "set_flaps",
-            "Set the flap handle position. Valid settings for the C172 are 0, 10, 20, or 30 degrees. Note: when pattern_fly is active, it manages flaps automatically per flight phase and will override this setting on the next tick. Use this tool when flying with single-axis profiles (heading_hold, altitude_hold, speed_hold) or during ground ops.",
+            "Set the flap handle position. Valid C172 settings: 0, 10, 20, or 30 degrees. Completes immediately. Preconditions: when pattern_fly is active it manages flaps automatically per flight phase and will override this setting on the next tick — use this tool with single-axis profiles (heading_hold, altitude_hold, speed_hold) or during ground ops.",
             json!({"degrees": {"type": "integer", "description": "Flap setting in degrees: 0, 10, 20, or 30."}}),
             &["degrees"],
         ),
@@ -2773,7 +2785,7 @@ pub fn tool_schemas(include_mission_complete: bool) -> Vec<ToolDef> {
         ),
         schema(
             "engage_line_up",
-            ENGAGE_LINE_UP_DESCRIPTION,
+            "Cross the hold-short onto the runway, turn to runway heading, and stop with the nose aligned for takeoff — the 'line up and wait' clearance in ATC phraseology. Displaces any active three-axis profile. Preconditions: aircraft at or near the hold-short for this runway (errors out if more than ~300 ft from the entry point); requires a live X-Plane bridge (needs the georef to convert the runway threshold lat/lon into runway-frame feet). Completes when the aircraft is stopped aligned on the centerline — a state-change heartbeat fires 'completed: line_up'. Next: engage_takeoff. If ATC already issued the takeoff clearance ('cleared for takeoff runway X'), call engage_takeoff immediately on the completed heartbeat without waiting for more operator prompts; do not call engage_takeoff while active_profiles still lists line_up.",
             json!({
                 "airport_ident": {
                     "type": "string",
@@ -2800,7 +2812,7 @@ pub fn tool_schemas(include_mission_complete: bool) -> Vec<ToolDef> {
         ),
         schema(
             "engage_taxi",
-            ENGAGE_TAXI_DESCRIPTION,
+            "Engage the ground-taxi autopilot to a runway hold-short. OUTBOUND ONLY — for taxiing from a parking spot or ramp to the hold-short before takeoff. To taxi to a parking spot after landing, use engage_park, NOT this tool with the runway you just landed on (that route does not exist by design — you don't taxi back onto the runway you rolled out of). Plans the route (same logic as plan_taxi_route), then takes control: nose-wheel steering tracks the leg centerline, ground speed targets ~15 kt on straights / ~5 kt through sharp turns / 0 at the hold-short, where the aircraft stops with the parking brake applied. Displaces any active three-axis profile. Auto-releases the parking brake if set — no need to call set_parking_brake(False) first. Preconditions: aircraft on the ground; live X-Plane bridge required (needs the georef to convert planned lat/lon waypoints into runway-frame feet). For intersection departures, pass the intersection taxiway so the planner routes to that specific hold-short; otherwise routes to the full-length threshold. Completes on arrival at the hold-short — a state-change heartbeat fires 'completed: taxi'. Next: engage_line_up. Preview a route before committing with plan_taxi_route.",
             json!({
                 "airport_ident": {
                     "type": "string",
@@ -2832,7 +2844,7 @@ pub fn tool_schemas(include_mission_complete: bool) -> Vec<ToolDef> {
         ),
         schema(
             "plan_taxi_route",
-            PLAN_TAXI_ROUTE_DESCRIPTION,
+            "Plan a taxi route across an airport surface. Returns the ordered waypoint legs (lat/lon pairs plus the taxiway each segment rides), total distance, and any runway active-zones the path crosses (arrival / departure / ILS-critical). PLANNING ONLY — does not engage the autopilot. Pass taxiway names in order through via_taxiways (e.g. ['A','D']); the planner runs a constrained Dijkstra that traverses them in order, allows unnamed connector edges at the start/end (for gate lead-ins and runway lead-outs), and resolves destination_runway to the taxi node nearest the runway threshold. With via_taxiways=[] returns the shortest overall route and reports which taxiways it actually used. Preconditions: airport must have a taxi network in apt.dat (small uncontrolled strips error out). Completes immediately. Next: engage_taxi to actually fly the route. Use sql_query against taxi_nodes / taxi_edges for ad-hoc exploration.",
             json!({
                 "airport_ident": {
                     "type": "string",
@@ -2860,7 +2872,7 @@ pub fn tool_schemas(include_mission_complete: bool) -> Vec<ToolDef> {
         ),
         schema(
             "engage_park",
-            ENGAGE_PARK_DESCRIPTION,
+            "Taxi to a parking spot and stop with the nose aligned to the spot's painted heading. INBOUND counterpart to engage_taxi — this is the tool for getting from a post-landing rollout position (or any ground position) to a parking spot. Do not call engage_taxi with the runway you just landed on as a workaround for parking; that route doesn't exist by design. Plans a taxi route to the taxi-network node nearest the 1300 parking spot, appends a short lead-in leg to the spot's exact lat/lon, and drives to a final pose at the spot's heading. Displaces any active three-axis profile. Auto-releases the parking brake if set. Preconditions: parking spot must exist in apt.dat (case-insensitive match); live X-Plane bridge required (needs the georef to convert the parking lat/lon into runway-frame feet). Completes by stopping at the spot aligned to the painted heading with parking brake set. Note: can also be called during rollout — will displace pattern_fly and turn off the runway onto the chosen taxiway, useful when ATC gave you a known gate at landing. Find candidates with sql_query against parking_spots (filter by airport_ident; match `categories` against aircraft class, e.g. LIKE '%props%' for a single-engine piston, or operation_type='general_aviation' for a GA ramp).",
             json!({
                 "airport_ident": {
                     "type": "string",
@@ -2888,7 +2900,7 @@ pub fn tool_schemas(include_mission_complete: bool) -> Vec<ToolDef> {
         ),
         schema(
             "plan_park_route",
-            PLAN_PARK_ROUTE_DESCRIPTION,
+            "Preview the taxi route to a parking spot without engaging the autopilot. Same output shape as plan_taxi_route plus the resolved spot coordinates and heading. Preconditions: same as engage_park. Completes immediately. Next: engage_park to commit.",
             json!({
                 "airport_ident": {
                     "type": "string",
@@ -2916,7 +2928,7 @@ pub fn tool_schemas(include_mission_complete: bool) -> Vec<ToolDef> {
         ),
         schema(
             "choose_runway_exit",
-            CHOOSE_RUNWAY_EXIT_DESCRIPTION,
+            "Record a preferred runway-exit taxiway for the post-landing rollout. The rollout controller slows to turnoff speed by the exit's stationing and, once clear of the hold-short line, pattern_fly auto-releases — the aircraft stops clear of the runway with parking brake set, ready for engage_park. Pass null to clear any prior preference. Preconditions: pattern_fly should be active; call on final or any time before touchdown. Completes immediately — the rollout logic uses the preference on the next landing. Fallback: if the chosen exit is un-makable (aircraft still fast at that stationing), the rollout falls back to the next available exit and logs it.",
             json!({
                 "taxiway_name": {
                     "type": ["string", "null"],
@@ -2927,7 +2939,7 @@ pub fn tool_schemas(include_mission_complete: bool) -> Vec<ToolDef> {
         ),
         schema(
             "list_runway_exits",
-            LIST_RUNWAY_EXITS_DESCRIPTION,
+            "List the taxiway exits for a landing runway: each candidate taxiway name plus its approximate stationing in feet from the landing threshold, so you can pick an exit appropriate for your rollout distance. Uses the 1204 active-zone annotations attached to taxi_edges. Completes immediately. Next: choose_runway_exit.",
             json!({
                 "airport_ident": {
                     "type": "string",
@@ -2944,7 +2956,7 @@ pub fn tool_schemas(include_mission_complete: bool) -> Vec<ToolDef> {
     if include_mission_complete {
         schemas.push(schema(
             "mission_complete",
-            "Eval-harness only: report that you have finished the assigned mission. The harness records the outcome and shuts the run down after this turn. Call this exactly once, when you believe the mission (as given in the initial briefing) is complete — success=true if you accomplished it, false if you are giving up or believe it cannot be completed. Do NOT call this in the middle of a flight; use `sleep` to yield between actions instead.",
+            "Eval-harness only. Report that you have finished the assigned mission; the harness records the outcome and shuts the run down after this turn. Call exactly once, when the aircraft has reached the end state described in the initial briefing — success=true if accomplished, false if giving up or you believe it cannot be completed. If you find yourself calling sleep repeatedly with the aircraft stopped or at the briefed end state (e.g. parked with brake set, only idle_* profiles, no pending work), call mission_complete instead — sleep waits for more work, mission_complete ends the run. Preconditions: do NOT call mid-flight or while a profile is still actively driving the aircraft to the end state. Completes by ending the run.",
             json!({
                 "success": {
                     "type": "boolean",
@@ -2961,99 +2973,6 @@ pub fn tool_schemas(include_mission_complete: bool) -> Vec<ToolDef> {
     schemas
 }
 
-const ENGAGE_LINE_UP_DESCRIPTION: &str = "Cross the hold-short onto the \
-runway, turn to runway heading, and stop with the nose aligned for takeoff. \
-This is the 'line up and wait' clearance in ATC phraseology. Mirrors \
-engage_taxi internally — same nose-wheel and ground-speed controllers, \
-same sharp-turn slowdown — but the goal is a pose on the runway rather \
-than a hold-short.
-
-Use when ATC says 'line up runway X and wait' or 'cleared for takeoff \
-runway X' and the aircraft is currently stopped at the hold-short. After \
-this completes and the aircraft is aligned, call engage_takeoff to begin \
-the takeoff roll.
-
-Requires a live X-Plane bridge (needs the georef to convert the runway \
-threshold lat/lon into runway-frame feet). Displaces any active \
-three-axis profile.";
-
-const ENGAGE_TAXI_DESCRIPTION: &str = "Engage the ground-taxi autopilot. \
-Plans the route via the same logic as plan_taxi_route, then takes control \
-of the aircraft: nose-wheel steering tracks the leg centerline, ground \
-speed targets ~15 kt on straights / ~5 kt through sharp turns / 0 at the \
-final node where the aircraft parks with hold brake applied. Displaces \
-any currently-engaged three-axis profile (pattern_fly, takeoff, cruise).
-
-If the parking brake is set when this is called, it is released \
-automatically — no need to call set_parking_brake(engaged=False) first. \
-Requires the aircraft to be on the ground and a live X-Plane bridge \
-(needs the georef anchor to convert the planned lat/lon waypoints into \
-the pilot's runway-frame feet).
-
-For clearances where you want to preview the route before committing, \
-call plan_taxi_route first — its output has the same summary plus \
-leg-by-leg waypoints.";
-
-const ENGAGE_PARK_DESCRIPTION: &str = "Taxi to a parking spot and stop with \
-the nose aligned to the spot's painted heading. Internally this plans a \
-taxi route to the taxi-network node nearest the 1300 parking spot, appends \
-a short lead-in leg to the spot's exact lat/lon, and drives TaxiProfile \
-to a final pose at the spot's heading.
-
-Use after rollout has cleared the runway and the aircraft is stopped \
-clear. Requires a live X-Plane bridge (needs the georef to convert the \
-parking lat/lon into runway-frame feet). Displaces any active three-axis \
-profile. If the parking brake is set, it's released automatically.
-
-For candidates, query the `parking_spots` view via sql_query filtered by \
-airport_ident and matching `categories` against your aircraft class \
-(e.g. categories LIKE '%props%' for a single-engine piston, or \
-operation_type = 'general_aviation' for a GA ramp).";
-
-const PLAN_PARK_ROUTE_DESCRIPTION: &str = "Preview the taxi route to a \
-parking spot without engaging the autopilot. Same output shape as \
-plan_taxi_route plus the resolved spot coordinates and heading. Use to \
-sanity-check a route before calling engage_park.";
-
-const CHOOSE_RUNWAY_EXIT_DESCRIPTION: &str = "Record a preferred runway-exit \
-taxiway for the post-landing rollout. The rollout controller slows to \
-turnoff speed by the exit's stationing and, once clear of the hold-short \
-line, the pattern profile auto-releases — the aircraft stops clear of the \
-runway with parking brake set, ready for engage_park.
-
-Call on final (or any time before touchdown) with the taxiway name you \
-want to use, e.g. 'A5'. If the chosen exit is un-makable (aircraft still \
-fast at that stationing), the rollout falls back to the next available \
-exit and logs it. Passing null clears any prior preference.";
-
-const LIST_RUNWAY_EXITS_DESCRIPTION: &str = "List the taxiway exits for a \
-landing runway. Returns each candidate taxiway name plus its approximate \
-stationing in feet from the runway's landing threshold, so you can pick \
-an exit appropriate for your rollout distance. Uses the 1204 active-zone \
-annotations attached to taxi_edges.";
-
-const PLAN_TAXI_ROUTE_DESCRIPTION: &str = "Plan a taxi route across an airport \
-surface. Returns the ordered sequence of waypoint legs (lat/lon pairs plus the \
-taxiway each segment rides), total distance, and any runway active-zones the \
-path crosses (arrival / departure / ILS-critical). PLANNING ONLY in this phase \
-— no autopilot engagement.
-
-Use when the operator or ATC issues a taxi clearance like 'taxi via Alpha, \
-Delta, hold short runway 31'. Pass the taxiway names in order through \
-via_taxiways (e.g. ['A', 'D']). The planner runs a constrained Dijkstra over \
-the apt.dat taxi network: it requires the path to traverse the given taxiways \
-in order, allows unnamed connector edges at the start/end to cover gate \
-lead-ins and runway lead-outs, and resolves destination_runway to the taxi \
-node nearest the runway threshold.
-
-If via_taxiways is [] the planner returns the shortest overall route and \
-reports which taxiways it actually used so you can echo them back to the \
-user.
-
-If the airport has no taxi network in apt.dat (small uncontrolled strips), \
-this tool errors. Use sql_query against the `taxi_nodes` / `taxi_edges` \
-tables for ad-hoc exploration.";
-
 // SQL query description notes:
 //   * Source is X-Plane's apt.dat parsed into three zstd GeoParquet tables
 //     (airports, runways, comms). Endpoints are 8-decimal; headings and
@@ -3062,13 +2981,11 @@ tables for ad-hoc exploration.";
 //     emitting bare POINT(...) which fails on DuckDB.
 //   * ST_Distance_Sphere-only-accepts-POINT warning + crosstrack /
 //     along-track example — the LLM tried to pass a LINESTRING and fail.
-const SQL_QUERY_DESCRIPTION: &str = "Run an arbitrary read-only SQL query against the runway/airport/comms \
-database (derived from X-Plane's apt.dat). This is the AUTHORITATIVE source \
-for runway and airport facts — never guess a runway identifier, airport \
-code, course, length, elevation, or ATC frequency; query for it. The \
-backend is DuckDB with the spatial extension loaded, so you have full ST_* \
-geospatial functions available. Results are tab-separated with a header \
-row, truncated to 50 rows.
+const SQL_QUERY_DESCRIPTION: &str = "Run a read-only SQL query against the runway/airport/comms/taxi \
+database (derived from X-Plane's apt.dat). Authoritative source for runway and airport facts — \
+never guess a runway identifier, airport code, course, length, elevation, or ATC frequency; \
+query for it. DuckDB with the spatial extension; results are tab-separated with a header row, \
+truncated to 50 rows. Completes immediately.
 
 View: airports (one row per airport / seaplane base / heliport, worldwide)
   ident VARCHAR                -- airport identifier as published in apt.dat, e.g. 'KSEA', 'EGLL'
@@ -3144,19 +3061,15 @@ View: parking_spots (one row per startup/parking location — apt.dat row 1300)
   airlines VARCHAR             -- optional 1301 comma-separated 3-letter airline codes
   location GEOMETRY            -- POINT(longitude, latitude)
 
-For concrete route planning ('taxi via A, D to 31') prefer the `plan_taxi_route` \
-tool — it handles the Dijkstra and destination resolution for you. Use \
-taxi_nodes/taxi_edges directly for exploratory queries ('what taxiways connect \
-at node 42?', 'which edges conflict with runway 31 on departure?').
+Use taxi_nodes/taxi_edges for exploratory queries ('what taxiways connect at node 42?',
+'which edges conflict with runway 31 on departure?'); for actual route planning call
+`plan_taxi_route`.
 
-Spatial functions (DuckDB spatial extension): ST_Point(lon, lat) — note that
-LONGITUDE comes first — plus ST_Distance_Sphere(p1, p2) which returns meters
-along the great circle. Use these for 'nearest runway', 'within N nm', etc.
-Other ST_* functions (ST_Distance, ST_DWithin, ST_AsGeoJSON) are also available.
-ALWAYS prefix spatial functions with ST_ (e.g. ST_Point, not POINT).
-ST_Distance_Sphere ONLY accepts two POINTs. It will error on a LINESTRING.
-For point-to-centerline distance (crosstrack offset) use the local flat-earth
-projection shown below — do NOT pass a runway LINESTRING to ST_Distance_Sphere.
+Spatial functions: ST_Point(lon, lat) — LONGITUDE FIRST — and ST_Distance_Sphere(p1, p2)
+which returns meters along the great circle. Other ST_* functions (ST_Distance, ST_DWithin,
+ST_AsGeoJSON) are available. ALWAYS prefix with ST_ (bare POINT fails). ST_Distance_Sphere
+accepts two POINTs only — it errors on a LINESTRING. For point-to-centerline distance
+(crosstrack offset) use the flat-earth projection shown in the closest-runway query below.
 
 Common queries:
 
