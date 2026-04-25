@@ -15,8 +15,8 @@ use crate::control::nose_wheel::NoseWheelController;
 use crate::control::pitch_hold::PitchController;
 use crate::control::tecs_lite::TECSLite;
 use crate::core::profiles::{
-    Axis, GuidanceProfile, IdleLateralProfile, IdleSpeedProfile, IdleVerticalProfile,
-    PatternMetadata, ProfileContribution, ProfileTick,
+    idle_profile_trio, Axis, GuidanceProfile, IdleLateralProfile, IdleSpeedProfile,
+    IdleVerticalProfile, PatternMetadata, ProfileContribution, ProfileTick,
 };
 use crate::core::state_estimator::estimate_aircraft_state;
 use crate::guidance::flare_profile::FlareController;
@@ -70,6 +70,12 @@ pub struct PilotCore {
     pub ground_speed_controller: GroundSpeedController,
     pub active_profiles: Vec<Box<dyn GuidanceProfile>>,
     pub latest_snapshot: Option<StatusSnapshot>,
+    /// Last phase any active profile reported via `pattern_metadata`. Lets
+    /// `phase()` keep returning the post-landing phase (Rollout, RunwayExit,
+    /// TaxiClear) after `pattern_fly` auto-releases on stop, instead of
+    /// falling back to `Preflight` and confusing both the LLM and the
+    /// scenario tests that assert on `final_phase`.
+    last_known_phase: Option<FlightPhase>,
 }
 
 impl PilotCore {
@@ -79,11 +85,7 @@ impl PilotCore {
         let pitch_controller = PitchController::new(config.controllers.pitch);
         let tecs = TECSLite::new(config.controllers.tecs);
         let flare = FlareController::new(config.flare.clone());
-        let idle: Vec<Box<dyn GuidanceProfile>> = vec![
-            Box::new(IdleLateralProfile),
-            Box::new(IdleVerticalProfile),
-            Box::new(IdleSpeedProfile::new(config.performance.cruise_speed_kt)),
-        ];
+        let idle = idle_profile_trio(config.performance.cruise_speed_kt);
         Self {
             runway_frame,
             bank_controller,
@@ -96,6 +98,7 @@ impl PilotCore {
             ground_speed_controller: GroundSpeedController::new(),
             active_profiles: idle,
             latest_snapshot: None,
+            last_known_phase: None,
             config,
         }
     }
@@ -186,7 +189,9 @@ impl PilotCore {
     }
 
     pub fn phase(&self) -> FlightPhase {
-        self.current_phase().unwrap_or(FlightPhase::Preflight)
+        self.current_phase()
+            .or(self.last_known_phase)
+            .unwrap_or(FlightPhase::Preflight)
     }
 
     fn current_phase(&self) -> Option<FlightPhase> {
@@ -202,7 +207,13 @@ impl PilotCore {
         let state = estimate_aircraft_state(raw_state, &self.config, &self.runway_frame, dt);
         let (guidance, metadata) = self.compose_guidance(&state, dt);
         let commands = self.commands_from_guidance(&state, &guidance);
-        let phase = self.current_phase();
+        // `metadata` is captured inside `compose_guidance` BEFORE any
+        // hand-off displaces the reporting profile, so its `phase` stays
+        // correct for this tick even when pattern_fly auto-released.
+        let phase = metadata.as_ref().map(|m| m.phase);
+        if let Some(p) = phase {
+            self.last_known_phase = Some(p);
+        }
         let debug_lines: Vec<String> = self
             .active_profiles
             .iter()

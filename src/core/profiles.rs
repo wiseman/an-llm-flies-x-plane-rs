@@ -183,6 +183,19 @@ impl GuidanceProfile for IdleSpeedProfile {
     }
 }
 
+/// Three-axis idle stack — what the pilot installs when no real profile
+/// owns the aircraft (initial state, post-landing hand-off, axis-orphan
+/// replacement). `speed_kt` is the speed the placeholder reports as its
+/// target; downstream consumers don't act on it but it shows up in the
+/// status snapshot.
+pub fn idle_profile_trio(speed_kt: f64) -> Vec<Box<dyn GuidanceProfile>> {
+    vec![
+        Box::new(IdleLateralProfile),
+        Box::new(IdleVerticalProfile),
+        Box::new(IdleSpeedProfile::new(speed_kt)),
+    ]
+}
+
 // ---------- single-axis holds ----------
 
 pub struct HeadingHoldProfile {
@@ -1261,26 +1274,26 @@ impl GuidanceProfile for PatternFlyProfile {
                 Box::new(SpeedHoldProfile::new(self.config.performance.vy_kt)),
             ]);
         }
-        // Post-landing hand-off: once the aircraft is in TaxiClear
-        // (clear of the runway and stopped), release the three-axis
-        // pattern profile so the LLM can engage a taxi/park profile
-        // without displacing us. Guard on `previous_phase != TaxiClear`
-        // so we only queue the hand-off on the *first* tick of TaxiClear.
-        //
-        // Only fires when the LLM has opted into the new post-landing
-        // flow via `choose_runway_exit` — deterministic simple-backend
-        // scenarios (no LLM) keep the legacy "pattern_fly stays engaged
-        // through TaxiClear" behavior so `ScenarioRunner` can still read
-        // the phase via `pattern_metadata`.
-        if self.phase == FlightPhase::TaxiClear
-            && previous_phase != FlightPhase::TaxiClear
-            && self.preferred_exit.is_some()
-        {
-            hand_off = Some(vec![
-                Box::new(IdleLateralProfile),
-                Box::new(IdleVerticalProfile),
-                Box::new(IdleSpeedProfile::new(0.0)),
-            ]);
+        // Post-landing hand-off: release the three-axis pattern profile
+        // either on the first tick of TaxiClear (the happy path: aircraft
+        // is laterally clear of the runway and decelerating) OR whenever
+        // the aircraft is stopped in any post-landing phase (the catch-all:
+        // aircraft braked to a stop on the runway because rollout couldn't
+        // make the chosen exit, or the LLM never called choose_runway_exit
+        // at all). Without this, pattern_fly sits engaged with no
+        // "completed" signal to wait for, and the LLM thinks it has to
+        // wait. PilotCore::last_known_phase preserves the post-landing
+        // phase value for downstream readers (`pilot.phase()`) after the
+        // hand-off so scenario tests still see Rollout / TaxiClear.
+        let post_landing = matches!(
+            self.phase,
+            FlightPhase::Rollout | FlightPhase::RunwayExit | FlightPhase::TaxiClear
+        );
+        let first_tick_taxi_clear = self.phase == FlightPhase::TaxiClear
+            && previous_phase != FlightPhase::TaxiClear;
+        let stopped_post_landing = post_landing && state.gs_kt < 0.5;
+        if first_tick_taxi_clear || stopped_post_landing {
+            hand_off = Some(idle_profile_trio(0.0));
         }
         if let Some(queued) = self.handoff_request.take() {
             hand_off = Some(queued);
