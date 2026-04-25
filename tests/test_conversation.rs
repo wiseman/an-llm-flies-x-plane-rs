@@ -63,6 +63,7 @@ impl LlmBackend for StubClient {
                 output: Vec::new(),
                 usage: LlmUsage::default(),
                 raw: Value::Null,
+                thoughts: Vec::new(),
             });
         }
         Ok(scripted.remove(0))
@@ -80,6 +81,7 @@ fn text_response(text: &str) -> LlmResponse {
         output: vec![Part::Text(text.to_string())],
         usage: LlmUsage::default(),
         raw: Value::Null,
+        thoughts: Vec::new(),
     }
 }
 
@@ -92,6 +94,7 @@ fn tool_call_response(name: &str, args: Value, id: &str) -> LlmResponse {
         }],
         usage: LlmUsage::default(),
         raw: Value::Null,
+        thoughts: Vec::new(),
     }
 }
 
@@ -284,6 +287,7 @@ fn assistant_text_emitted_even_when_response_also_has_tool_call() {
         ],
         usage: LlmUsage::default(),
         raw: Value::Null,
+        thoughts: Vec::new(),
     }]);
     let bus = SimBus::new(false);
     let (tx, rx) = unbounded::<IncomingMessage>();
@@ -466,6 +470,7 @@ fn token_usage_is_logged_after_each_call_when_usage_present() {
                 cache_creation_tokens: 0,
             },
             raw: Value::Null,
+            thoughts: Vec::new(),
         },
         text_response("heading 090 engaged"),
     ]);

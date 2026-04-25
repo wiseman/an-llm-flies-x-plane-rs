@@ -296,6 +296,7 @@ pub fn run_tui(
     // Down can restore it once they walk past the end of history.
     let mut pending_draft: String = String::new();
     let mut log_detail = true;
+    let mut show_thoughts = true;
     // None = follow live tail (default). Some(offset) = paused at that
     // absolute scroll offset. Absolute rather than relative-to-bottom so
     // new log lines arriving while scrolled don't move the viewport.
@@ -362,6 +363,10 @@ pub fn run_tui(
                         }
                         KeyCode::Char('t') => {
                             log_detail = !log_detail;
+                            continue;
+                        }
+                        KeyCode::Char('o') => {
+                            show_thoughts = !show_thoughts;
                             continue;
                         }
                         KeyCode::Char('a') => {
@@ -608,7 +613,12 @@ pub fn run_tui(
             // Inside the draw closure: operator-row bg tint needs the
             // pane's live inner width to pad out to the border.
             let log_inner_width = chunks[1].width.saturating_sub(2);
-            let mut log_lines = build_log_lines(&log_entries, log_detail, log_inner_width);
+            let mut log_lines = build_log_lines(
+                &log_entries,
+                log_detail,
+                show_thoughts,
+                log_inner_width,
+            );
             if bus.is_llm_busy() {
                 log_lines.push(render_thinking_line(tui_epoch.elapsed()));
             }
@@ -659,7 +669,7 @@ pub fn run_tui(
             );
 
             let input_title =
-                " INPUT — space/tab hold to talk · enter to send · ↑/↓ history · c-a/e/k edit · ctrl-t log detail · pgup/pgdn/end scroll log ";
+                " INPUT — space/tab hold to talk · enter to send · ↑/↓ history · c-a/e/k edit · ctrl-t log detail · ctrl-o thoughts · pgup/pgdn/end scroll log ";
             let ptt_snap: Option<PttSnapshot> = ptt.as_ref().map(|p| p.snapshot());
             let mut spans: Vec<Span> = vec![
                 Span::styled("> ", Style::default().fg(Color::Cyan)),
@@ -1265,6 +1275,12 @@ fn style_for_kind(kind: LogKind) -> LogStyle {
                 body_style: Style::default().fg(Color::DarkGray),
             }
         }
+        LogKind::Thinking => LogStyle::Bar {
+            bar_style: Style::default().fg(Color::Cyan),
+            body_style: Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::ITALIC),
+        },
     }
 }
 
@@ -1278,11 +1294,18 @@ const OPERATOR_BG: Color = Color::Rgb(32, 32, 38);
 fn build_log_lines(
     entries: &[LogEntry],
     show_verbose: bool,
+    show_thoughts: bool,
     inner_width: u16,
 ) -> Vec<Line<'static>> {
     let mut out: Vec<Line<'static>> = Vec::new();
     let mut prev_kind: Option<LogKind> = None;
-    for entry in entries.iter().filter(|e| show_verbose || !e.kind.is_verbose()) {
+    for entry in entries.iter().filter(|e| {
+        if e.kind == LogKind::Thinking {
+            show_thoughts
+        } else {
+            show_verbose || !e.kind.is_verbose()
+        }
+    }) {
         if prev_kind.is_some_and(|p| is_author_turn_boundary(p, entry.kind)) {
             out.push(Line::default());
         }
@@ -1924,7 +1947,7 @@ mod tests {
             LogEntry::new(LogKind::Llm, "v1"),
             LogEntry::new(LogKind::Operator, "abort"),
         ];
-        let lines = build_log_lines(&entries, true, 40);
+        let lines = build_log_lines(&entries, true, true, 40);
         let joined: Vec<String> = lines
             .iter()
             .map(|l| {
@@ -1948,7 +1971,7 @@ mod tests {
             LogEntry::new(LogKind::Llm, "rolling"),
             LogEntry::new(LogKind::Safety, "go_around"),
         ];
-        let lines = build_log_lines(&entries, true, 40);
+        let lines = build_log_lines(&entries, true, true, 40);
         // No operator↔llm transitions → no separators.
         assert_eq!(lines.len(), 3);
     }
@@ -1956,7 +1979,7 @@ mod tests {
     #[test]
     fn build_log_lines_tints_operator_lines_to_inner_width() {
         let entries = vec![LogEntry::new(LogKind::Operator, "go")];
-        let lines = build_log_lines(&entries, true, 40);
+        let lines = build_log_lines(&entries, true, true, 40);
         assert_eq!(lines.len(), 1);
         let row = &lines[0];
         assert_eq!(row.width(), 40);
@@ -1969,7 +1992,7 @@ mod tests {
     #[test]
     fn build_log_lines_does_not_tint_non_operator_lines() {
         let entries = vec![LogEntry::new(LogKind::Llm, "rolling")];
-        let lines = build_log_lines(&entries, true, 40);
+        let lines = build_log_lines(&entries, true, true, 40);
         assert_eq!(lines.len(), 1);
         for span in &lines[0].spans {
             assert_eq!(span.style.bg, None);

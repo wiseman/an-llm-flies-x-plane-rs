@@ -50,6 +50,9 @@ pub enum LogKind {
     Heartbeat,
     /// Voice/PTT state transitions — verbose, hidden in compact mode.
     Voice,
+    /// Model-emitted reasoning / thought summary. Informational only —
+    /// never echoed back to the model.
+    Thinking,
 }
 
 impl LogKind {
@@ -65,6 +68,7 @@ impl LogKind {
             LogKind::Safety => Some("[safety] "),
             LogKind::Heartbeat => Some("[heartbeat] "),
             LogKind::ToolCall | LogKind::Tokens => Some("[llm-worker] "),
+            LogKind::Thinking => Some("[thinking] "),
             LogKind::System | LogKind::Error | LogKind::Voice => None,
         }
     }

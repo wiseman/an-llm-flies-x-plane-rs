@@ -377,6 +377,7 @@ fn handle_message(
             cache_anchor_idx,
         })?;
         log_usage(&response, client, bus);
+        emit_thoughts(&response.thoughts, bus);
         emit_assistant_text(&response.output, bus);
         conv.append_response(&response.output);
 
@@ -504,12 +505,25 @@ fn log_usage(response: &LlmResponse, client: &dyn LlmBackend, bus: Option<&SimBu
     );
 }
 
-fn emit_assistant_text(output: &[Part], bus: Option<&SimBus>) {
-    for part in output {
-        if let Part::Text(t) = part {
-            if !t.trim().is_empty() {
-                emit_log_kind(bus, LogKind::Llm, t);
-            }
+fn emit_text_lines<'a, I>(bus: Option<&SimBus>, kind: LogKind, lines: I)
+where
+    I: IntoIterator<Item = &'a str>,
+{
+    for line in lines {
+        if !line.trim().is_empty() {
+            emit_log_kind(bus, kind, line);
         }
     }
+}
+
+fn emit_thoughts(thoughts: &[String], bus: Option<&SimBus>) {
+    emit_text_lines(bus, LogKind::Thinking, thoughts.iter().map(String::as_str));
+}
+
+fn emit_assistant_text(output: &[Part], bus: Option<&SimBus>) {
+    let texts = output.iter().filter_map(|p| match p {
+        Part::Text(t) => Some(t.as_str()),
+        _ => None,
+    });
+    emit_text_lines(bus, LogKind::Llm, texts);
 }

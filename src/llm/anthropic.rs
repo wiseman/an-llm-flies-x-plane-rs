@@ -89,6 +89,7 @@ impl LlmBackend for AnthropicBackend {
             output,
             usage,
             raw,
+            thoughts: Vec::new(),
         })
     }
 

@@ -175,6 +175,9 @@ pub struct LlmResponse {
     /// Provider-native blob, preserved for the transcript dumper. Never
     /// parsed by upstream code.
     pub raw: Value,
+    /// Reasoning / thought summaries surfaced by the provider.
+    /// Informational only — not appended to conversation history.
+    pub thoughts: Vec<String>,
 }
 
 pub trait LlmBackend: Send + Sync {

@@ -77,6 +77,7 @@ impl LlmBackend for OpenAiBackend {
             output,
             usage,
             raw,
+            thoughts: Vec::new(),
         })
     }
 

@@ -7,10 +7,11 @@
 //! without an `id`, so we synthesize stable ids so the next turn's
 //! `functionResponse` can reference the right call by name.
 
+use std::collections::HashMap;
 use std::env;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use anyhow::{anyhow, Result};
 use serde_json::{json, Value};
@@ -30,6 +31,14 @@ pub struct GeminiBackend {
     /// Monotonic counter for synthesized tool-call ids. Persists across
     /// calls within one session so each id is globally unique.
     call_counter: Arc<AtomicU64>,
+    /// Synthesized-id → opaque `thoughtSignature` captured from model
+    /// `functionCall` parts. Gemini 3 hard-rejects a request that
+    /// replays a historical functionCall without its original signature.
+    signatures: Arc<Mutex<HashMap<String, String>>>,
+    /// Sanitized `functionDeclarations` JSON. Tool definitions are
+    /// byte-stable for the lifetime of the backend, so we walk + clone
+    /// each schema once instead of every turn.
+    tools_cache: Arc<Mutex<Option<Vec<Value>>>>,
 }
 
 impl GeminiBackend {
@@ -40,6 +49,8 @@ impl GeminiBackend {
             cache_stats: Arc::new(CacheStats::default()),
             transcript_path: None,
             call_counter: Arc::new(AtomicU64::new(0)),
+            signatures: Arc::new(Mutex::new(HashMap::new())),
+            tools_cache: Arc::new(Mutex::new(None)),
         }
     }
 }
@@ -52,8 +63,15 @@ impl LlmBackend for GeminiBackend {
             .or_else(|| env::var("GEMINI_API_KEY").ok())
             .ok_or_else(|| anyhow!("GEMINI_API_KEY is required for the Gemini backend"))?;
 
-        let (system_instruction, contents) = encode_messages(req.messages);
-        let tools_json = encode_tools(req.tools);
+        let signatures_guard = self.signatures.lock().unwrap();
+        let (system_instruction, contents) = encode_messages(req.messages, &signatures_guard);
+        drop(signatures_guard);
+        let tools_json = self
+            .tools_cache
+            .lock()
+            .unwrap()
+            .get_or_insert_with(|| encode_tools(req.tools))
+            .clone();
 
         let mut payload = json!({
             "contents": contents,
@@ -64,8 +82,14 @@ impl LlmBackend for GeminiBackend {
             payload["systemInstruction"] = sys;
         }
         if let Some(effort) = req.reasoning_effort {
+            // `includeThoughts` opts into the `thought: true` summary
+            // parts; without it Gemini returns only the opaque
+            // `thoughtSignature` blobs.
             payload["generationConfig"] = json!({
-                "thinkingConfig": {"thinkingBudget": effort.token_budget()}
+                "thinkingConfig": {
+                    "thinkingBudget": effort.token_budget(),
+                    "includeThoughts": true,
+                }
             });
         }
 
@@ -87,11 +111,13 @@ impl LlmBackend for GeminiBackend {
         if let Some(path) = &self.transcript_path {
             write_transcript(path, &payload, Some(&raw));
         }
-        let output = parse_output(&raw, &self.call_counter)?;
+        let (output, thoughts) =
+            parse_output(&raw, &self.call_counter, &self.signatures)?;
         Ok(LlmResponse {
             output,
             usage,
             raw,
+            thoughts,
         })
     }
 
@@ -113,7 +139,10 @@ impl LlmBackend for GeminiBackend {
 /// tool_result and plain user text) and "model" (for assistant text and
 /// functionCall). Adjacent same-role messages are collapsed so the
 /// alternation stays well-formed.
-fn encode_messages(messages: &[Message]) -> (Option<Value>, Vec<Value>) {
+fn encode_messages(
+    messages: &[Message],
+    signatures: &HashMap<String, String>,
+) -> (Option<Value>, Vec<Value>) {
     // First pass: pull out all system text into one systemInstruction.
     let mut system_text: Vec<String> = Vec::new();
     // Remember the name for each tool_call id we've seen so that a
@@ -157,12 +186,16 @@ fn encode_messages(messages: &[Message]) -> (Option<Value>, Vec<Value>) {
         for part in &msg.content {
             match part {
                 Part::Text(t) => parts.push(json!({"text": t})),
-                Part::ToolCall { name, arguments, .. } => {
+                Part::ToolCall { id, name, arguments } => {
                     let args: Value =
                         serde_json::from_str(arguments).unwrap_or_else(|_| json!({}));
-                    parts.push(json!({
+                    let mut block = json!({
                         "functionCall": {"name": name, "args": args}
-                    }));
+                    });
+                    if let Some(sig) = signatures.get(id) {
+                        block["thoughtSignature"] = Value::String(sig.clone());
+                    }
+                    parts.push(block);
                 }
                 Part::ToolResult { id, content } => {
                     let name = id_to_name
@@ -196,14 +229,60 @@ fn encode_tools(tools: &[ToolDef]) -> Vec<Value> {
     let declarations: Vec<Value> = tools
         .iter()
         .map(|t| {
+            let mut params = t.parameters.clone();
+            sanitize_schema_for_gemini(&mut params);
             json!({
                 "name": t.name,
                 "description": t.description,
-                "parameters": t.parameters,
+                "parameters": params,
             })
         })
         .collect();
     vec![json!({"functionDeclarations": declarations})]
+}
+
+/// Strip JSON Schema fields Gemini's OpenAPI-subset validator rejects,
+/// and rewrite the ones it spells differently. The rest of the codebase
+/// authors schemas in OpenAI's strict-mode dialect (`additionalProperties:
+/// false`, `type: ["string", "null"]`, `enum: [..., null]`); Gemini wants
+/// `nullable: true` and a scalar `type`, with no `additionalProperties`
+/// anywhere.
+fn sanitize_schema_for_gemini(v: &mut Value) {
+    match v {
+        Value::Object(map) => {
+            map.remove("additionalProperties");
+            if let Some(arr) = map.get("type").and_then(Value::as_array).cloned() {
+                // JSON Schema's nullable convention is `"type": ["X",
+                // "null"]` — the string literal "null" is a type-name
+                // token, not JSON null. Strip it to get the concrete type
+                // and surface the nullability via Gemini's `nullable: true`.
+                let original_len = arr.len();
+                let non_null: Vec<Value> = arr
+                    .into_iter()
+                    .filter(|x| x.as_str() != Some("null"))
+                    .collect();
+                if non_null.len() == 1 {
+                    let had_null = non_null.len() != original_len;
+                    map.insert("type".to_string(), non_null.into_iter().next().unwrap());
+                    if had_null {
+                        map.insert("nullable".to_string(), Value::Bool(true));
+                    }
+                }
+            }
+            if let Some(Value::Array(items)) = map.get_mut("enum") {
+                items.retain(|x| !x.is_null());
+            }
+            for (_, child) in map.iter_mut() {
+                sanitize_schema_for_gemini(child);
+            }
+        }
+        Value::Array(items) => {
+            for item in items.iter_mut() {
+                sanitize_schema_for_gemini(item);
+            }
+        }
+        _ => {}
+    }
 }
 
 // ---------- decoders ----------
@@ -232,7 +311,11 @@ fn parse_usage(response: &Value) -> LlmUsage {
     }
 }
 
-fn parse_output(response: &Value, call_counter: &AtomicU64) -> Result<Vec<Part>> {
+fn parse_output(
+    response: &Value,
+    call_counter: &AtomicU64,
+    signatures: &Mutex<HashMap<String, String>>,
+) -> Result<(Vec<Part>, Vec<String>)> {
     let Some(candidates) = response.get("candidates").and_then(|v| v.as_array()) else {
         return Err(anyhow!(
             "Gemini response missing `candidates` array: {}",
@@ -240,20 +323,29 @@ fn parse_output(response: &Value, call_counter: &AtomicU64) -> Result<Vec<Part>>
         ));
     };
     let Some(first) = candidates.first() else {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), Vec::new()));
     };
     let Some(parts) = first
         .get("content")
         .and_then(|c| c.get("parts"))
         .and_then(|p| p.as_array())
     else {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), Vec::new()));
     };
 
     let mut out = Vec::new();
+    let mut thoughts = Vec::new();
     for block in parts {
+        let is_thought = block
+            .get("thought")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
         if let Some(text) = block.get("text").and_then(|v| v.as_str()) {
-            out.push(Part::Text(text.to_string()));
+            if is_thought {
+                thoughts.push(text.to_string());
+            } else {
+                out.push(Part::Text(text.to_string()));
+            }
             continue;
         }
         if let Some(call) = block.get("functionCall") {
@@ -266,15 +358,18 @@ fn parse_output(response: &Value, call_counter: &AtomicU64) -> Result<Vec<Part>>
             let arguments = serde_json::to_string(&args).unwrap_or_else(|_| "{}".to_string());
             let n = call_counter.fetch_add(1, Ordering::Relaxed);
             let id = format!("{}-{}", name, n);
+            if let Some(sig) = block.get("thoughtSignature").and_then(|v| v.as_str()) {
+                signatures.lock().unwrap().insert(id.clone(), sig.to_string());
+            }
             out.push(Part::ToolCall {
                 id,
                 name,
                 arguments,
             });
         }
-        // Ignore `thought` / `executableCode` / etc. — preserved in raw.
+        // Ignore `executableCode` / etc. — preserved in raw.
     }
-    Ok(out)
+    Ok((out, thoughts))
 }
 
 #[cfg(test)]
@@ -298,7 +393,7 @@ mod tests {
             Message::user_text("hi"),
             Message::assistant_text("hello"),
         ];
-        let (sys, contents) = encode_messages(&msgs);
+        let (sys, contents) = encode_messages(&msgs, &HashMap::new());
         let sys = sys.expect("system instruction present");
         assert_eq!(sys["parts"][0]["text"], "sys");
         assert_eq!(contents.len(), 2);
@@ -312,7 +407,7 @@ mod tests {
             Message::assistant_tool_call("c1", "a", "{\"x\":1}"),
             Message::tool_result("c1", "ok"),
         ];
-        let (_sys, contents) = encode_messages(&msgs);
+        let (_sys, contents) = encode_messages(&msgs, &HashMap::new());
         assert_eq!(contents.len(), 2);
         assert_eq!(contents[0]["role"], "model");
         let call = &contents[0]["parts"][0]["functionCall"];
@@ -330,7 +425,7 @@ mod tests {
             Message::user_text("first"),
             Message::tool_result("c1", "ok"),
         ];
-        let (_sys, contents) = encode_messages(&msgs);
+        let (_sys, contents) = encode_messages(&msgs, &HashMap::new());
         assert_eq!(contents.len(), 1, "adjacent user-role messages collapse");
         let parts = contents[0]["parts"].as_array().unwrap();
         assert_eq!(parts.len(), 2);
@@ -347,6 +442,41 @@ mod tests {
     }
 
     #[test]
+    fn encode_tools_strips_additional_properties_and_normalizes_nullable() {
+        let tools = vec![ToolDef {
+            name: "t".to_string(),
+            description: "d".to_string(),
+            parameters: json!({
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                    "name": {"type": ["string", "null"]},
+                    "mode": {"type": ["string", "null"], "enum": ["add", "set", null]},
+                    "nested": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": {
+                            "x": {"type": ["number", "null"]}
+                        }
+                    }
+                }
+            }),
+        }];
+        let out = encode_tools(&tools);
+        let params = &out[0]["functionDeclarations"][0]["parameters"];
+        assert!(params.get("additionalProperties").is_none());
+        assert!(params["properties"]["nested"].get("additionalProperties").is_none());
+        assert_eq!(params["properties"]["name"]["type"], "string");
+        assert_eq!(params["properties"]["name"]["nullable"], true);
+        assert_eq!(params["properties"]["mode"]["type"], "string");
+        assert_eq!(params["properties"]["mode"]["nullable"], true);
+        let mode_enum = params["properties"]["mode"]["enum"].as_array().unwrap();
+        assert_eq!(mode_enum, &vec![json!("add"), json!("set")]);
+        assert_eq!(params["properties"]["nested"]["properties"]["x"]["type"], "number");
+        assert_eq!(params["properties"]["nested"]["properties"]["x"]["nullable"], true);
+    }
+
+    #[test]
     fn parse_output_synthesizes_stable_ids() {
         let counter = AtomicU64::new(0);
         let payload = json!({
@@ -360,7 +490,9 @@ mod tests {
                 }
             }]
         });
-        let parts = parse_output(&payload, &counter).unwrap();
+        let signatures = Mutex::new(HashMap::new());
+        let (parts, thoughts) = parse_output(&payload, &counter, &signatures).unwrap();
+        assert!(thoughts.is_empty());
         assert_eq!(parts.len(), 3);
         match &parts[1] {
             Part::ToolCall { id, name, .. } => {
@@ -372,6 +504,70 @@ mod tests {
         match &parts[2] {
             Part::ToolCall { id, .. } => assert_eq!(id, "a-1"),
             _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn thought_signature_round_trips_from_response_into_next_request() {
+        // Gemini 3 returns an opaque `thoughtSignature` on functionCall
+        // parts; replaying the historical call without it triggers a
+        // 400. parse_output must capture it; encode_messages must
+        // re-attach it on the way out.
+        let counter = AtomicU64::new(0);
+        let signatures = Mutex::new(HashMap::new());
+        let payload = json!({
+            "candidates": [{
+                "content": {
+                    "parts": [
+                        {
+                            "functionCall": {"name": "a", "args": {"x": 1}},
+                            "thoughtSignature": "sig-xyz"
+                        }
+                    ]
+                }
+            }]
+        });
+        let (parts, _thoughts) = parse_output(&payload, &counter, &signatures).unwrap();
+        let id = match &parts[0] {
+            Part::ToolCall { id, .. } => id.clone(),
+            _ => panic!("expected ToolCall"),
+        };
+        assert_eq!(
+            signatures.lock().unwrap().get(&id).map(String::as_str),
+            Some("sig-xyz")
+        );
+
+        let snapshot = signatures.lock().unwrap().clone();
+        let msgs = vec![Message::assistant_tool_call(id, "a", "{\"x\":1}")];
+        let (_sys, contents) = encode_messages(&msgs, &snapshot);
+        assert_eq!(contents[0]["parts"][0]["thoughtSignature"], "sig-xyz");
+        assert_eq!(contents[0]["parts"][0]["functionCall"]["name"], "a");
+    }
+
+    #[test]
+    fn parse_output_partitions_thought_text_from_assistant_text() {
+        // `thought: true` parts are reasoning summaries (Gemini 3 only,
+        // when `includeThoughts` is set). They go to the side channel
+        // for bus display; only the non-thought text becomes Part::Text.
+        let counter = AtomicU64::new(0);
+        let signatures = Mutex::new(HashMap::new());
+        let payload = json!({
+            "candidates": [{
+                "content": {
+                    "parts": [
+                        {"text": "Let me think about the runway choice.", "thought": true},
+                        {"text": "Cleared for takeoff runway 30."}
+                    ]
+                }
+            }]
+        });
+        let (parts, thoughts) = parse_output(&payload, &counter, &signatures).unwrap();
+        assert_eq!(parts.len(), 1);
+        assert_eq!(thoughts.len(), 1);
+        assert_eq!(thoughts[0], "Let me think about the runway choice.");
+        match &parts[0] {
+            Part::Text(t) => assert_eq!(t, "Cleared for takeoff runway 30."),
+            _ => panic!("expected Text"),
         }
     }
 

@@ -80,6 +80,7 @@ fn empty_response() -> LlmResponse {
         output: Vec::new(),
         usage: LlmUsage::default(),
         raw: Value::Null,
+        thoughts: Vec::new(),
     }
 }
 
@@ -92,6 +93,7 @@ fn tool_call(name: &str, args: Value, id: &str) -> LlmResponse {
         }],
         usage: LlmUsage::default(),
         raw: Value::Null,
+        thoughts: Vec::new(),
     }
 }
 
@@ -109,6 +111,7 @@ fn tool_call_with_usage(name: &str, args: Value, id: &str, out_tokens: u64) -> L
             output_tokens: out_tokens,
         },
         raw: Value::Null,
+        thoughts: Vec::new(),
     }
 }
 
