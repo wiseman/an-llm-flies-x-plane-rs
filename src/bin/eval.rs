@@ -261,6 +261,12 @@ fn main() -> Result<()> {
     if let Some(p) = &result.summary_json {
         println!("summary:         {}", p.display());
     }
+    if let Some(p) = &result.track_csv {
+        println!("track_csv:       {}", p.display());
+    }
+    if let Some(p) = &result.track_kml {
+        println!("track_kml:       {}", p.display());
+    }
     if result.outcome.success {
         Ok(())
     } else {

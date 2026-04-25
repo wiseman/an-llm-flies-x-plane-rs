@@ -33,6 +33,7 @@ use crate::sim::datarefs::{HAS_CRASHED, PARKING_BRAKE_RATIO};
 use crate::sim::simple_bridge::SimpleToolBridge;
 use crate::sim::simple_dynamics::{DynamicsState, SimpleAircraftModel};
 use crate::sim::xplane_bridge::{geodetic_offset_ft, GeoReference};
+use crate::track::{TrackPoint, TrackRecorder};
 use crate::types::{FlightPhase, Runway, Vec2};
 
 /// Why the eval loop ended. Fed through a channel by either the
@@ -195,6 +196,8 @@ pub struct EvalResult {
     pub log_file: Option<PathBuf>,
     pub transcript_file: Option<PathBuf>,
     pub summary_json: Option<PathBuf>,
+    pub track_csv: Option<PathBuf>,
+    pub track_kml: Option<PathBuf>,
 }
 
 /// Resolved lat/lon/heading/length for the start state + runway frame.
@@ -396,6 +399,74 @@ struct ControlLoopCtx {
     /// Output-token cap. `0` disables the check.
     max_output_tokens: u64,
     field_elevation_ft: f64,
+    /// Flight-track recorder. Sampled once per sim-second so the KML
+    /// replay cadence matches the simulated flight, not wall-clock.
+    track_recorder: Option<Arc<PLMutex<TrackRecorder>>>,
+    /// Wall-clock anchor for KML `<when>` timestamps. Combined with
+    /// `t_sim` so Google Earth replays at simulated pace even when the
+    /// eval ran much faster (or slower) than realtime.
+    track_wall_start: chrono::DateTime<chrono::Utc>,
+}
+
+/// Build a `TrackPoint` and hand it to the recorder. Called only when
+/// the 1 Hz sim-time gate fires, so the extra dynamics/snapshot reads
+/// stay off the 5 Hz hot path.
+#[allow(clippy::too_many_arguments)]
+fn sample_eval_track(
+    recorder: &Arc<PLMutex<TrackRecorder>>,
+    bridge: &Arc<SimpleToolBridge>,
+    dynamics: &Arc<PLMutex<DynamicsState>>,
+    pilot: &Arc<PLMutex<PilotCore>>,
+    bus: &SimBus,
+    wall_start: chrono::DateTime<chrono::Utc>,
+    sim_time_s: f64,
+    alt_msl_ft: f64,
+    alt_agl_ft: f64,
+    gs_kt: f64,
+    phase: Option<FlightPhase>,
+    on_ground: bool,
+) {
+    use crate::llm::tools::ToolBridge;
+    let tool_bridge: &dyn ToolBridge = bridge.as_ref();
+    let lat = tool_bridge.get_dataref_value(crate::sim::datarefs::LATITUDE_DEG.name);
+    let lon = tool_bridge.get_dataref_value(crate::sim::datarefs::LONGITUDE_DEG.name);
+    let (Some(lat_deg), Some(lon_deg)) = (lat, lon) else {
+        return;
+    };
+    let (heading_deg, ias_kt, vs_fpm) = {
+        let d = dynamics.lock();
+        (d.heading_deg, d.ias_kt, d.vertical_speed_ft_s * 60.0)
+    };
+    // Ground-track angle is ill-defined at zero groundspeed; fall back
+    // to heading when the pilot snapshot isn't available yet either.
+    let track_deg = pilot
+        .lock()
+        .latest_snapshot
+        .as_ref()
+        .map(|s| s.state.track_deg)
+        .unwrap_or(heading_deg);
+    let wall_time =
+        wall_start + chrono::Duration::milliseconds((sim_time_s * 1000.0) as i64);
+    let pt = TrackPoint {
+        wall_time,
+        t_sim: sim_time_s,
+        lat_deg,
+        lon_deg,
+        alt_msl_ft,
+        alt_agl_ft,
+        heading_deg,
+        track_deg,
+        ias_kt,
+        gs_kt,
+        vs_fpm,
+        phase: phase
+            .map(|p| p.value().to_string())
+            .unwrap_or_else(|| "none".to_string()),
+        on_ground,
+    };
+    if let Err(e) = recorder.lock().record(pt) {
+        bus.push_log_kind(LogKind::Error, format!("[track] write error: {e}"));
+    }
 }
 
 /// Drive the sim forward until the outcome channel yields a result (or
@@ -404,6 +475,10 @@ fn run_control_loop(ctx: ControlLoopCtx) -> (MissionOutcome, f64, f64) {
     let mut max_alt_agl_ft: f64 = 0.0;
     let mut been_airborne = false;
     let wall_spin_sleep = Duration::from_millis(1);
+    // Sample the track once per sim-second. `0.0` first-sample fires on
+    // tick 1 since sim_time_s starts at 0 and monotonically increases.
+    let mut next_track_sim_s: f64 = 0.0;
+    let track_period_sim_s: f64 = 1.0;
     // Without flipping llm_stop, the worker can race past the budget
     // while we're still constructing the outcome.
     fn finish(
@@ -497,6 +572,28 @@ fn run_control_loop(ctx: ControlLoopCtx) -> (MissionOutcome, f64, f64) {
             been_airborne = true;
         }
 
+        // Sample the flight track at 1 Hz in sim-time. All extra field
+        // reads happen inside the gate so the main 5 Hz path stays lean.
+        if let Some(recorder) = ctx.track_recorder.as_ref() {
+            if sim_time_s >= next_track_sim_s {
+                sample_eval_track(
+                    recorder,
+                    &ctx.bridge,
+                    &ctx.dynamics,
+                    &ctx.pilot,
+                    &ctx.bus,
+                    ctx.track_wall_start,
+                    sim_time_s,
+                    alt_ft,
+                    agl,
+                    gs_kt,
+                    phase_now,
+                    on_ground,
+                );
+                next_track_sim_s += track_period_sim_s;
+            }
+        }
+
         // Auto-detect crash.
         let crashed = ctx
             .bridge
@@ -566,6 +663,8 @@ pub fn run_eval_core(
     let log_path = cfg.output_dir.join(format!("{}.log", cfg.session_stem));
     let transcript_path = cfg.output_dir.join(format!("{}.txt", cfg.session_stem));
     let summary_path = cfg.output_dir.join(format!("{}.json", cfg.session_stem));
+    let track_csv_path = cfg.output_dir.join(format!("{}.csv", cfg.session_stem));
+    let track_kml_path = cfg.output_dir.join(format!("{}.kml", cfg.session_stem));
 
     let file_log = Arc::new(FileLog::new(&log_path).context("opening file log")?);
     let bus = SimBus::with_file_log(cfg.verbose, file_log.clone());
@@ -737,8 +836,27 @@ pub fn run_eval_core(
             })?
     };
 
+    // --- track recorder ---
+    let track_recorder = match TrackRecorder::new(&track_csv_path) {
+        Ok(r) => {
+            bus.push_log_kind(
+                LogKind::System,
+                format!("track_csv={} (1 Hz sim-time)", track_csv_path.display()),
+            );
+            Some(Arc::new(PLMutex::new(r)))
+        }
+        Err(e) => {
+            bus.push_log_kind(
+                LogKind::Error,
+                format!("track recorder disabled: {e}"),
+            );
+            None
+        }
+    };
+
     // --- run the control loop (this thread) ---
     let wall_start = Instant::now();
+    let track_wall_start = chrono::Utc::now();
     let control_stop = Arc::new(AtomicBool::new(false));
     let cache_stats = backend.cache_stats_arc();
     let ctrl_ctx = ControlLoopCtx {
@@ -760,6 +878,8 @@ pub fn run_eval_core(
         max_turns: cfg.max_turns,
         max_output_tokens: cfg.max_output_tokens,
         field_elevation_ft: resolved.field_elevation_ft,
+        track_recorder: track_recorder.clone(),
+        track_wall_start,
     };
     let (outcome, max_alt_agl_ft, final_fuel_kg) = run_control_loop(ctrl_ctx);
     let wall_duration_s = wall_start.elapsed().as_secs_f64();
@@ -770,6 +890,33 @@ pub fn run_eval_core(
     // quickly even if we happen to be between ticks.
     drop(input_tx);
     let _ = llm_thread.join();
+
+    // --- flush KML ---
+    let track_kml_written = if let Some(rec) = &track_recorder {
+        let guard = rec.lock();
+        match guard.write_kml(&track_kml_path, &cfg.session_stem) {
+            Ok(_) => {
+                bus.push_log_kind(
+                    LogKind::System,
+                    format!(
+                        "track_kml={} ({} points)",
+                        track_kml_path.display(),
+                        guard.len()
+                    ),
+                );
+                true
+            }
+            Err(e) => {
+                bus.push_log_kind(
+                    LogKind::Error,
+                    format!("track_kml write failed: {e}"),
+                );
+                false
+            }
+        }
+    } else {
+        false
+    };
 
     // --- collect final metrics ---
     let final_snapshot = pilot_arc.lock().latest_snapshot.clone();
@@ -864,5 +1011,7 @@ pub fn run_eval_core(
         log_file: Some(log_path),
         transcript_file: Some(transcript_path),
         summary_json: Some(summary_path),
+        track_csv: track_recorder.as_ref().map(|_| track_csv_path),
+        track_kml: track_kml_written.then_some(track_kml_path),
     })
 }
