@@ -62,11 +62,7 @@ impl LlmBackend for StubClient {
         } else {
             s.remove(0)
         };
-        self.stats.record(
-            resp.usage.input_tokens,
-            resp.usage.cached_tokens,
-            resp.usage.output_tokens,
-        );
+        self.stats.record(&resp.usage);
         Ok(resp)
     }
 
@@ -109,6 +105,7 @@ fn tool_call_with_usage(name: &str, args: Value, id: &str, out_tokens: u64) -> L
         usage: LlmUsage {
             input_tokens: 100,
             cached_tokens: 0,
+            cache_creation_tokens: 0,
             output_tokens: out_tokens,
         },
         raw: Value::Null,

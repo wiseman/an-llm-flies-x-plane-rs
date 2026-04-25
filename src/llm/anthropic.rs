@@ -80,8 +80,7 @@ impl LlmBackend for AnthropicBackend {
             crate::llm::backend::send_with_body_on_error(http, &payload.to_string(), API_URL)?;
         let raw: Value = resp.into_json()?;
         let usage = parse_usage(&raw);
-        self.cache_stats
-            .record(usage.input_tokens, usage.cached_tokens, usage.output_tokens);
+        self.cache_stats.record(&usage);
         if let Some(path) = &self.transcript_path {
             write_transcript(path, &payload, Some(&raw));
         }
@@ -266,6 +265,7 @@ fn parse_usage(response: &Value) -> LlmUsage {
     LlmUsage {
         input_tokens: uncached + cache_read + cache_creation,
         cached_tokens: cache_read,
+        cache_creation_tokens: cache_creation,
         output_tokens: field("output_tokens"),
     }
 }
@@ -460,6 +460,7 @@ mod tests {
         let u = parse_usage(&payload);
         assert_eq!(u.input_tokens, 185);
         assert_eq!(u.cached_tokens, 75);
+        assert_eq!(u.cache_creation_tokens, 10);
         assert_eq!(u.output_tokens, 20);
     }
 

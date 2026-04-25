@@ -237,8 +237,11 @@ fn main() -> Result<()> {
     println!("summary:         {}", result.outcome.summary);
     println!("turns:           {}", result.turn_count);
     println!(
-        "tokens:          in={} cached={} out={}",
-        result.total_input_tokens, result.total_cached_tokens, result.total_output_tokens
+        "tokens:          in={} cached={} written={} out={}",
+        result.total_input_tokens,
+        result.total_cached_tokens,
+        result.total_cache_creation_tokens,
+        result.total_output_tokens
     );
     println!("sim_duration_s:  {:.1}", result.sim_duration_s);
     println!("wall_duration_s: {:.1}", result.wall_duration_s);

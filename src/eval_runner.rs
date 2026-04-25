@@ -185,6 +185,9 @@ pub struct EvalResult {
     pub turn_count: usize,
     pub total_input_tokens: u64,
     pub total_cached_tokens: u64,
+    /// Cumulative cache-write tokens. Anthropic-only (billed at 1.25×
+    /// base); always 0 for OpenAI/Gemini.
+    pub total_cache_creation_tokens: u64,
     pub total_output_tokens: u64,
     pub sim_duration_s: f64,
     pub wall_duration_s: f64,
@@ -933,7 +936,7 @@ pub fn run_eval_core(
     bus.push_log_kind(
         LogKind::System,
         format!(
-            "eval finished: {:?} success={} turns={} tools={}/{} (failed/total) tokens(in={} cached={} out={}) sim={:.1}s wall={:.1}s",
+            "eval finished: {:?} success={} turns={} tools={}/{} (failed/total) tokens(in={} cached={} written={} out={}) sim={:.1}s wall={:.1}s",
             outcome.source,
             outcome.success,
             turn_count,
@@ -941,6 +944,7 @@ pub fn run_eval_core(
             tool_stats.total,
             token_totals.total_input_tokens,
             token_totals.total_cached_tokens,
+            token_totals.total_cache_creation_tokens,
             token_totals.total_output_tokens,
             sim_duration_s,
             wall_duration_s,
@@ -979,6 +983,7 @@ pub fn run_eval_core(
         "turns": turn_count,
         "total_input_tokens": token_totals.total_input_tokens,
         "total_cached_tokens": token_totals.total_cached_tokens,
+        "total_cache_creation_tokens": token_totals.total_cache_creation_tokens,
         "total_output_tokens": token_totals.total_output_tokens,
         "sim_duration_s": sim_duration_s,
         "wall_duration_s": wall_duration_s,
@@ -1000,6 +1005,7 @@ pub fn run_eval_core(
         turn_count,
         total_input_tokens: token_totals.total_input_tokens,
         total_cached_tokens: token_totals.total_cached_tokens,
+        total_cache_creation_tokens: token_totals.total_cache_creation_tokens,
         total_output_tokens: token_totals.total_output_tokens,
         sim_duration_s,
         wall_duration_s,

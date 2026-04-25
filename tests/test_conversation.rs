@@ -463,6 +463,7 @@ fn token_usage_is_logged_after_each_call_when_usage_present() {
                 input_tokens: 1234,
                 output_tokens: 56,
                 cached_tokens: 900,
+                cache_creation_tokens: 0,
             },
             raw: Value::Null,
         },
@@ -496,7 +497,7 @@ fn token_usage_is_logged_after_each_call_when_usage_present() {
     assert!(line.contains("cached=900"), "{}", line);
     assert!(line.contains("out=56"), "{}", line);
     // StubClient's default cache_snapshot() is zeros — session totals reflect that.
-    assert!(line.contains("session in=0 out=0"), "{}", line);
+    assert!(line.contains("session in=0 (cached=0 written=0) out=0"), "{}", line);
 }
 
 // Keep `CapturedCall.tool_count` and `timeout_secs` addressable so the

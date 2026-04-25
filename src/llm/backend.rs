@@ -159,6 +159,12 @@ pub struct LlmRequest<'a> {
 pub struct LlmUsage {
     pub input_tokens: u64,
     pub cached_tokens: u64,
+    /// Tokens written *into* the prefix cache this turn. Anthropic only —
+    /// they bill cache writes at 1.25× base, so it has to be tracked
+    /// separately from `input_tokens` (which already includes it) for
+    /// honest cost math. OpenAI/Gemini have no analogous tier and
+    /// always report 0.
+    pub cache_creation_tokens: u64,
     pub output_tokens: u64,
 }
 
@@ -234,6 +240,8 @@ impl FromStr for LlmProvider {
 pub struct CacheSnapshot {
     pub total_input_tokens: u64,
     pub total_cached_tokens: u64,
+    /// Cumulative cache-write tokens. Anthropic-only; OpenAI/Gemini stay 0.
+    pub total_cache_creation_tokens: u64,
     pub total_output_tokens: u64,
     pub total_requests: u64,
 }
@@ -248,11 +256,12 @@ pub struct CacheStats {
 }
 
 impl CacheStats {
-    pub fn record(&self, input_tokens: u64, cached_tokens: u64, output_tokens: u64) {
+    pub fn record(&self, usage: &LlmUsage) {
         let mut g = self.inner.lock().unwrap();
-        g.total_input_tokens += input_tokens;
-        g.total_cached_tokens += cached_tokens;
-        g.total_output_tokens += output_tokens;
+        g.total_input_tokens += usage.input_tokens;
+        g.total_cached_tokens += usage.cached_tokens;
+        g.total_cache_creation_tokens += usage.cache_creation_tokens;
+        g.total_output_tokens += usage.output_tokens;
         g.total_requests += 1;
     }
 

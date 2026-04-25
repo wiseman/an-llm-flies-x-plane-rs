@@ -68,8 +68,7 @@ impl LlmBackend for OpenAiBackend {
         let resp = send_with_body_on_error(http, &payload.to_string(), &url)?;
         let raw: Value = resp.into_json()?;
         let usage = parse_usage(&raw);
-        self.cache_stats
-            .record(usage.input_tokens, usage.cached_tokens, usage.output_tokens);
+        self.cache_stats.record(&usage);
         if let Some(path) = &self.transcript_path {
             write_transcript(path, &payload, Some(&raw));
         }
@@ -177,6 +176,7 @@ fn parse_usage(response: &Value) -> LlmUsage {
     LlmUsage {
         input_tokens,
         cached_tokens,
+        cache_creation_tokens: 0,
         output_tokens,
     }
 }
