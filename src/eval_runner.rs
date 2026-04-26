@@ -798,6 +798,18 @@ pub fn run_eval_core(
         tool_counters: Some(tool_counters.clone()),
     });
 
+    // Prime `latest_snapshot` so the LLM's first `get_status` returns
+    // real position/profile data instead of `{"status":"uninitialized"}`.
+    // Without this, the LLM thread races ahead of the control loop:
+    // startup messages are queued below before any sim tick can run,
+    // and the `llm_busy` gate then keeps the sim paused until the LLM
+    // calls `sleep` — burning turns on uninitialized state.
+    {
+        let mut pilot = pilot_arc.lock();
+        let dyn_state = dynamics.lock();
+        let _ = pilot.update(&dyn_state, cfg.dt);
+    }
+
     // --- deliver startup messages ---
     for msg in &cfg.startup_messages {
         bus.push_log_kind(
