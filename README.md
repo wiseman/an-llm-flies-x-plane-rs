@@ -33,21 +33,30 @@ The deterministic backend (no X-Plane) drives the airplane; only the LLM
 varies. Cost is per-run, computed from each provider's published
 input / cache-read / cache-write / output prices.
 
-| Model                 | Success | Avg turns | Avg cost |
-| --------------------- | ------- | --------- | -------- |
-| Claude Opus 4.6       | 3 / 3   | 32.7      | $0.604   |
-| Claude Haiku 4.5      | 2 / 3   | 28.0      | $0.097   |
-| GPT-5.4               | 0 / 3   |  9.3      | $0.064   |
-| GPT-5.4 mini          | 2 / 3   | 33.7      | $0.067   |
-| Gemini 3.1 Pro        | 1 / 3   | 29.3      | $0.357   |
-| Gemini 3.1 Flash Lite | 2 / 3   | 27.0      | $0.032   |
+"Avg dist" is the great-circle distance from the aircraft's final
+position to the FBO Parking spot (the spawn point), averaged across the
+three trials — the practical "did the airplane end up where it was
+supposed to?" metric. A trial that ended within roughly a wingspan of the
+spot reads as ~3 ft.
+
+| Model                 | Success | Avg turns | Avg cost | Avg dist |
+| --------------------- | ------- | --------- | -------- | --------:|
+| Claude Opus 4.6       | 3 / 3   | 32.7      | $0.604   |   105 ft |
+| Claude Haiku 4.5      | 2 / 3   | 28.0      | $0.097   | 75,912 ft\* |
+| GPT-5.4               | 0 / 3   |  9.3      | $0.064   |   127 ft |
+| GPT-5.4 mini          | 2 / 3   | 33.7      | $0.067   |   201 ft |
+| Gemini 3.1 Pro        | 1 / 3   | 29.3      | $0.357   |   634 ft |
+| Gemini 3.1 Flash Lite | 2 / 3   | 27.0      | $0.032   |   104 ft |
+
+\* Haiku's average is blown by a single timeout where the aircraft drifted
+~43 mi off-airport before the sim-time budget ran out; the other two
+trials parked within 3 ft. Two of GPT-5.4's three runs ended at exactly
+0 ft because the model bailed before the sim ever ticked — the airplane
+spawned at the spot and never moved.
 
 Opus 4.6 was the only clean sweep, at ~10× the cost of Haiku/Mini and ~20×
-Flash Lite. GPT-5.4 (full) gave up early on two of three runs, calling
-`mission_complete(success=false)` after only four turns. Gemini 3.1 Pro's
-two failures were sim-time timeouts rather than early aborts. Three trials
-is a small sample — treat the success column as a rough signal, not a
-ranking.
+Flash Lite. Three trials is a small sample — treat the success and
+distance columns as rough signal, not a ranking.
 
 ## Getting the binary
 
