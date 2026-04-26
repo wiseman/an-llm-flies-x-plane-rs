@@ -196,7 +196,15 @@ fn categorize(raw: &[RawEntry], input: &std::path::Path) -> (Meta, Vec<TimedEven
                 // Un-sourced [log] lines are startup environment noise
                 // (log_file=..., bridge connected, track_csv=..., etc.).
                 // Mine them for metadata, then drop.
-                if let Some(rest) = body.strip_prefix("pilot llm: ") {
+                // Live runs log "pilot llm: provider=… model=…"; older
+                // eval runs logged "llm provider=… model=…" without the
+                // colon. Accept both shapes — but the fallback requires
+                // the literal `provider=` token so future "llm something
+                // else" log lines can't false-match.
+                let llm_meta = body
+                    .strip_prefix("pilot llm: ")
+                    .or_else(|| body.strip_prefix("llm ").filter(|r| r.starts_with("provider=")));
+                if let Some(rest) = llm_meta {
                     for part in rest.split_whitespace() {
                         if let Some(v) = part.strip_prefix("provider=") {
                             meta.llm_provider = Some(v.to_string());

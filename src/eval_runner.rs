@@ -771,7 +771,7 @@ pub fn run_eval_core(
     bus.push_log_kind(
         LogKind::System,
         format!(
-            "llm provider={} model={}{}",
+            "pilot llm: provider={} model={}{}",
             cfg.llm_provider.as_str(),
             cfg.llm_model,
             match reasoning_effort {
