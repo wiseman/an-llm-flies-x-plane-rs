@@ -25,6 +25,30 @@ DuckDB-backed parquet views for airports, runways, comms, taxiways, parking
 spots, and airspaces, so the LLM can query real airport geometry instead of
 guessing runway numbers, frequencies, or taxi routes.
 
+## Model evals
+
+Three trials per model on a single scenario — cold start at KWHP "FBO
+Parking", prompt: *"Take off, do a lap in the pattern, land, then park."*
+The deterministic backend (no X-Plane) drives the airplane; only the LLM
+varies. Cost is per-run, computed from each provider's published
+input / cache-read / cache-write / output prices.
+
+| Model                 | Success | Avg turns | Avg cost |
+| --------------------- | ------- | --------- | -------- |
+| Claude Opus 4.6       | 3 / 3   | 32.7      | $0.604   |
+| Claude Haiku 4.5      | 2 / 3   | 28.0      | $0.097   |
+| GPT-5.4               | 0 / 3   |  9.3      | $0.064   |
+| GPT-5.4 mini          | 2 / 3   | 33.7      | $0.067   |
+| Gemini 3.1 Pro        | 1 / 3   | 29.3      | $0.357   |
+| Gemini 3.1 Flash Lite | 2 / 3   | 27.0      | $0.032   |
+
+Opus 4.6 was the only clean sweep, at ~10× the cost of Haiku/Mini and ~20×
+Flash Lite. GPT-5.4 (full) gave up early on two of three runs, calling
+`mission_complete(success=false)` after only four turns. Gemini 3.1 Pro's
+two failures were sim-time timeouts rather than early aborts. Three trials
+is a small sample — treat the success column as a rough signal, not a
+ranking.
+
 ## Getting the binary
 
 ### Download a prebuilt binary
