@@ -23,7 +23,8 @@ fn main() -> Result<()> {
         .with_context(|| format!("reading {}", cli.input.display()))?;
     let raw = parse_log(&text);
     let (meta, events) = categorize(&raw, &cli.input);
-    let html = render_html(&meta, &events);
+    let outcome = load_sibling_outcome(&cli.input);
+    let html = render_html(&meta, &events, outcome.as_ref());
 
     let out = cli.output.unwrap_or_else(|| cli.input.with_extension("html"));
     fs::write(&out, html).with_context(|| format!("writing {}", out.display()))?;
@@ -280,6 +281,32 @@ fn categorize(raw: &[RawEntry], input: &std::path::Path) -> (Meta, Vec<TimedEven
     (meta, events)
 }
 
+/// `summary.json` sits next to the `.log` for eval runs (`<stem>.log` →
+/// `<stem>.json`). Returns `None` when the sibling is missing or has no
+/// `outcome.summary` text — live `sim_pilot-*.log` runs have neither.
+fn load_sibling_outcome(log_path: &std::path::Path) -> Option<Outcome> {
+    let json_path = log_path.with_extension("json");
+    let text = fs::read_to_string(&json_path).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&text).ok()?;
+    let outcome = v.get("outcome")?;
+    let summary = outcome.get("summary")?.as_str()?.trim().to_string();
+    if summary.is_empty() {
+        return None;
+    }
+    Some(Outcome {
+        success: outcome.get("success").and_then(|s| s.as_bool()).unwrap_or(false),
+        source: outcome.get("source").and_then(|s| s.as_str()).unwrap_or("").to_string(),
+        summary,
+    })
+}
+
+#[derive(Debug)]
+struct Outcome {
+    success: bool,
+    source: String,
+    summary: String,
+}
+
 fn split_ts(ts: &str) -> (String, String) {
     if let Some((d, t)) = ts.split_once('T') {
         (d.to_string(), t.to_string())
@@ -355,7 +382,7 @@ fn escape(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
 }
 
-fn render_html(meta: &Meta, events: &[TimedEvent]) -> String {
+fn render_html(meta: &Meta, events: &[TimedEvent], outcome: Option<&Outcome>) -> String {
     let mut html = String::new();
     html.push_str("<!doctype html>\n<html lang=\"en\"><head>\n");
     html.push_str("<meta charset=\"utf-8\">\n");
@@ -408,6 +435,27 @@ fn render_html(meta: &Meta, events: &[TimedEvent]) -> String {
         html.push_str(&render_event(e));
     }
     html.push_str("</main>\n");
+
+    // ───────── outcome footer (eval runs only) ─────────
+    if let Some(o) = outcome {
+        let cls = if o.success { "ok" } else { "fail" };
+        let label = if o.success { "MISSION COMPLETE" } else { "MISSION ENDED" };
+        let source_line = if o.source.is_empty() {
+            String::new()
+        } else {
+            format!("<span class=\"outcome-source mono\">{}</span>", escape(&o.source))
+        };
+        html.push_str(&format!(
+            "<footer class=\"outcome outcome-{cls}\"><div class=\"outcome-inner\">\
+             <div class=\"outcome-head\"><span class=\"outcome-tag mono\">{lbl}</span>{src}</div>\
+             <p class=\"outcome-summary\">{sum}</p>\
+             </div></footer>\n",
+            cls = cls,
+            lbl = label,
+            src = source_line,
+            sum = escape(&o.summary),
+        ));
+    }
 
     html.push_str("</body></html>\n");
     html
@@ -756,6 +804,43 @@ main.transcript {
 /* mode switches */
 .evt.mode .tag { color: var(--mauve); font-weight: 600; }
 .evt.mode .body { font-size: 12px; color: var(--mauve); }
+
+/* ───────── outcome footer (eval runs only) ───────── */
+.outcome {
+    border-top: 1px solid var(--rule);
+    margin-top: 16px;
+}
+.outcome-inner {
+    max-width: 960px;
+    margin: 0 auto;
+    padding: 18px 24px 28px;
+}
+.outcome-head {
+    display: flex;
+    align-items: baseline;
+    gap: 12px;
+    margin-bottom: 6px;
+}
+.outcome-tag {
+    font-size: 11px;
+    letter-spacing: 0.12em;
+    font-weight: 700;
+}
+.outcome-source {
+    font-size: 11px;
+    color: var(--muted);
+}
+.outcome-summary {
+    margin: 0;
+    font-family: 'Source Serif 4', 'Iowan Old Style', Georgia, serif;
+    font-size: 17px;
+    line-height: 1.5;
+    color: var(--ink);
+}
+.outcome-ok { background: var(--profile-bg); }
+.outcome-ok .outcome-tag { color: var(--sage); }
+.outcome-fail { background: var(--signal-bg); }
+.outcome-fail .outcome-tag { color: var(--signal); }
 
 @media (max-width: 640px) {
     .masthead-inner { padding: 14px 16px 12px; }
