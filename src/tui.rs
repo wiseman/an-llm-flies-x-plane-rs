@@ -684,22 +684,34 @@ pub fn run_tui(
                 .block(Block::default().borders(Borders::ALL).title(" ENERGY · RISK "));
             f.render_widget(risk_para, body_cols[1]);
 
-            // Dialog: radio (left) + LLM action log (right).
-            let dialog_cols = Layout::default()
-                .direction(Direction::Horizontal)
-                .constraints([Constraint::Percentage(45), Constraint::Percentage(55)])
-                .split(chunks[4]);
+            // Dialog: radio + LLM action log. Side-by-side on wide
+            // terminals; on narrow terminals (< 100 cols) the panes
+            // stack vertically with radio at 1/3 the height of log so
+            // ATC stays visible without crowding the assistant text.
+            let (radio_area, log_area) = if chunks[4].width < 100 {
+                let stacked = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([Constraint::Ratio(1, 4), Constraint::Ratio(3, 4)])
+                    .split(chunks[4]);
+                (stacked[0], stacked[1])
+            } else {
+                let cols = Layout::default()
+                    .direction(Direction::Horizontal)
+                    .constraints([Constraint::Percentage(45), Constraint::Percentage(55)])
+                    .split(chunks[4]);
+                (cols[0], cols[1])
+            };
 
             let radio_paragraph = Paragraph::new(radio_lines.clone())
                 .block(Block::default().borders(Borders::ALL).title(" RADIO "))
                 .wrap(Wrap { trim: false });
             f.render_widget(
-                radio_paragraph.scroll((pin_to_bottom(&radio_lines, dialog_cols[0]), 0)),
-                dialog_cols[0],
+                radio_paragraph.scroll((pin_to_bottom(&radio_lines, radio_area), 0)),
+                radio_area,
             );
 
             // LLM / action log (structured).
-            let log_inner_width = dialog_cols[1].width.saturating_sub(2);
+            let log_inner_width = log_area.width.saturating_sub(2);
             let mut log_lines = build_log_lines(
                 &log_entries,
                 log_detail,
@@ -709,8 +721,8 @@ pub fn run_tui(
             if bus.is_llm_busy() {
                 log_lines.push(render_thinking_line(tui_epoch.elapsed()));
             }
-            let log_pin = pin_to_bottom(&log_lines, dialog_cols[1]);
-            let inner_height = dialog_cols[1].height.saturating_sub(2);
+            let log_pin = pin_to_bottom(&log_lines, log_area);
+            let inner_height = log_area.height.saturating_sub(2);
             last_log_pin = log_pin;
             last_log_page = inner_height.max(3).saturating_sub(1);
             let (log_offset, scroll_indicator) = match log_scroll {
@@ -730,7 +742,7 @@ pub fn run_tui(
             let log_paragraph = Paragraph::new(log_lines.clone())
                 .block(Block::default().borders(Borders::ALL).title(log_title))
                 .wrap(Wrap { trim: false });
-            f.render_widget(log_paragraph.scroll((log_offset, 0)), dialog_cols[1]);
+            f.render_widget(log_paragraph.scroll((log_offset, 0)), log_area);
 
             // Footer (status badges).
             f.render_widget(
@@ -1432,6 +1444,17 @@ fn tint_line_bg(mut line: Line<'static>, bg: Color, inner_width: u16) -> Line<'s
     line
 }
 
+/// Trim the trailing `| status={...}` blob from a heartbeat line for
+/// pane display. The full text (with JSON) is still written verbatim
+/// to the on-disk .log via `FileLog`, so the LLM's heartbeat replay
+/// keeps the payload intact.
+fn strip_heartbeat_status(text: &str) -> &str {
+    match text.find(" | status=") {
+        Some(i) => text[..i].trim_end(),
+        None => text,
+    }
+}
+
 fn render_log_entry(entry: &LogEntry) -> Vec<Line<'static>> {
     // Defensive: a System entry whose body embeds "error" gets upgraded
     // to the Error style — catches any lingering raw `push_log("error:
@@ -1444,7 +1467,17 @@ fn render_log_entry(entry: &LogEntry) -> Vec<Line<'static>> {
         style_for_kind(entry.kind)
     };
 
-    let segments = split_and_normalize(&entry.text);
+    // Heartbeat lines look like "<reason> | status={...big JSON...}".
+    // The reason (phase change, profile swap, periodic) is the load-
+    // bearing part for a human reader; the JSON blob is for the LLM
+    // and lives on disk in the .log already. Strip it for the pane.
+    let display_text: &str = if entry.kind == LogKind::Heartbeat {
+        strip_heartbeat_status(&entry.text)
+    } else {
+        &entry.text
+    };
+
+    let segments = split_and_normalize(display_text);
     if segments.is_empty() {
         return Vec::new();
     }
@@ -2428,6 +2461,26 @@ mod tests {
         let entry = LogEntry::new(LogKind::System, "fatal error: boom");
         let lines = render_log_entry(&entry);
         assert_eq!(lines[0].spans[0].content, "!");
+    }
+
+    #[test]
+    fn render_log_entry_strips_heartbeat_status_json_from_pane() {
+        let entry = LogEntry::new(
+            LogKind::Heartbeat,
+            "phase change downwind→base | status={\"phase\":\"base\",\"alt\":1400}",
+        );
+        let lines = render_log_entry(&entry);
+        assert_eq!(lines.len(), 1);
+        let body = &lines[0].spans[2].content;
+        assert_eq!(body, "phase change downwind→base");
+        assert!(!body.contains("status="));
+    }
+
+    #[test]
+    fn render_log_entry_heartbeat_without_status_passes_through() {
+        let entry = LogEntry::new(LogKind::Heartbeat, "completed: taxi");
+        let lines = render_log_entry(&entry);
+        assert_eq!(lines[0].spans[2].content, "completed: taxi");
     }
 
     #[test]
