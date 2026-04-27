@@ -24,7 +24,7 @@ use xplane_pilot::core::mission_manager::{PilotCore, StatusSnapshot};
 use xplane_pilot::data::{airspace, apt_dat, parquet};
 use xplane_pilot::llm::tools::{build_status_payload, airspace_source, ToolBridge, ToolContext};
 use xplane_pilot::sim::xplane_bridge::GeoReference;
-use xplane_pilot::types::{ActuatorCommands, AircraftState, FlightPhase, Vec2};
+use xplane_pilot::types::{AircraftState, FlightPhase, Vec2};
 
 struct FakeBridge {
     values: PLMutex<HashMap<String, f64>>,
@@ -113,36 +113,10 @@ fn snapshot(
     state.vs_fpm = 0.0;
     state.on_ground = on_ground;
     state.position_ft = Vec2::new(0.0, 0.0);
-    StatusSnapshot {
-        t_sim: 0.0,
-        active_profiles: Vec::new(),
-        phase: Some(phase),
-        state,
-        last_commands: ActuatorCommands {
-            aileron: 0.0,
-            elevator: 0.0,
-            rudder: 0.0,
-            throttle: 0.0,
-            flaps: None,
-            gear_down: Some(true),
-            brakes: 0.0,
-            pivot_brake: 0.0,
-        },
-        last_guidance: None,
-        go_around_reason: None,
-        airport_ident: None,
-        runway_id: None,
-        field_elevation_ft: None,
-        debug_lines: Vec::new(),
-        completed_profiles: Vec::new(),
-        profile_mode_line_suffixes: Vec::new(),
-        mission_goal: None,
-        active_clearance: None,
-        transition_hint: None,
-        lateral_owner_idx: None,
-        vertical_owner_idx: None,
-        speed_owner_idx: None,
-    }
+    let mut snap = StatusSnapshot::synthetic_default();
+    snap.phase = Some(phase);
+    snap.state = state;
+    snap
 }
 
 #[test]

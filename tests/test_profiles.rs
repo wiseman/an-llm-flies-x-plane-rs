@@ -191,10 +191,11 @@ fn rotate_guidance_airborne_banks_toward_runway_course() {
 fn takeoff_profile_owns_all_three_axes() {
     let (cfg, pilot) = make_pilot();
     let profile = TakeoffProfile::new(cfg, pilot.runway_frame.clone());
-    let owns: BTreeSet<_> = xplane_pilot::core::profiles::GuidanceProfile::owns(&profile).into_iter().collect();
-    use xplane_pilot::core::profiles::Axis;
-    let expected: BTreeSet<_> = [Axis::Lateral, Axis::Vertical, Axis::Speed].into_iter().collect();
-    assert_eq!(owns, expected);
+    use xplane_pilot::core::profiles::{Axis, AxisSet, GuidanceProfile};
+    assert_eq!(profile.owns(), AxisSet::ALL);
+    assert!(profile.owns().contains(Axis::Lateral));
+    assert!(profile.owns().contains(Axis::Vertical));
+    assert!(profile.owns().contains(Axis::Speed));
 }
 
 #[test]

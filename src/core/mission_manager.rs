@@ -17,7 +17,7 @@ use crate::control::nose_wheel::NoseWheelController;
 use crate::control::pitch_hold::PitchController;
 use crate::control::tecs_lite::TECSLite;
 use crate::core::profiles::{
-    idle_profile_trio, Axis, GuidanceProfile, IdleLateralProfile, IdleSpeedProfile,
+    idle_profile_trio, Axis, AxisSet, GuidanceProfile, IdleLateralProfile, IdleSpeedProfile,
     IdleVerticalProfile, PatternMetadata, ProfileContribution, ProfileTick, TransitionHint,
 };
 use crate::core::state_estimator::estimate_aircraft_state;
@@ -136,6 +136,45 @@ pub struct StatusSnapshot {
     pub speed_owner_idx: Option<usize>,
 }
 
+impl StatusSnapshot {
+    /// Builder-style factory for tests: produces an empty mid-mission
+    /// snapshot that callers override selectively. Mirrors
+    /// `AircraftState::synthetic_default` so test fixtures don't have
+    /// to spell out every field of the snapshot every time we add one.
+    pub fn synthetic_default() -> Self {
+        StatusSnapshot {
+            t_sim: 0.0,
+            active_profiles: Vec::new(),
+            phase: None,
+            state: AircraftState::synthetic_default(),
+            last_commands: ActuatorCommands {
+                aileron: 0.0,
+                elevator: 0.0,
+                rudder: 0.0,
+                throttle: 0.0,
+                flaps: None,
+                gear_down: Some(true),
+                brakes: 0.0,
+                pivot_brake: 0.0,
+            },
+            last_guidance: None,
+            go_around_reason: None,
+            airport_ident: None,
+            runway_id: None,
+            field_elevation_ft: None,
+            debug_lines: Vec::new(),
+            completed_profiles: Vec::new(),
+            profile_mode_line_suffixes: Vec::new(),
+            mission_goal: None,
+            active_clearance: None,
+            transition_hint: None,
+            lateral_owner_idx: None,
+            vertical_owner_idx: None,
+            speed_owner_idx: None,
+        }
+    }
+}
+
 pub struct PilotCore {
     pub config: ConfigBundle,
     pub runway_frame: RunwayFrame,
@@ -225,7 +264,7 @@ impl PilotCore {
             let owns = profile.owns();
             let mut retained: Vec<Box<dyn GuidanceProfile>> = Vec::with_capacity(self.active_profiles.len());
             for existing in std::mem::take(&mut self.active_profiles) {
-                if !existing.owns().is_disjoint(&owns) {
+                if !existing.owns().is_disjoint(owns) {
                     all_displaced.insert(existing.name().to_string());
                 } else {
                     retained.push(existing);
@@ -240,13 +279,11 @@ impl PilotCore {
     }
 
     pub fn disengage_profile(&mut self, name: &str) -> Vec<String> {
-        let mut removed_owns: BTreeSet<Axis> = BTreeSet::new();
+        let mut removed_owns = AxisSet::NONE;
         let mut retained: Vec<Box<dyn GuidanceProfile>> = Vec::with_capacity(self.active_profiles.len());
         for p in std::mem::take(&mut self.active_profiles) {
             if p.name() == name {
-                for a in p.owns() {
-                    removed_owns.insert(a);
-                }
+                removed_owns = removed_owns.union(p.owns());
             } else {
                 retained.push(p);
             }
@@ -255,15 +292,12 @@ impl PilotCore {
             self.active_profiles = retained;
             return vec![];
         }
-        let mut covered: BTreeSet<Axis> = BTreeSet::new();
-        for p in &retained {
-            for a in p.owns() {
-                covered.insert(a);
-            }
-        }
-        let orphans: BTreeSet<Axis> = removed_owns.difference(&covered).cloned().collect();
+        let covered = retained
+            .iter()
+            .fold(AxisSet::NONE, |acc, p| acc.union(p.owns()));
+        let orphans = removed_owns.difference(covered);
         let mut added: Vec<String> = Vec::new();
-        for axis in orphans {
+        for axis in orphans.iter() {
             let idle: Box<dyn GuidanceProfile> = match axis {
                 Axis::Lateral => Box::new(IdleLateralProfile),
                 Axis::Vertical => Box::new(IdleVerticalProfile),
@@ -338,15 +372,15 @@ impl PilotCore {
         let lateral_owner_idx = self
             .active_profiles
             .iter()
-            .position(|p| p.owns().contains(&Axis::Lateral));
+            .position(|p| p.owns().contains(Axis::Lateral));
         let vertical_owner_idx = self
             .active_profiles
             .iter()
-            .position(|p| p.owns().contains(&Axis::Vertical));
+            .position(|p| p.owns().contains(Axis::Vertical));
         let speed_owner_idx = self
             .active_profiles
             .iter()
-            .position(|p| p.owns().contains(&Axis::Speed));
+            .position(|p| p.owns().contains(Axis::Speed));
         let snapshot = StatusSnapshot {
             t_sim: state.t_sim,
             active_profiles: self.list_profile_names(),
@@ -383,7 +417,7 @@ impl PilotCore {
         let mut handoffs: Vec<Vec<Box<dyn GuidanceProfile>>> = Vec::new();
         let mut metadata: Option<PatternMetadata> = None;
         for profile in &mut self.active_profiles {
-            let owns: Vec<Axis> = profile.owns().into_iter().collect();
+            let owns: Vec<Axis> = profile.owns().iter().collect();
             let ProfileTick { contribution, hand_off } = profile.contribute(state, dt);
             // Capture metadata AFTER contribute(): a profile that
             // transitions phase (e.g. Final -> GoAround) updates its

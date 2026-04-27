@@ -15,7 +15,7 @@ use xplane_pilot::core::mission_manager::{PilotCore, StatusSnapshot};
 use xplane_pilot::core::profiles::{HeadingHoldProfile, PatternFlyProfile, TakeoffProfile};
 use xplane_pilot::llm::tools::{dispatch_tool, ToolBridge, ToolContext};
 use xplane_pilot::sim::xplane_bridge::GeoReference;
-use xplane_pilot::types::{ActuatorCommands, AircraftState, Vec2};
+use xplane_pilot::types::{AircraftState, Vec2};
 
 struct FakeBridge {
     writes: PLMutex<Vec<HashMap<String, f64>>>,
@@ -87,42 +87,15 @@ fn stage_stopped_snapshot(
     heading_deg: f64,
 ) {
     use xplane_pilot::core::mission_manager::StatusSnapshot;
-    use xplane_pilot::types::{ActuatorCommands, AircraftState};
+    use xplane_pilot::types::AircraftState;
     let mut state = AircraftState::synthetic_default();
     state.on_ground = true;
     state.position_ft = position_ft;
     state.heading_deg = heading_deg;
     state.gs_kt = 0.0;
-    ctx.pilot.lock().latest_snapshot = Some(StatusSnapshot {
-        t_sim: 0.0,
-        active_profiles: Vec::new(),
-        phase: None,
-        state,
-        last_commands: ActuatorCommands {
-            aileron: 0.0,
-            elevator: 0.0,
-            rudder: 0.0,
-            throttle: 0.0,
-            flaps: None,
-            gear_down: Some(true),
-            brakes: 0.0,
-            pivot_brake: 0.0,
-        },
-        last_guidance: None,
-        go_around_reason: None,
-        airport_ident: None,
-        runway_id: None,
-        field_elevation_ft: None,
-        debug_lines: Vec::new(),
-        completed_profiles: Vec::new(),
-        profile_mode_line_suffixes: Vec::new(),
-        mission_goal: None,
-        active_clearance: None,
-        transition_hint: None,
-        lateral_owner_idx: None,
-        vertical_owner_idx: None,
-        speed_owner_idx: None,
-    });
+    let mut snap = StatusSnapshot::synthetic_default();
+    snap.state = state;
+    ctx.pilot.lock().latest_snapshot = Some(snap);
 }
 
 /// Base airports/runways used by every test fixture. Each tuple is:
@@ -741,36 +714,10 @@ fn seed_snapshot(ctx: &ToolContext, flap_index: i32, on_ground: bool) {
         stall_margin: 2.0,
     };
     let names = ctx.pilot.lock().list_profile_names();
-    ctx.pilot.lock().latest_snapshot = Some(StatusSnapshot {
-        t_sim: 0.0,
-        active_profiles: names,
-        phase: None,
-        state,
-        last_commands: ActuatorCommands {
-            aileron: 0.0,
-            elevator: 0.0,
-            rudder: 0.0,
-            throttle: 0.0,
-            flaps: None,
-            gear_down: Some(true),
-            brakes: 0.0,
-            pivot_brake: 0.0,
-        },
-        last_guidance: None,
-        go_around_reason: None,
-        airport_ident: None,
-        runway_id: None,
-        field_elevation_ft: None,
-        debug_lines: Vec::new(),
-        completed_profiles: Vec::new(),
-        profile_mode_line_suffixes: Vec::new(),
-        mission_goal: None,
-        active_clearance: None,
-        transition_hint: None,
-        lateral_owner_idx: None,
-        vertical_owner_idx: None,
-        speed_owner_idx: None,
-    });
+    let mut snap = StatusSnapshot::synthetic_default();
+    snap.active_profiles = names;
+    snap.state = state;
+    ctx.pilot.lock().latest_snapshot = Some(snap);
 }
 
 #[test]

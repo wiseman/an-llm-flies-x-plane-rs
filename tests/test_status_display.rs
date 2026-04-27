@@ -6,7 +6,7 @@ use xplane_pilot::core::profiles::{AltitudeHoldProfile, HeadingHoldProfile, Spee
 use xplane_pilot::sim::simple_dynamics::SimpleAircraftModel;
 use xplane_pilot::tui::format_snapshot_display;
 use xplane_pilot::types::{
-    ActuatorCommands, AircraftState, GuidanceTargets, LateralMode, Vec2, VerticalMode,
+    AircraftState, GuidanceTargets, LateralMode, Vec2, VerticalMode,
 };
 
 fn make_state(heading_deg: f64, ias_kt: f64, on_ground: bool) -> AircraftState {
@@ -49,36 +49,13 @@ fn make_snapshot(
     throttle: f64,
     guidance: Option<GuidanceTargets>,
 ) -> StatusSnapshot {
-    StatusSnapshot {
-        t_sim: 42.0,
-        active_profiles: profiles.iter().map(|s| s.to_string()).collect(),
-        phase: None,
-        state,
-        last_commands: ActuatorCommands {
-            aileron: 0.0,
-            elevator: 0.0,
-            rudder: 0.0,
-            throttle,
-            flaps: None,
-            gear_down: Some(true),
-            brakes: 0.0,
-            pivot_brake: 0.0,
-        },
-        last_guidance: guidance,
-        go_around_reason: None,
-        airport_ident: None,
-        runway_id: None,
-        field_elevation_ft: None,
-        debug_lines: Vec::new(),
-        completed_profiles: Vec::new(),
-        profile_mode_line_suffixes: Vec::new(),
-        mission_goal: None,
-        active_clearance: None,
-        transition_hint: None,
-        lateral_owner_idx: None,
-        vertical_owner_idx: None,
-        speed_owner_idx: None,
-    }
+    let mut snap = StatusSnapshot::synthetic_default();
+    snap.t_sim = 42.0;
+    snap.active_profiles = profiles.iter().map(|s| s.to_string()).collect();
+    snap.state = state;
+    snap.last_commands.throttle = throttle;
+    snap.last_guidance = guidance;
+    snap
 }
 
 #[test]

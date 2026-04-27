@@ -9,7 +9,7 @@ use xplane_pilot::core::mission_manager::{PilotCore, StatusSnapshot};
 use xplane_pilot::core::profiles::HeadingHoldProfile;
 use xplane_pilot::live_runner::{FakeClock, HeartbeatPump};
 use xplane_pilot::llm::conversation::{IncomingMessage, IncomingSource};
-use xplane_pilot::types::{ActuatorCommands, AircraftState, FlightPhase, Vec2};
+use xplane_pilot::types::{AircraftState, FlightPhase, Vec2};
 
 fn make_snapshot(
     profiles: &[&str],
@@ -17,67 +17,31 @@ fn make_snapshot(
     alt_msl_ft: f64,
     go_around_reason: Option<&str>,
 ) -> StatusSnapshot {
-    let state = AircraftState {
-        t_sim: 42.0,
-        dt: 0.2,
-        position_ft: Vec2::ZERO,
-        alt_msl_ft,
-        alt_agl_ft: (alt_msl_ft - 425.0).max(0.0),
-        pitch_deg: 0.0,
-        roll_deg: 0.0,
-        heading_deg: 270.0,
-        track_deg: 270.0,
-        p_rad_s: 0.0,
-        q_rad_s: 0.0,
-        r_rad_s: 0.0,
-        ias_kt: 90.0,
-        tas_kt: 90.0,
-        gs_kt: 90.0,
-        vs_fpm: 0.0,
-        ground_velocity_ft_s: Vec2::ZERO,
-        flap_index: 0,
-        gear_down: true,
-        on_ground: false,
-        throttle_pos: 0.55,
-        runway_id: None,
-        runway_dist_remaining_ft: None,
-        runway_x_ft: None,
-        runway_y_ft: None,
-        centerline_error_ft: None,
-        threshold_abeam: false,
-        distance_to_touchdown_ft: None,
-        stall_margin: 2.0,
-    };
-    StatusSnapshot {
-        t_sim: 42.0,
-        active_profiles: profiles.iter().map(|s| s.to_string()).collect(),
-        phase,
-        state,
-        last_commands: ActuatorCommands {
-            aileron: 0.0,
-            elevator: 0.0,
-            rudder: 0.0,
-            throttle: 0.55,
-            flaps: None,
-            gear_down: Some(true),
-            brakes: 0.0,
-            pivot_brake: 0.0,
-        },
-        last_guidance: None,
-        go_around_reason: go_around_reason.map(|s| s.to_string()),
-        airport_ident: None,
-        runway_id: None,
-        field_elevation_ft: None,
-        debug_lines: Vec::new(),
-        completed_profiles: Vec::new(),
-        profile_mode_line_suffixes: Vec::new(),
-        mission_goal: None,
-        active_clearance: None,
-        transition_hint: None,
-        lateral_owner_idx: None,
-        vertical_owner_idx: None,
-        speed_owner_idx: None,
-    }
+    let mut state = AircraftState::synthetic_default();
+    state.t_sim = 42.0;
+    state.alt_msl_ft = alt_msl_ft;
+    state.alt_agl_ft = (alt_msl_ft - 425.0).max(0.0);
+    state.heading_deg = 270.0;
+    state.track_deg = 270.0;
+    state.ias_kt = 90.0;
+    state.tas_kt = 90.0;
+    state.gs_kt = 90.0;
+    state.ground_velocity_ft_s = Vec2::ZERO;
+    state.throttle_pos = 0.55;
+    state.runway_id = None;
+    state.runway_x_ft = None;
+    state.runway_y_ft = None;
+    state.centerline_error_ft = None;
+    state.distance_to_touchdown_ft = None;
+    state.stall_margin = 2.0;
+    let mut snap = StatusSnapshot::synthetic_default();
+    snap.t_sim = 42.0;
+    snap.active_profiles = profiles.iter().map(|s| s.to_string()).collect();
+    snap.phase = phase;
+    snap.state = state;
+    snap.last_commands.throttle = 0.55;
+    snap.go_around_reason = go_around_reason.map(|s| s.to_string());
+    snap
 }
 
 fn drain(rx: &crossbeam_channel::Receiver<IncomingMessage>) -> Vec<IncomingMessage> {

@@ -11,8 +11,6 @@
 //! applies the swap after all contributions are collected. That avoids
 //! reentrant `&mut` borrows on the pilot from inside one of its profiles.
 
-use std::collections::BTreeSet;
-
 use crate::config::ConfigBundle;
 use crate::core::mode_manager::{
     ModeManager, ModeManagerUpdate, PatternClearances, PatternTriggers,
@@ -50,6 +48,65 @@ pub enum Axis {
     Lateral,
     Vertical,
     Speed,
+}
+
+impl Axis {
+    fn bit(self) -> u8 {
+        match self {
+            Axis::Lateral => 0b001,
+            Axis::Vertical => 0b010,
+            Axis::Speed => 0b100,
+        }
+    }
+}
+
+/// Set of axes a guidance profile owns. A 3-bit mask, no heap. Replaces
+/// the `BTreeSet<Axis>` `GuidanceProfile::owns()` used to return — at 10
+/// Hz with several active profiles, the BTreeSet allocations added up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct AxisSet(u8);
+
+impl AxisSet {
+    pub const NONE: Self = Self(0);
+    pub const LATERAL: Self = Self(0b001);
+    pub const VERTICAL: Self = Self(0b010);
+    pub const SPEED: Self = Self(0b100);
+    pub const ALL: Self = Self(0b111);
+
+    pub const fn single(axis: Axis) -> Self {
+        match axis {
+            Axis::Lateral => Self::LATERAL,
+            Axis::Vertical => Self::VERTICAL,
+            Axis::Speed => Self::SPEED,
+        }
+    }
+
+    pub fn contains(self, axis: Axis) -> bool {
+        self.0 & axis.bit() != 0
+    }
+
+    pub fn is_disjoint(self, other: Self) -> bool {
+        self.0 & other.0 == 0
+    }
+
+    pub fn iter(self) -> impl Iterator<Item = Axis> {
+        [Axis::Lateral, Axis::Vertical, Axis::Speed]
+            .into_iter()
+            .filter(move |a| self.contains(*a))
+    }
+
+    pub fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+
+    pub fn union(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+
+    /// Axes present in `self` but not `other`.
+    pub fn difference(self, other: Self) -> Self {
+        Self(self.0 & !other.0)
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -100,7 +157,7 @@ pub struct TransitionHint {
 
 pub trait GuidanceProfile: Send {
     fn name(&self) -> &'static str;
-    fn owns(&self) -> BTreeSet<Axis>;
+    fn owns(&self) -> AxisSet;
     fn contribute(&mut self, state: &AircraftState, dt: f64) -> ProfileTick;
 
     /// For `PatternFlyProfile` observers that want to expose extra metadata on
@@ -162,7 +219,7 @@ pub struct PatternMetadata {
 pub struct IdleLateralProfile;
 impl GuidanceProfile for IdleLateralProfile {
     fn name(&self) -> &'static str { "idle_lateral" }
-    fn owns(&self) -> BTreeSet<Axis> { single(Axis::Lateral) }
+    fn owns(&self) -> AxisSet { AxisSet::LATERAL }
     fn contribute(&mut self, _: &AircraftState, _: f64) -> ProfileTick {
         ProfileTick::contribution_only(ProfileContribution {
             lateral_mode: Some(LateralMode::BankHold),
@@ -175,7 +232,7 @@ impl GuidanceProfile for IdleLateralProfile {
 pub struct IdleVerticalProfile;
 impl GuidanceProfile for IdleVerticalProfile {
     fn name(&self) -> &'static str { "idle_vertical" }
-    fn owns(&self) -> BTreeSet<Axis> { single(Axis::Vertical) }
+    fn owns(&self) -> AxisSet { AxisSet::VERTICAL }
     fn contribute(&mut self, _: &AircraftState, _: f64) -> ProfileTick {
         ProfileTick::contribution_only(ProfileContribution {
             vertical_mode: Some(VerticalMode::PitchHold),
@@ -194,7 +251,7 @@ impl IdleSpeedProfile {
 }
 impl GuidanceProfile for IdleSpeedProfile {
     fn name(&self) -> &'static str { "idle_speed" }
-    fn owns(&self) -> BTreeSet<Axis> { single(Axis::Speed) }
+    fn owns(&self) -> AxisSet { AxisSet::SPEED }
     fn contribute(&mut self, _: &AircraftState, _: f64) -> ProfileTick {
         ProfileTick::contribution_only(ProfileContribution {
             target_speed_kt: Some(self.default_speed_kt),
@@ -245,7 +302,7 @@ impl HeadingHoldProfile {
 
 impl GuidanceProfile for HeadingHoldProfile {
     fn name(&self) -> &'static str { "heading_hold" }
-    fn owns(&self) -> BTreeSet<Axis> { single(Axis::Lateral) }
+    fn owns(&self) -> AxisSet { AxisSet::LATERAL }
     fn contribute(&mut self, state: &AircraftState, _dt: f64) -> ProfileTick {
         let raw_error = (self.heading_deg - state.track_deg).rem_euclid(360.0);
         let short_error = if raw_error > 180.0 { raw_error - 360.0 } else { raw_error };
@@ -279,7 +336,7 @@ impl AltitudeHoldProfile {
 
 impl GuidanceProfile for AltitudeHoldProfile {
     fn name(&self) -> &'static str { "altitude_hold" }
-    fn owns(&self) -> BTreeSet<Axis> { single(Axis::Vertical) }
+    fn owns(&self) -> AxisSet { AxisSet::VERTICAL }
     fn contribute(&mut self, _state: &AircraftState, _dt: f64) -> ProfileTick {
         // Let TECS command the throttle it needs within the physical
         // envelope. A previous revision switched between three discrete
@@ -307,7 +364,7 @@ impl SpeedHoldProfile {
 
 impl GuidanceProfile for SpeedHoldProfile {
     fn name(&self) -> &'static str { "speed_hold" }
-    fn owns(&self) -> BTreeSet<Axis> { single(Axis::Speed) }
+    fn owns(&self) -> AxisSet { AxisSet::SPEED }
     fn contribute(&mut self, _: &AircraftState, _: f64) -> ProfileTick {
         ProfileTick::contribution_only(ProfileContribution {
             target_speed_kt: Some(self.speed_kt),
@@ -453,8 +510,8 @@ impl TakeoffProfile {
 
 impl GuidanceProfile for TakeoffProfile {
     fn name(&self) -> &'static str { "takeoff" }
-    fn owns(&self) -> BTreeSet<Axis> {
-        all_three_axes()
+    fn owns(&self) -> AxisSet {
+        AxisSet::ALL
     }
     fn pattern_metadata(&self) -> Option<PatternMetadata> {
         Some(PatternMetadata {
@@ -1207,8 +1264,8 @@ impl PatternFlyProfile {
 
 impl GuidanceProfile for PatternFlyProfile {
     fn name(&self) -> &'static str { "pattern_fly" }
-    fn owns(&self) -> BTreeSet<Axis> {
-        all_three_axes()
+    fn owns(&self) -> AxisSet {
+        AxisSet::ALL
     }
 
     fn contribute(&mut self, state: &AircraftState, _dt: f64) -> ProfileTick {
@@ -1470,8 +1527,8 @@ pub struct ApproachRunwayProfile {
 
 impl GuidanceProfile for ApproachRunwayProfile {
     fn name(&self) -> &'static str { "approach_runway" }
-    fn owns(&self) -> BTreeSet<Axis> {
-        all_three_axes()
+    fn owns(&self) -> AxisSet {
+        AxisSet::ALL
     }
     fn contribute(&mut self, _state: &AircraftState, _dt: f64) -> ProfileTick {
         // Stub: yield zeros so the control loop keeps running if somebody
@@ -1486,8 +1543,8 @@ pub struct RouteFollowProfile {
 
 impl GuidanceProfile for RouteFollowProfile {
     fn name(&self) -> &'static str { "route_follow" }
-    fn owns(&self) -> BTreeSet<Axis> {
-        all_three_axes()
+    fn owns(&self) -> AxisSet {
+        AxisSet::ALL
     }
     fn contribute(&mut self, _state: &AircraftState, _dt: f64) -> ProfileTick {
         ProfileTick::contribution_only(ProfileContribution::default())
@@ -1832,8 +1889,8 @@ impl GuidanceProfile for TaxiProfile {
             TaxiProfileMode::LineUp => "line_up",
         }
     }
-    fn owns(&self) -> BTreeSet<Axis> {
-        all_three_axes()
+    fn owns(&self) -> AxisSet {
+        AxisSet::ALL
     }
     fn contribute(&mut self, state: &AircraftState, _dt: f64) -> ProfileTick {
         if !self.finished {
@@ -1953,18 +2010,4 @@ impl GuidanceProfile for TaxiProfile {
             self.target_speed_kt(state),
         ))
     }
-}
-
-// ---------- helpers ----------
-
-fn single(axis: Axis) -> BTreeSet<Axis> {
-    let mut s = BTreeSet::new();
-    s.insert(axis);
-    s
-}
-
-fn all_three_axes() -> BTreeSet<Axis> {
-    [Axis::Lateral, Axis::Vertical, Axis::Speed]
-        .into_iter()
-        .collect()
 }
