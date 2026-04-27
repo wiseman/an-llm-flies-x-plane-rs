@@ -346,6 +346,21 @@ impl StraightLeg {
     pub fn course_deg(&self) -> f64 {
         course_between(self.start_ft, self.end_ft)
     }
+
+    /// Signed perpendicular distance from `pos_ft` to this leg, in feet.
+    /// Positive means right of the leg's direction of travel; negative
+    /// means left. Returns `None` for a degenerate (zero-length) leg.
+    pub fn crosstrack_ft(&self, pos_ft: Vec2) -> Option<f64> {
+        let leg_vec = self.end_ft - self.start_ft;
+        let leg_len = leg_vec.length();
+        if leg_len < 1e-6 {
+            return None;
+        }
+        let leg_dir = leg_vec * (1.0 / leg_len);
+        let leg_right = Vec2::new(leg_dir.y, -leg_dir.x);
+        let offset = pos_ft - self.start_ft;
+        Some(offset.dot(leg_right))
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]

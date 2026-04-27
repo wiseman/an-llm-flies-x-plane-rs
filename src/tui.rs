@@ -11,7 +11,6 @@
 //! `parse_input_source` and pushed onto the LLM input queue as
 //! `IncomingMessage`.
 
-use crate::core::mission_manager::StatusSnapshot;
 use crate::types::FlightPhase;
 #[cfg(test)]
 use crate::types::wrap_degrees_180;
@@ -243,15 +242,19 @@ use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use ratatui::Terminal;
 
 use crate::bus::{LogEntry, LogKind, SimBus};
-use crate::core::mission_manager::PilotCore;
+use crate::core::mission_manager::{
+    ActiveClearance, MissionGoal, PilotCore, StatusSnapshot,
+};
+use crate::core::safety_monitor::{risk_summary_for, CteBand, RiskSummary};
 use crate::live_runner::HeartbeatPump;
+use crate::llm::backend::{CacheSnapshot, CacheStats};
 use crate::llm::conversation::{IncomingMessage, PilotMode};
-use crate::llm::backend::CacheStats;
 use crate::transcribe::{PttController, PttMode, PttSnapshot};
 
-/// Run the interactive TUI on the calling thread. Blocks until the user exits
-/// (Ctrl-C / Ctrl-D / Esc); on return, `stop_event` is set so background
-/// threads can shut down gracefully.
+/// Run the interactive AI Pilot Console on the calling thread. Blocks
+/// until the user exits (Ctrl-C / Ctrl-D / Esc); on return, `stop_event`
+/// is set so background threads can shut down gracefully.
+#[allow(clippy::too_many_arguments)]
 pub fn run_tui(
     bus: SimBus,
     input_queue: Sender<IncomingMessage>,
@@ -260,6 +263,8 @@ pub fn run_tui(
     heartbeat_pump: Option<Arc<HeartbeatPump>>,
     cache_stats: Option<Arc<CacheStats>>,
     ptt: Option<Arc<PttController>>,
+    aircraft_label: String,
+    model_label: String,
 ) -> Result<()> {
     // Set up terminal.
     enable_raw_mode()?;
@@ -439,6 +444,17 @@ pub fn run_tui(
                 if k.kind == KeyEventKind::Release {
                     continue;
                 }
+                // F-keys: canned operator-message directability buttons.
+                // The supervisor never bypasses the LLM (it's still PIC) —
+                // these are *requests* visible to both human and LLM.
+                if let Some(text) = canned_directive_for(&k.code) {
+                    let _ = input_queue.send(IncomingMessage::operator(text.to_string()));
+                    if let Some(pump) = &heartbeat_pump {
+                        pump.record_user_input();
+                    }
+                    bus.push_log_kind(LogKind::Operator, text.to_string());
+                    continue;
+                }
                 match k.code {
                     KeyCode::PageUp => {
                         let current = log_scroll.unwrap_or(last_log_pin);
@@ -590,29 +606,100 @@ pub fn run_tui(
             break Ok(());
         }
 
-        let status_fragments = {
-            let snapshot = pilot.lock().latest_snapshot.clone();
-            render_status_fragments(snapshot.as_ref(), cache_stats.as_deref())
+        // Snapshot once per frame. Risk is computed under the same lock
+        // using a borrow of `config` — no `ConfigBundle` clone.
+        let (snapshot, risk) = {
+            let p = pilot.lock();
+            let snap = p.latest_snapshot.clone();
+            let risk = snap.as_ref().map(|s| {
+                let phase = s.phase.unwrap_or(FlightPhase::Cruise);
+                risk_summary_for(&p.config, &s.state, phase)
+            });
+            (snap, risk)
         };
         let log_entries = bus.log_entries();
         let (_, _, radio) = bus.snapshot();
         let radio_lines: Vec<Line> = radio.iter().flat_map(|l| render_radio_line(l)).collect();
+        let cache_snap = cache_stats.as_ref().map(|c| c.snapshot());
+        let alerts_count = log_entries
+            .iter()
+            .filter(|e| matches!(e.kind, LogKind::Error | LogKind::Safety))
+            .count() as u32;
 
         terminal.draw(|f| {
             let area = f.area();
+            // Vertical layout — pinned chrome on top + bottom; flex body.
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
-                    Constraint::Length(13), // status
-                    Constraint::Min(3),     // log (scrolling)
-                    Constraint::Length(8),  // radio
-                    Constraint::Length(5),  // input (3 content lines + borders)
+                    Constraint::Length(1), // header
+                    Constraint::Length(6), // mission intent (4 inner rows + borders)
+                    Constraint::Length(5), // authority (3 inner rows + borders)
+                    Constraint::Length(7), // aircraft strip (NAV + RISK, 5 inner rows + borders)
+                    Constraint::Min(8),    // dialog: radio + LLM (flexes)
+                    Constraint::Length(5), // input (3 content lines + borders)
+                    Constraint::Length(1), // footer
                 ])
                 .split(area);
 
-            // Inside the draw closure: operator-row bg tint needs the
-            // pane's live inner width to pad out to the border.
-            let log_inner_width = chunks[1].width.saturating_sub(2);
+            // Header.
+            f.render_widget(
+                Paragraph::new(render_header(
+                    chunks[0].width,
+                    snapshot.as_ref(),
+                    &aircraft_label,
+                    &model_label,
+                    cache_snap.as_ref(),
+                )),
+                chunks[0],
+            );
+
+            // Mission Intent.
+            let mi_para = Paragraph::new(render_mission_intent(snapshot.as_ref()))
+                .block(Block::default().borders(Borders::ALL).title(" MISSION INTENT "))
+                .wrap(Wrap { trim: false });
+            f.render_widget(mi_para, chunks[1]);
+
+            // Authority.
+            let auth_para = Paragraph::new(render_authority(snapshot.as_ref()))
+                .block(Block::default().borders(Borders::ALL).title(" AUTHORITY "));
+            f.render_widget(auth_para, chunks[2]);
+
+            // Aircraft body: NAV + ENERGY · RISK. Both panes use fixed-width
+            // tabular cells, so the columns stay narrow; the dialog log
+            // below gets the rest of the width.
+            let body_cols = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([
+                    Constraint::Length(38), // NAV
+                    Constraint::Min(36),    // RISK (flex)
+                ])
+                .split(chunks[3]);
+
+            let nav_para = Paragraph::new(render_nav(snapshot.as_ref()))
+                .block(Block::default().borders(Borders::ALL).title(" NAV "));
+            f.render_widget(nav_para, body_cols[0]);
+
+            let risk_para = Paragraph::new(render_risk(risk.as_ref()))
+                .block(Block::default().borders(Borders::ALL).title(" ENERGY · RISK "));
+            f.render_widget(risk_para, body_cols[1]);
+
+            // Dialog: radio (left) + LLM action log (right).
+            let dialog_cols = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Percentage(45), Constraint::Percentage(55)])
+                .split(chunks[4]);
+
+            let radio_paragraph = Paragraph::new(radio_lines.clone())
+                .block(Block::default().borders(Borders::ALL).title(" RADIO "))
+                .wrap(Wrap { trim: false });
+            f.render_widget(
+                radio_paragraph.scroll((pin_to_bottom(&radio_lines, dialog_cols[0]), 0)),
+                dialog_cols[0],
+            );
+
+            // LLM / action log (structured).
+            let log_inner_width = dialog_cols[1].width.saturating_sub(2);
             let mut log_lines = build_log_lines(
                 &log_entries,
                 log_detail,
@@ -622,20 +709,8 @@ pub fn run_tui(
             if bus.is_llm_busy() {
                 log_lines.push(render_thinking_line(tui_epoch.elapsed()));
             }
-
-            let status_paragraph = Paragraph::new(status_fragments.clone())
-                .block(Block::default().borders(Borders::ALL).title(" FLIGHT "))
-                .wrap(Wrap { trim: false });
-            f.render_widget(status_paragraph, chunks[0]);
-
-            // Render both scrollback panes with `scroll((offset, 0))` pinned
-            // to the bottom. Picking "last N logical lines" doesn't work
-            // when lines wrap — long log entries become multiple screen rows
-            // and spill below the pane border. Using `line_count(inner_width)`
-            // gives us the true rendered row count so we can skip the right
-            // amount from the top.
-            let log_pin = pin_to_bottom(&log_lines, chunks[1]);
-            let inner_height = chunks[1].height.saturating_sub(2);
+            let log_pin = pin_to_bottom(&log_lines, dialog_cols[1]);
+            let inner_height = dialog_cols[1].height.saturating_sub(2);
             last_log_pin = log_pin;
             last_log_page = inner_height.max(3).saturating_sub(1);
             let (log_offset, scroll_indicator) = match log_scroll {
@@ -646,7 +721,7 @@ pub fn run_tui(
                 }
                 None => (log_pin, String::new()),
             };
-            let base_title = if log_detail { " LOG " } else { " LOG (compact) " };
+            let base_title = if log_detail { " LLM / ACTION LOG " } else { " LLM / ACTION LOG (compact) " };
             let log_title = if scroll_indicator.is_empty() {
                 base_title.to_string()
             } else {
@@ -655,21 +730,24 @@ pub fn run_tui(
             let log_paragraph = Paragraph::new(log_lines.clone())
                 .block(Block::default().borders(Borders::ALL).title(log_title))
                 .wrap(Wrap { trim: false });
+            f.render_widget(log_paragraph.scroll((log_offset, 0)), dialog_cols[1]);
+
+            // Footer (status badges).
             f.render_widget(
-                log_paragraph.scroll((log_offset, 0)),
-                chunks[1],
+                Paragraph::new(render_footer(
+                    chunks[6].width,
+                    snapshot.as_ref(),
+                    alerts_count,
+                )),
+                chunks[6],
             );
 
-            let radio_paragraph = Paragraph::new(radio_lines.clone())
-                .block(Block::default().borders(Borders::ALL).title(" RADIO "))
-                .wrap(Wrap { trim: false });
-            f.render_widget(
-                radio_paragraph.scroll((pin_to_bottom(&radio_lines, chunks[2]), 0)),
-                chunks[2],
-            );
-
-            let input_title =
-                " INPUT — space/tab hold to talk · enter to send · ↑/↓ history · c-a/e/k edit · ctrl-t log detail · ctrl-o thoughts · pgup/pgdn/end scroll log ";
+            // Input pane title with F-key affordances rendered dynamically
+            // based on whether the aircraft is on the ground (rejected
+            // takeoff) or in the air (extend / turn base / go around).
+            let phase = snapshot.as_ref().and_then(|s| s.phase);
+            let on_ground = snapshot.as_ref().map(|s| s.state.on_ground).unwrap_or(true);
+            let input_title = build_input_title(on_ground, phase);
             let ptt_snap: Option<PttSnapshot> = ptt.as_ref().map(|p| p.snapshot());
             let mut spans: Vec<Span> = vec![
                 Span::styled("> ", Style::default().fg(Color::Cyan)),
@@ -744,7 +822,7 @@ pub fn run_tui(
                     Style::default().add_modifier(Modifier::DIM),
                 ));
             }
-            let pane = chunks[3];
+            let pane = chunks[5];
             let content_width = pane.width.saturating_sub(2).max(1);
             let content_height = pane.height.saturating_sub(2).max(1);
             last_input_width = content_width;
@@ -755,7 +833,7 @@ pub fn run_tui(
             let input_lines = wrap_input_spans(spans, content_width);
             let input_paragraph = Paragraph::new(input_lines)
                 .block(Block::default().borders(Borders::ALL).title(input_title));
-            f.render_widget(input_paragraph, chunks[3]);
+            f.render_widget(input_paragraph, chunks[5]);
 
             if !recording {
                 // Park the terminal cursor at `input_cursor` (not the end
@@ -1245,8 +1323,8 @@ fn style_for_kind(kind: LogKind) -> LogStyle {
             body_style: Style::default(),
         },
         LogKind::Llm => LogStyle::Bar {
-            bar_style: Style::default().fg(Color::LightGreen),
-            body_style: Style::default(),
+            bar_style: Style::default().fg(LLM_TEXT_FG),
+            body_style: Style::default().fg(LLM_TEXT_FG),
         },
         LogKind::Safety => LogStyle::Bar {
             bar_style: Style::default().fg(Color::Yellow),
@@ -1287,6 +1365,11 @@ fn style_for_kind(kind: LogKind) -> LogStyle {
 /// Slightly-lighter-than-black tint for operator blocks — reads like a
 /// chat "user bubble" against the default terminal bg.
 const OPERATOR_BG: Color = Color::Rgb(32, 32, 38);
+
+/// Amber-orange used for assistant text. Clearly distinct from the
+/// cyan-italic `LogKind::Thinking` style so a multi-line LLM response
+/// reads as "speech" instead of being mistaken for an internal aside.
+const LLM_TEXT_FG: Color = Color::Rgb(255, 175, 95);
 
 /// Filter, insert a blank line at each operator↔llm turn, and tint
 /// operator lines to the pane's inner width so the bg extends past the
@@ -1558,290 +1641,698 @@ fn prop_frame_index(elapsed: Duration) -> usize {
     (elapsed.as_millis() / PROP_FRAME_MS) as usize % PROP_FRAMES.len()
 }
 
-/// Produce styled `Line`s for the status pane. Reimplements the lexer logic
-/// from `format_snapshot_display` with color hints for deviation bands.
-fn render_status_fragments(
+// ---------- new console renderers ----------
+
+/// Header row: title chip · aircraft · phase · elapsed sim time.
+fn render_header(
+    width: u16,
     snapshot: Option<&StatusSnapshot>,
-    cache_stats: Option<&CacheStats>,
-) -> Vec<Line<'static>> {
-    let Some(snap) = snapshot else {
-        return vec![Line::from(Span::styled(
-            "  (waiting for first pilot tick)".to_string(),
-            Style::default().fg(Color::DarkGray),
-        ))];
-    };
-
-    let state = &snap.state;
-    let guidance = snap.last_guidance.as_ref();
-    let commands = &snap.last_commands;
-    let profiles = if snap.active_profiles.is_empty() {
-        "(none)".to_string()
-    } else {
-        decorate_profiles(&snap.active_profiles, &snap.profile_mode_line_suffixes)
-    };
-    let phase_label = snap
-        .phase
-        .map(|p| p.value().to_string())
-        .unwrap_or_else(|| "—".to_string());
-
-    let tgt_hdg = guidance.and_then(|g| g.target_heading_deg.or(g.target_track_deg));
-    let tgt_alt_msl = guidance.and_then(|g| g.target_altitude_ft);
-    let tgt_spd = guidance.and_then(|g| g.target_speed_kt);
-    let field_elev = state.alt_msl_ft - state.alt_agl_ft;
-    let tgt_alt_agl = tgt_alt_msl.map(|a| a - field_elev);
-
-    let phase_style = phase_style(snap.phase);
-
-    let mut lines: Vec<Line> = Vec::with_capacity(10);
-
-    // Header line (phase + rwy info + profiles). Phase is padded to 24
-    // chars only when there's no rwy_info, and phase/rwy/profiles are
-    // separated by explicit two-space spans.
-    let mut rwy_parts: Vec<String> = Vec::new();
-    if let Some(a) = &snap.airport_ident {
-        rwy_parts.push(a.clone());
-    }
-    if let Some(r) = &snap.runway_id {
-        rwy_parts.push(format!("rwy {}", r));
-    }
-    if let Some(e) = snap.field_elevation_ft {
-        if !rwy_parts.is_empty() {
-            rwy_parts.push(format!("· {:.0} ft", e));
-        }
-    }
-    let has_rwy = !rwy_parts.is_empty();
-    let mut header: Vec<Span<'static>> = vec![
-        Span::styled(" ▸ ", Style::default().fg(Color::LightGreen)),
-    ];
-    if has_rwy {
-        header.push(Span::styled(phase_label.to_uppercase(), phase_style));
-        header.push(Span::raw("  "));
-        header.push(Span::styled(rwy_parts.join(" "), Style::default().fg(Color::Gray)));
-        header.push(Span::raw("  "));
-    } else {
-        header.push(Span::styled(
-            format!("{:<24}", phase_label.to_uppercase()),
-            phase_style,
-        ));
-    }
-    header.push(Span::styled(profiles, Style::default().fg(Color::Gray)));
-    lines.push(Line::from(header));
-    lines.push(Line::from(Span::styled(
-        " ".to_string() + &"─".repeat(64),
-        Style::default().fg(Color::DarkGray),
-    )));
-    lines.push(Line::from(Span::styled(
-        format!("{:>27}{:>15}", "current", "target"),
-        Style::default().fg(Color::Gray),
-    )));
-
-    // heading
-    let val_style = Style::default().fg(Color::White).add_modifier(Modifier::BOLD);
-    let hdg_style = match tgt_hdg {
-        Some(t) => dev_style((state.heading_deg - t).abs(), 3.0, 15.0),
-        None => val_style,
-    };
-    lines.push(instrument_line(
-        "heading",
-        format!("{:>10.0}", state.heading_deg),
-        "°",
-        tgt_hdg.map(|v| format!("{:>7.0}", v)),
-        "°",
-        hdg_style,
-    ));
-    // altitude AGL
-    let alt_style = match tgt_alt_agl {
-        Some(t) => dev_style((state.alt_agl_ft - t).abs(), 50.0, 200.0),
-        None => val_style,
-    };
-    lines.push(instrument_line(
-        "altitude",
-        format!("{:>10.0}", state.alt_agl_ft),
-        " AGL",
-        tgt_alt_agl.map(|v| format!("{:>7.0}", v)),
-        " AGL",
-        alt_style,
-    ));
-    // altitude MSL
-    let msl_style = match tgt_alt_msl {
-        Some(t) => dev_style((state.alt_msl_ft - t).abs(), 50.0, 200.0),
-        None => val_style,
-    };
-    lines.push(instrument_line(
-        "",
-        format!("{:>10.0}", state.alt_msl_ft),
-        " MSL",
-        tgt_alt_msl.map(|v| format!("{:>7.0}", v)),
-        " MSL",
-        msl_style,
-    ));
-    // airspeed
-    let spd_style = match tgt_spd {
-        Some(t) => dev_style((state.ias_kt - t).abs(), 3.0, 10.0),
-        None => val_style,
-    };
-    lines.push(instrument_line(
-        "airspeed",
-        format!("{:>10.0}", state.ias_kt),
-        " kt IAS",
-        tgt_spd.map(|v| format!("{:>7.0}", v)),
-        " kt",
-        spd_style,
-    ));
-    lines.push(instrument_line(
-        "groundspeed",
-        format!("{:>10.0}", state.gs_kt),
-        " kt",
-        None,
-        "",
-        val_style,
-    ));
-    lines.push(instrument_line(
-        "vertical",
-        format!("{:>+10.0}", state.vs_fpm),
-        " fpm",
-        None,
-        "",
-        val_style,
-    ));
-    lines.push(Line::from(Span::styled(
-        " ".to_string() + &"─".repeat(64),
-        Style::default().fg(Color::DarkGray),
-    )));
-
-    // Bottom config row. Label spans use the shared lbl style
-    // (Gray); numeric values use val (White + BOLD). Gap strings are
-    // "   flaps " / "   gear " — three spaces.
-    let lbl_style = Style::default().fg(Color::Gray);
-    let thr_width = 8usize;
-    let filled = (commands.throttle * thr_width as f64).round() as usize;
-    let filled = filled.min(thr_width);
-    let mut config_row: Vec<Span<'static>> = Vec::new();
-    config_row.push(Span::styled("  throttle ", lbl_style));
-    config_row.push(Span::styled(
-        "█".repeat(filled),
-        Style::default().fg(Color::LightGreen),
-    ));
-    config_row.push(Span::styled(
-        "░".repeat(thr_width - filled),
-        Style::default().fg(Color::DarkGray),
-    ));
-    config_row.push(Span::styled(format!(" {:4.2}", commands.throttle), val_style));
-    config_row.push(Span::styled("   flaps ", lbl_style));
-    config_row.push(Span::styled(
-        format!("{:<5}", format!("{}°", state.flap_index)),
-        val_style,
-    ));
-    config_row.push(Span::styled("   gear ", lbl_style));
-    config_row.push(Span::styled(
-        if state.gear_down { "dn" } else { "up" }.to_string(),
-        if state.gear_down {
-            Style::default().fg(Color::LightGreen)
-        } else {
-            Style::default().fg(Color::Yellow)
-        },
-    ));
-    config_row.push(Span::raw("   "));
-    config_row.push(Span::styled(
-        if state.on_ground { "on ground" } else { "airborne" }.to_string(),
-        if state.on_ground {
-            Style::default().fg(Color::Yellow)
-        } else {
-            Style::default().fg(Color::LightCyan)
-        },
-    ));
-    config_row.push(Span::raw("   "));
-    let rwy_str = match (state.runway_x_ft, state.runway_y_ft) {
-        (Some(x), Some(y)) => format!("rwy x{:+.0} y{:+.0}", x, y),
-        _ => "rwy —".to_string(),
-    };
-    config_row.push(Span::styled(rwy_str, Style::default().fg(Color::DarkGray)));
-
-    if let Some(stats) = cache_stats {
-        let s = stats.snapshot();
-        if s.total_requests > 0 {
-            let rate = if s.total_input_tokens > 0 {
-                s.total_cached_tokens as f64 / s.total_input_tokens as f64
-            } else {
-                0.0
-            };
-            config_row.push(Span::raw("   "));
-            config_row.push(Span::styled("cache ", Style::default().fg(Color::DarkGray)));
-            let style = if rate >= 0.5 {
-                Style::default()
-                    .fg(Color::LightGreen)
-                    .add_modifier(Modifier::BOLD)
-            } else if rate >= 0.2 {
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(Color::DarkGray)
-            };
-            config_row.push(Span::styled(format!("{:.0}%", rate * 100.0), style));
-        }
-    }
-
-    lines.push(Line::from(config_row));
-    lines
-}
-
-fn instrument_line(
-    label: &str,
-    current_text: String,
-    current_unit: &str,
-    target_text: Option<String>,
-    target_unit: &str,
-    value_style: Style,
+    aircraft_label: &str,
+    model_label: &str,
+    cache: Option<&CacheSnapshot>,
 ) -> Line<'static> {
-    let mut spans = vec![
+    let phase_label = snapshot
+        .and_then(|s| s.phase)
+        .map(|p| p.value().to_uppercase())
+        .unwrap_or_else(|| "—".to_string());
+    let t_sim = snapshot.map(|s| s.t_sim).unwrap_or(0.0);
+    let h = (t_sim / 3600.0).floor() as u32;
+    let m = ((t_sim % 3600.0) / 60.0).floor() as u32;
+    let s = (t_sim % 60.0).floor() as u32;
+    let title = " AI PILOT CONSOLE ";
+    let sep = "  │  ";
+    let (input_tok, output_tok, hit, reqs) = match cache {
+        Some(c) => (
+            c.total_input_tokens,
+            c.total_output_tokens,
+            c.hit_percent(),
+            c.total_requests,
+        ),
+        None => (0, 0, 0.0, 0),
+    };
+    let mut spans: Vec<Span<'static>> = vec![
         Span::styled(
-            format!("  {:<15}", label),
+            title.to_string(),
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" "),
+        Span::styled(
+            aircraft_label.to_string(),
+            Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(sep.to_string(), Style::default().fg(Color::DarkGray)),
+        Span::styled(phase_label.clone(), phase_color_style(snapshot.and_then(|s| s.phase))),
+        Span::styled(sep.to_string(), Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            format!("T+{h:02}:{m:02}:{s:02}"),
+            Style::default().fg(Color::White),
+        ),
+        Span::styled(sep.to_string(), Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            model_label.to_string(),
+            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!(
+                "  ↓{} ↑{}  cache {:>3.0}%  reqs {}",
+                fmt_tokens(input_tok),
+                fmt_tokens(output_tok),
+                hit,
+                reqs,
+            ),
             Style::default().fg(Color::Gray),
         ),
-        Span::styled(current_text, value_style),
-        Span::styled(format!("{:<8}", current_unit), value_style),
     ];
-    match target_text {
-        Some(t) => {
-            spans.push(Span::styled(t, Style::default().fg(Color::LightCyan)));
-            spans.push(Span::styled(
-                format!("{:<5}", target_unit),
-                Style::default().fg(Color::LightCyan),
-            ));
-        }
-        None => {
-            spans.push(Span::styled(
-                format!("{:>7}", "—"),
-                Style::default().fg(Color::DarkGray),
-            ));
-        }
+    let used: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+    let pad = (width as usize).saturating_sub(used);
+    if pad > 0 {
+        spans.push(Span::raw(" ".repeat(pad)));
     }
     Line::from(spans)
 }
 
-fn dev_style(deviation: f64, near: f64, far: f64) -> Style {
-    if deviation <= near {
-        Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD)
-    } else if deviation <= far {
-        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+/// Compact token count: 12_400 → "12.4k", 1_100_000 → "1.1M". Below 1k
+/// values render with thousands separators ("987").
+fn fmt_tokens(n: u64) -> String {
+    if n >= 1_000_000 {
+        format!("{:.1}M", n as f64 / 1_000_000.0)
+    } else if n >= 1_000 {
+        format!("{:.1}k", n as f64 / 1_000.0)
     } else {
-        Style::default().fg(Color::LightRed).add_modifier(Modifier::BOLD)
+        n.to_string()
     }
 }
 
-fn phase_style(phase: Option<FlightPhase>) -> Style {
-    use crate::types::FlightPhase::*;
-    let color = match phase {
-        Some(TakeoffRoll | Rotate | Rollout | Final | Roundout | Flare) => Color::Yellow,
-        Some(InitialClimb | Crosswind | EnrouteClimb | Cruise | Downwind | Base) => {
-            Color::LightGreen
+fn phase_color_style(phase: Option<FlightPhase>) -> Style {
+    match phase {
+        Some(FlightPhase::GoAround) => Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD),
+        Some(FlightPhase::Final | FlightPhase::Flare | FlightPhase::Roundout | FlightPhase::Rollout) => {
+            Style::default()
+                .fg(Color::LightGreen)
+                .add_modifier(Modifier::BOLD)
         }
-        Some(Descent | PatternEntry) => Color::LightCyan,
-        Some(GoAround) => Color::LightRed,
-        Some(Preflight | RunwayExit | TaxiClear) | None => Color::White,
+        Some(_) => Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+        None => Style::default().fg(Color::DarkGray),
+    }
+}
+
+// ---------- mission intent ----------
+
+fn render_mission_intent(snapshot: Option<&StatusSnapshot>) -> Vec<Line<'static>> {
+    let Some(s) = snapshot else {
+        return vec![Line::from(Span::styled(
+            "(waiting…)",
+            Style::default().fg(Color::DarkGray),
+        ))];
     };
-    Style::default().fg(color).add_modifier(Modifier::BOLD)
+    let mut lines: Vec<Line<'static>> = Vec::with_capacity(4);
+    lines.push(intent_row("GOAL", &goal_text(s.mission_goal.as_ref()), goal_color(s)));
+    lines.push(intent_row("PLAY", &play_text(s), Color::White));
+    lines.push(intent_row(
+        "PHASE",
+        &phase_with_hint(s),
+        Color::White,
+    ));
+    lines.push(intent_row(
+        "CLEAR",
+        &clearance_text(s.active_clearance.as_ref()),
+        clearance_color(s.active_clearance.as_ref()),
+    ));
+    lines
+}
+
+fn intent_row(label: &str, value: &str, value_fg: Color) -> Line<'static> {
+    let label_w: usize = 6;
+    let pad = label_w.saturating_sub(label.chars().count());
+    Line::from(vec![
+        Span::styled(
+            format!("{}{} ", label, " ".repeat(pad)),
+            Style::default().fg(Color::Gray),
+        ),
+        Span::styled(value.to_string(), Style::default().fg(value_fg)),
+    ])
+}
+
+fn goal_text(goal: Option<&MissionGoal>) -> String {
+    match goal {
+        None => "—  (LLM has not declared a mission goal)".to_string(),
+        Some(g) => {
+            let mut out = g.kind.to_uppercase();
+            if let Some(t) = &g.target {
+                out.push_str("  ");
+                out.push_str(t);
+            }
+            if let Some(n) = &g.notes {
+                out.push_str("  · ");
+                out.push_str(n);
+            }
+            out
+        }
+    }
+}
+
+fn goal_color(s: &StatusSnapshot) -> Color {
+    if s.mission_goal.is_some() {
+        Color::LightGreen
+    } else {
+        Color::DarkGray
+    }
+}
+
+fn play_text(s: &StatusSnapshot) -> String {
+    // Pick the active mission-level profile — heuristic: the first
+    // non-idle name in active_profiles, plus its mode_line_suffix when
+    // the profiles list provided one.
+    let mut play: Option<(String, Option<String>)> = None;
+    for (i, name) in s.active_profiles.iter().enumerate() {
+        if name.starts_with("idle_") {
+            continue;
+        }
+        let suffix = s.profile_mode_line_suffixes.get(i).cloned().flatten();
+        play = Some((name.clone(), suffix));
+        break;
+    }
+    let actions = play_action_hints(s);
+    match play {
+        Some((name, Some(suf))) if !suf.is_empty() => {
+            format!("{name}  ·  {suf}    {actions}")
+        }
+        Some((name, _)) => format!("{name}    {actions}"),
+        None => format!("(idle)    {actions}"),
+    }
+}
+
+fn play_action_hints(s: &StatusSnapshot) -> String {
+    let mut hints: Vec<&'static str> = Vec::new();
+    let phase = s.phase;
+    let on_ground = s.state.on_ground;
+    if matches!(
+        phase,
+        Some(FlightPhase::Downwind | FlightPhase::Base)
+    ) {
+        hints.push("[F2]extend");
+        hints.push("[F3]turn-base");
+    }
+    if !on_ground
+        && matches!(
+            phase,
+            Some(
+                FlightPhase::Final
+                    | FlightPhase::Roundout
+                    | FlightPhase::Flare
+                    | FlightPhase::Downwind
+                    | FlightPhase::Base
+                    | FlightPhase::PatternEntry
+                    | FlightPhase::Crosswind
+            )
+        )
+    {
+        hints.push("[F4]G/A");
+    }
+    hints.push("[F5]abort");
+    hints.join(" ")
+}
+
+fn phase_with_hint(s: &StatusSnapshot) -> String {
+    let phase = s
+        .phase
+        .map(|p| p.value().to_uppercase())
+        .unwrap_or_else(|| "—".to_string());
+    match s.transition_hint.as_ref() {
+        Some(h) => format!(
+            "{phase}  →  {next}  in {eta}   ({cond})",
+            phase = phase,
+            next = h.next_phase.value().to_uppercase(),
+            eta = format_eta(h.eta_s),
+            cond = h.condition_text,
+        ),
+        None => phase,
+    }
+}
+
+fn format_eta(eta_s: Option<f64>) -> String {
+    match eta_s {
+        None => "—".to_string(),
+        Some(secs) => {
+            if secs >= 60.0 {
+                let m = (secs / 60.0).floor() as u32;
+                let s = (secs % 60.0).floor() as u32;
+                format!("{m}:{s:02}")
+            } else {
+                format!("0:{:02}", secs.round() as u32)
+            }
+        }
+    }
+}
+
+fn clearance_text(c: Option<&ActiveClearance>) -> String {
+    match c {
+        None => "(no active clearance pinned)".to_string(),
+        Some(c) => {
+            let freq = c
+                .freq_mhz
+                .map(|f| format!(" {:.3}", f))
+                .unwrap_or_default();
+            format!(
+                "\"{}\"   {}{}   ●pinned",
+                c.text,
+                c.source.label(),
+                freq,
+            )
+        }
+    }
+}
+
+fn clearance_color(c: Option<&ActiveClearance>) -> Color {
+    match c {
+        Some(_) => Color::LightCyan,
+        None => Color::DarkGray,
+    }
+}
+
+// ---------- authority ----------
+
+fn render_authority(snapshot: Option<&StatusSnapshot>) -> Vec<Line<'static>> {
+    let mut lines: Vec<Line<'static>> = Vec::with_capacity(3);
+
+    let Some(s) = snapshot else {
+        for axis_label in ["LATERAL", "VERTICAL", "SPEED"] {
+            lines.push(Line::from(vec![
+                authority_label(axis_label),
+                Span::styled(
+                    "—".to_string(),
+                    Style::default().fg(Color::DarkGray),
+                ),
+            ]));
+        }
+        return lines;
+    };
+
+    for (axis_label, axis_kind) in [
+        ("LATERAL", AxisHint::Lateral),
+        ("VERTICAL", AxisHint::Vertical),
+        ("SPEED", AxisHint::Speed),
+    ] {
+        let body = axis_authority_body(s, axis_kind);
+        lines.push(Line::from(vec![
+            authority_label(axis_label),
+            Span::styled(body.0, Style::default().fg(body.1).add_modifier(Modifier::BOLD)),
+            Span::raw("  "),
+            Span::styled(body.2, Style::default().fg(Color::Gray)),
+        ]));
+    }
+    lines
+}
+
+fn authority_label(label: &str) -> Span<'static> {
+    let pad = 9usize.saturating_sub(label.chars().count());
+    Span::styled(
+        format!("{}{}", label, " ".repeat(pad)),
+        Style::default().fg(Color::Gray),
+    )
+}
+
+#[derive(Copy, Clone)]
+enum AxisHint {
+    Lateral,
+    Vertical,
+    Speed,
+}
+
+fn axis_authority_body(s: &StatusSnapshot, axis: AxisHint) -> (String, Color, String) {
+    // Per-axis ownership is captured in `StatusSnapshot` from
+    // `GuidanceProfile::owns()`, so the TUI looks up the owner by index
+    // instead of substring-matching profile names.
+    let owner_idx = match axis {
+        AxisHint::Lateral => s.lateral_owner_idx,
+        AxisHint::Vertical => s.vertical_owner_idx,
+        AxisHint::Speed => s.speed_owner_idx,
+    };
+    let owner = owner_idx
+        .and_then(|i| s.active_profiles.get(i).cloned())
+        .unwrap_or_else(|| "—".to_string());
+    let suffix = owner_idx
+        .and_then(|i| s.profile_mode_line_suffixes.get(i).cloned())
+        .flatten();
+    let detail = match axis {
+        AxisHint::Lateral => lateral_detail(s, suffix.as_deref()),
+        AxisHint::Vertical => vertical_detail(s, suffix.as_deref()),
+        AxisHint::Speed => speed_detail(s, suffix.as_deref()),
+    };
+    let color = if owner.starts_with("idle_") {
+        Color::DarkGray
+    } else {
+        Color::White
+    };
+    (owner, color, detail)
+}
+
+fn lateral_detail(s: &StatusSnapshot, suffix: Option<&str>) -> String {
+    if let Some(suf) = suffix {
+        if !suf.is_empty() {
+            return suf.to_string();
+        }
+    }
+    let g = match s.last_guidance.as_ref() {
+        Some(g) => g,
+        None => return String::new(),
+    };
+    let track = g
+        .target_track_deg
+        .or(g.target_heading_deg)
+        .map(|t| format!("track {:03.0}°", (t + 360.0) % 360.0))
+        .unwrap_or_default();
+    // CTE is measured relative to the active leg the guidance is
+    // following (downwind, base, final, taxi leg, departure leg…), not
+    // the runway centerline — on downwind the aircraft is intentionally
+    // ~6000 ft off the runway centerline by design. When no leg is
+    // active (heading-hold cruise), we don't report a CTE.
+    let cte = g
+        .target_path
+        .and_then(|leg| leg.crosstrack_ft(s.state.position_ft))
+        .map(|e| format!(" · CTE {:+.0} ft", e));
+    format!("{}{}", track, cte.unwrap_or_default())
+}
+
+fn vertical_detail(s: &StatusSnapshot, suffix: Option<&str>) -> String {
+    if let Some(suf) = suffix {
+        if !suf.is_empty() {
+            return suf.to_string();
+        }
+    }
+    let g = match s.last_guidance.as_ref() {
+        Some(g) => g,
+        None => return String::new(),
+    };
+    let target = g
+        .target_altitude_ft
+        .map(|a| format!("target {:.0} ft", a))
+        .unwrap_or_default();
+    let cur = format!(" · {:.0} ft", s.state.alt_msl_ft);
+    let vs = format!(" · vs {:+.0} fpm", s.state.vs_fpm);
+    let glide = if g.glidepath.is_some() {
+        " · glideslope"
+    } else {
+        ""
+    };
+    format!("{}{}{}{}", target, cur, vs, glide)
+}
+
+fn speed_detail(s: &StatusSnapshot, suffix: Option<&str>) -> String {
+    if let Some(suf) = suffix {
+        if !suf.is_empty() {
+            return suf.to_string();
+        }
+    }
+    let g = match s.last_guidance.as_ref() {
+        Some(g) => g,
+        None => return String::new(),
+    };
+    let target = g
+        .target_speed_kt
+        .map(|v| format!("target {:.0} KIAS", v))
+        .unwrap_or_default();
+    let cur = format!(" · {:.0} KIAS", s.state.ias_kt);
+    let throttle = format!(" · thr {:.0}%", s.state.throttle_pos * 100.0);
+    format!("{}{}{}", target, cur, throttle)
+}
+
+// ---------- nav pane ----------
+
+fn render_nav(snapshot: Option<&StatusSnapshot>) -> Vec<Line<'static>> {
+    let Some(s) = snapshot else {
+        return vec![Line::from(Span::styled(
+            "(waiting…)",
+            Style::default().fg(Color::DarkGray),
+        ))];
+    };
+    let st = &s.state;
+    let cte = st
+        .centerline_error_ft
+        .map(|e| format!("{:+.0}", e));
+    let dist_nm = st
+        .distance_to_touchdown_ft
+        .map(|d| format!("{:.2}", d / 6076.1155));
+    let gear = if st.gear_down { "↓" } else { "↑" };
+    // 2 cells per row × 5 rows = 10 nav slots. Each cell is rendered as
+    // 4-char label + 6-char right-aligned value + 4-char left-aligned
+    // unit, so columns line up vertically across rows.
+    vec![
+        nav_line(
+            ("HDG",  format!("{:.0}", (st.heading_deg + 360.0) % 360.0), "°"),
+            ("TRK",  format!("{:.0}", (st.track_deg + 360.0) % 360.0),   "°"),
+        ),
+        nav_line(
+            ("ALT",  format!("{:.0}", st.alt_msl_ft),                    "ft"),
+            ("AGL",  format!("{:.0}", st.alt_agl_ft),                    "ft"),
+        ),
+        nav_line(
+            ("IAS",  format!("{:.0}", st.ias_kt),                        "kt"),
+            ("VS",   format!("{:+.0}", st.vs_fpm),                       "fpm"),
+        ),
+        nav_line(
+            ("CTE",  cte.unwrap_or_else(|| "—".into()),                  "ft"),
+            ("DIST", dist_nm.unwrap_or_else(|| "—".into()),              "NM"),
+        ),
+        nav_line(
+            ("GEAR", gear.to_string(),                                   ""),
+            ("FLP",  format!("{}", st.flap_index),                       "°"),
+        ),
+    ]
+}
+
+/// Render two NAV cells side-by-side with the shared aligned-cell
+/// geometry so numbers and units line up across rows.
+fn nav_line(left: (&str, String, &str), right: (&str, String, &str)) -> Line<'static> {
+    let mut spans = aligned_cell(left.0, 4, &left.1, left.2, Color::White);
+    spans.push(Span::raw("  "));
+    spans.extend(aligned_cell(right.0, 4, &right.1, right.2, Color::White));
+    Line::from(spans)
+}
+
+/// Tabular cell shared by NAV and RISK panes. Layout is:
+///   label(label_w) + value(6, right-aligned) + space + unit(3, left-aligned)
+/// Value is rendered bold in `value_color`; label and unit are dim.
+fn aligned_cell(
+    label: &str,
+    label_w: usize,
+    value: &str,
+    unit: &str,
+    value_color: Color,
+) -> Vec<Span<'static>> {
+    let lpad = label_w.saturating_sub(label.chars().count());
+    vec![
+        Span::styled(
+            format!("{}{}", label, " ".repeat(lpad)),
+            Style::default().fg(Color::Gray),
+        ),
+        Span::styled(
+            format!("{:>6}", value),
+            Style::default().fg(value_color).add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" "),
+        Span::styled(
+            format!("{:<3}", unit),
+            Style::default().fg(Color::Gray),
+        ),
+    ]
+}
+
+// ---------- risk pane ----------
+
+fn render_risk(risk: Option<&RiskSummary>) -> Vec<Line<'static>> {
+    let Some(r) = risk else {
+        return vec![Line::from(Span::styled(
+            "(waiting…)",
+            Style::default().fg(Color::DarkGray),
+        ))];
+    };
+    let band = match r.cte_band {
+        CteBand::Safe => ("OK", Color::LightGreen),
+        CteBand::Warn => ("WARN", Color::Yellow),
+        CteBand::Trigger => ("TRIGGER", Color::LightRed),
+    };
+    vec![
+        risk_row(
+            "stall margin",
+            format!("{:.2}", r.stall_margin),
+            "",
+            risk_color_inverted(r.stall_margin, 1.05, 1.20),
+        ),
+        risk_row(
+            "bank util",
+            format!("{:.0}", r.bank_util * 100.0),
+            "%",
+            risk_color(r.bank_util, 0.70, 1.00),
+        ),
+        risk_row(
+            "desc util",
+            format!("{:.0}", r.descent_util * 100.0),
+            "%",
+            risk_color(r.descent_util, 0.70, 1.00),
+        ),
+        risk_row("CTE/AGL band", band.0.to_string(), "", band.1),
+        // Trigger description — wraps via Paragraph::Wrap on the pane.
+        Line::from(Span::styled(
+            format!("→ {}", r.trigger_text),
+            Style::default().fg(Color::DarkGray),
+        )),
+    ]
+}
+
+fn risk_row(label: &str, value: String, unit: &str, color: Color) -> Line<'static> {
+    Line::from(aligned_cell(label, 13, &value, unit, color))
+}
+
+fn risk_color(util: f64, warn: f64, trigger: f64) -> Color {
+    if util >= trigger {
+        Color::LightRed
+    } else if util >= warn {
+        Color::Yellow
+    } else {
+        Color::LightGreen
+    }
+}
+
+fn risk_color_inverted(value: f64, trigger: f64, warn: f64) -> Color {
+    // For stall margin: lower is worse.
+    if value <= trigger {
+        Color::LightRed
+    } else if value <= warn {
+        Color::Yellow
+    } else {
+        Color::LightGreen
+    }
+}
+
+// ---------- footer ----------
+
+fn render_footer(width: u16, snapshot: Option<&StatusSnapshot>, alerts: u32) -> Line<'static> {
+    let s = snapshot;
+    let on_ground = s.map(|s| s.state.on_ground).unwrap_or(true);
+    let gear_down = s.map(|s| s.state.gear_down).unwrap_or(true);
+    let flap_idx = s.map(|s| s.state.flap_index).unwrap_or(0);
+    let stall = s.map(|s| s.state.stall_margin).unwrap_or(99.0);
+    let active = s
+        .map(|s| !s.active_profiles.iter().all(|n| n.starts_with("idle_")))
+        .unwrap_or(false);
+    let go_around = s.and_then(|s| s.go_around_reason.as_ref()).is_some();
+
+    let nav_status = if !on_ground || s.and_then(|s| s.state.runway_x_ft).is_some() {
+        ("NAV ", "GOOD", Color::Green)
+    } else {
+        ("NAV ", "—", Color::DarkGray)
+    };
+    let ap_status = if active {
+        ("A/P ", "ENGAGED", Color::Green)
+    } else {
+        ("A/P ", "STANDBY", Color::DarkGray)
+    };
+    let comms_status = ("COMMS ", "OK", Color::Green);
+    let engine_status = if !on_ground || s.map(|s| s.state.throttle_pos > 0.0).unwrap_or(false) {
+        ("ENG ", "RUN", Color::Green)
+    } else {
+        ("ENG ", "IDLE", Color::DarkGray)
+    };
+    let gear_status = (
+        "GEAR ",
+        if gear_down { "DOWN" } else { "UP" },
+        if gear_down { Color::Green } else { Color::Yellow },
+    );
+    let flaps_label = format!("{}°", flap_idx);
+    let stall_status = if stall < 5.0 {
+        ("STALL ", "WARN", Color::Yellow)
+    } else {
+        ("STALL ", "OK", Color::Green)
+    };
+    let safety_status = if go_around {
+        ("SAFETY ", "GO-AROUND", Color::Yellow)
+    } else if alerts > 0 {
+        ("SAFETY ", "ALERT", Color::Red)
+    } else {
+        ("SAFETY ", "NOMINAL", Color::Green)
+    };
+
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    spans.push(Span::styled(
+        " STATUS ",
+        Style::default()
+            .fg(Color::Black)
+            .bg(Color::White)
+            .add_modifier(Modifier::BOLD),
+    ));
+    let groups: Vec<(&str, String, Color)> = vec![
+        (nav_status.0, nav_status.1.to_string(), nav_status.2),
+        (ap_status.0, ap_status.1.to_string(), ap_status.2),
+        (comms_status.0, comms_status.1.to_string(), comms_status.2),
+        (engine_status.0, engine_status.1.to_string(), engine_status.2),
+        (gear_status.0, gear_status.1.to_string(), gear_status.2),
+        ("FLAPS ", flaps_label, Color::White),
+        (stall_status.0, stall_status.1.to_string(), stall_status.2),
+        (safety_status.0, safety_status.1.to_string(), safety_status.2),
+        ("ALERTS ", alerts.to_string(), if alerts == 0 { Color::Green } else { Color::Red }),
+    ];
+    for (i, (label, value, color)) in groups.iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::styled(" │ ", Style::default().fg(Color::DarkGray)));
+        } else {
+            spans.push(Span::raw(" "));
+        }
+        spans.push(Span::styled(
+            label.to_string(),
+            Style::default().fg(Color::Gray),
+        ));
+        spans.push(Span::styled(
+            value.clone(),
+            Style::default().fg(*color).add_modifier(Modifier::BOLD),
+        ));
+    }
+    let used: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+    let pad = (width as usize).saturating_sub(used);
+    if pad > 0 {
+        spans.push(Span::raw(" ".repeat(pad)));
+    }
+    Line::from(spans)
+}
+
+// ---------- input pane title + F-keys ----------
+
+fn build_input_title(on_ground: bool, phase: Option<FlightPhase>) -> String {
+    let mut hints: Vec<&'static str> = Vec::new();
+    hints.push("space/tab=talk");
+    hints.push("enter=send");
+    if on_ground {
+        hints.push("F4=reject takeoff");
+    } else {
+        if matches!(phase, Some(FlightPhase::Downwind | FlightPhase::Base)) {
+            hints.push("F2=extend");
+            hints.push("F3=turn-base");
+        }
+        hints.push("F4=go-around");
+    }
+    hints.push("F5=abort");
+    hints.push("ctrl-t=detail");
+    hints.push("ctrl-o=thoughts");
+    hints.push("pgup/pgdn=scroll");
+    format!(" INPUT — {} ", hints.join(" · "))
+}
+
+/// Map an F-key to a canned operator-message text. Returns `None` for
+/// any other key. The supervisor sends these as plain operator messages
+/// — the LLM remains PIC and decides whether to honour the directive.
+fn canned_directive_for(code: &KeyCode) -> Option<&'static str> {
+    match code {
+        KeyCode::F(2) => Some("Operator: extend the current pattern leg."),
+        KeyCode::F(3) => Some("Operator: turn base now."),
+        KeyCode::F(4) => Some("Operator: go around."),
+        KeyCode::F(5) => Some("Operator: abort and hold position."),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -1909,13 +2400,13 @@ mod tests {
         assert_eq!(lines.len(), 2);
         for line in &lines {
             assert_eq!(line.spans[0].content, LOG_BAR);
-            assert_eq!(line.spans[0].style.fg, Some(Color::LightGreen));
+            assert_eq!(line.spans[0].style.fg, Some(LLM_TEXT_FG));
             assert_eq!(line.spans[1].content, " ");
         }
         assert_eq!(lines[0].spans[2].content, "line one");
         assert_eq!(lines[1].spans[2].content, "line two");
-        // Bar-kinds render the body in the default style — color lives
-        // on the gutter, not the text.
+        // Both gutter and body carry the amber-orange tint so LLM
+        // assistant text is clearly distinct from cyan-italic Thinking.
         assert!(!lines[0].spans[2].style.add_modifier.contains(Modifier::BOLD));
     }
 

@@ -7,6 +7,8 @@
 
 use std::collections::BTreeSet;
 
+use chrono::{DateTime, Utc};
+
 use crate::config::ConfigBundle;
 use crate::control::bank_hold::{BankController, CoordinationController};
 use crate::control::centerline_rollout::CenterlineRolloutController;
@@ -16,7 +18,7 @@ use crate::control::pitch_hold::PitchController;
 use crate::control::tecs_lite::TECSLite;
 use crate::core::profiles::{
     idle_profile_trio, Axis, GuidanceProfile, IdleLateralProfile, IdleSpeedProfile,
-    IdleVerticalProfile, PatternMetadata, ProfileContribution, ProfileTick,
+    IdleVerticalProfile, PatternMetadata, ProfileContribution, ProfileTick, TransitionHint,
 };
 use crate::core::state_estimator::estimate_aircraft_state;
 use crate::guidance::flare_profile::FlareController;
@@ -26,6 +28,68 @@ use crate::types::{
     clamp, wrap_degrees_180, ActuatorCommands, AircraftState, FlightPhase, GuidanceTargets,
     LateralMode, VerticalMode,
 };
+
+/// LLM-declared top-level mission goal — what the pilot is trying to do
+/// right now, in human-readable form. Set via the `set_goal` tool;
+/// cleared via `clear_goal`. Surfaced verbatim in the TUI's MISSION
+/// INTENT pane so the supervisor can see the active intent without
+/// having to infer it from active profiles.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MissionGoal {
+    pub kind: String,
+    pub target: Option<String>,
+    pub notes: Option<String>,
+}
+
+/// LLM-declared active ATC clearance, pinned on screen until cleared.
+/// The radio buffer keeps the full ATC text history; this is the
+/// load-bearing one-line summary of the operating contract right now.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ActiveClearance {
+    pub text: String,
+    pub source: ClearanceSource,
+    pub freq_mhz: Option<f64>,
+    pub issued_at: DateTime<Utc>,
+}
+
+/// Which controller issued the clearance. Free-text `Other(label)` covers
+/// CTAF / FBO / company / etc. without inflating the enum.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClearanceSource {
+    Tower,
+    Ground,
+    Approach,
+    Departure,
+    Center,
+    Unicom,
+    Other(String),
+}
+
+impl ClearanceSource {
+    pub fn label(&self) -> &str {
+        match self {
+            ClearanceSource::Tower => "TWR",
+            ClearanceSource::Ground => "GND",
+            ClearanceSource::Approach => "APP",
+            ClearanceSource::Departure => "DEP",
+            ClearanceSource::Center => "CTR",
+            ClearanceSource::Unicom => "CTAF",
+            ClearanceSource::Other(s) => s.as_str(),
+        }
+    }
+
+    pub fn from_str(s: &str) -> Self {
+        match s.to_ascii_lowercase().as_str() {
+            "tower" | "twr" => ClearanceSource::Tower,
+            "ground" | "gnd" => ClearanceSource::Ground,
+            "approach" | "app" => ClearanceSource::Approach,
+            "departure" | "dep" => ClearanceSource::Departure,
+            "center" | "ctr" | "centre" => ClearanceSource::Center,
+            "unicom" | "ctaf" => ClearanceSource::Unicom,
+            other => ClearanceSource::Other(other.to_string()),
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct StatusSnapshot {
@@ -55,6 +119,21 @@ pub struct StatusSnapshot {
     /// "nothing extra to show." Used only for display — the heartbeat
     /// explicitly ignores this because it churns with state changes.
     pub profile_mode_line_suffixes: Vec<Option<String>>,
+    /// LLM-declared mission goal (set via `set_goal`).
+    pub mission_goal: Option<MissionGoal>,
+    /// LLM-declared active ATC clearance (set via `record_clearance`).
+    pub active_clearance: Option<ActiveClearance>,
+    /// Optional next-transition hint from a profile that owns its phase
+    /// machine. Today only `pattern_fly` provides this.
+    pub transition_hint: Option<TransitionHint>,
+    /// Index into `active_profiles` of the profile that owns each axis,
+    /// computed via `GuidanceProfile::owns()` so the TUI doesn't have to
+    /// substring-match profile names. Each axis always has exactly one
+    /// owner (idle profiles cover orphaned axes), so `None` only occurs
+    /// during the brief window between displacement and the next tick.
+    pub lateral_owner_idx: Option<usize>,
+    pub vertical_owner_idx: Option<usize>,
+    pub speed_owner_idx: Option<usize>,
 }
 
 pub struct PilotCore {
@@ -76,6 +155,10 @@ pub struct PilotCore {
     /// falling back to `Preflight` and confusing both the LLM and the
     /// scenario tests that assert on `final_phase`.
     last_known_phase: Option<FlightPhase>,
+    /// LLM-declared mission goal — what the pilot is trying to do.
+    pub mission_goal: Option<MissionGoal>,
+    /// LLM-declared active ATC clearance.
+    pub active_clearance: Option<ActiveClearance>,
 }
 
 impl PilotCore {
@@ -99,8 +182,26 @@ impl PilotCore {
             active_profiles: idle,
             latest_snapshot: None,
             last_known_phase: None,
+            mission_goal: None,
+            active_clearance: None,
             config,
         }
+    }
+
+    pub fn set_mission_goal(&mut self, goal: MissionGoal) {
+        self.mission_goal = Some(goal);
+    }
+
+    pub fn clear_mission_goal(&mut self) {
+        self.mission_goal = None;
+    }
+
+    pub fn record_clearance(&mut self, clearance: ActiveClearance) {
+        self.active_clearance = Some(clearance);
+    }
+
+    pub fn clear_active_clearance(&mut self) {
+        self.active_clearance = None;
     }
 
     pub fn list_profile_names(&self) -> Vec<String> {
@@ -230,6 +331,22 @@ impl PilotCore {
             .iter()
             .map(|p| p.mode_line_suffix(&state))
             .collect();
+        let transition_hint = self
+            .active_profiles
+            .iter()
+            .find_map(|p| p.next_transition_hint(&state));
+        let lateral_owner_idx = self
+            .active_profiles
+            .iter()
+            .position(|p| p.owns().contains(&Axis::Lateral));
+        let vertical_owner_idx = self
+            .active_profiles
+            .iter()
+            .position(|p| p.owns().contains(&Axis::Vertical));
+        let speed_owner_idx = self
+            .active_profiles
+            .iter()
+            .position(|p| p.owns().contains(&Axis::Speed));
         let snapshot = StatusSnapshot {
             t_sim: state.t_sim,
             active_profiles: self.list_profile_names(),
@@ -244,6 +361,12 @@ impl PilotCore {
             debug_lines,
             completed_profiles,
             profile_mode_line_suffixes,
+            mission_goal: self.mission_goal.clone(),
+            active_clearance: self.active_clearance.clone(),
+            transition_hint,
+            lateral_owner_idx,
+            vertical_owner_idx,
+            speed_owner_idx,
         };
         self.latest_snapshot = Some(snapshot);
         (state, commands)
@@ -448,18 +571,10 @@ fn taxi_leg_errors(
     let Some(leg) = target_path else {
         return (0.0, 0.0);
     };
-    let leg_vec = leg.end_ft - leg.start_ft;
-    let leg_len = leg_vec.length();
-    if leg_len < 1e-6 {
+    let Some(crosstrack_ft) = leg.crosstrack_ft(state.position_ft) else {
         return (0.0, 0.0);
-    }
-    let leg_dir = leg_vec * (1.0 / leg_len);
-    // Right-perpendicular to the leg direction. `Vec2` is (east, north),
-    // so rotating (x, y) by -90° gives (y, -x).
-    let leg_right = crate::types::Vec2::new(leg_dir.y, -leg_dir.x);
-    let offset = state.position_ft - leg.start_ft;
-    let crosstrack_ft = offset.dot(leg_right);
-    let leg_bearing = crate::types::vector_to_heading(leg_vec);
+    };
+    let leg_bearing = crate::types::vector_to_heading(leg.end_ft - leg.start_ft);
     let heading_err = wrap_degrees_180(leg_bearing - state.heading_deg);
     (crosstrack_ft, heading_err)
 }
@@ -488,5 +603,57 @@ fn taxi_pose_errors(guidance: &GuidanceTargets, state: &AircraftState) -> (f64, 
     } else {
         let err = wrap_degrees_180(target_heading - state.heading_deg);
         (err, true)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::load_default_config_bundle;
+
+    #[test]
+    fn set_and_clear_mission_goal() {
+        let mut pilot = PilotCore::new(load_default_config_bundle());
+        assert!(pilot.mission_goal.is_none());
+        pilot.set_mission_goal(MissionGoal {
+            kind: "land".to_string(),
+            target: Some("KEMT runway 19".to_string()),
+            notes: None,
+        });
+        assert_eq!(
+            pilot.mission_goal.as_ref().map(|g| g.kind.as_str()),
+            Some("land"),
+        );
+        pilot.clear_mission_goal();
+        assert!(pilot.mission_goal.is_none());
+    }
+
+    #[test]
+    fn record_and_clear_clearance() {
+        let mut pilot = PilotCore::new(load_default_config_bundle());
+        assert!(pilot.active_clearance.is_none());
+        pilot.record_clearance(ActiveClearance {
+            text: "cleared touch-and-go runway 19".to_string(),
+            source: ClearanceSource::Tower,
+            freq_mhz: Some(124.30),
+            issued_at: Utc::now(),
+        });
+        let stored = pilot.active_clearance.as_ref().expect("clearance set");
+        assert_eq!(stored.source, ClearanceSource::Tower);
+        assert_eq!(stored.freq_mhz, Some(124.30));
+        pilot.clear_active_clearance();
+        assert!(pilot.active_clearance.is_none());
+    }
+
+    #[test]
+    fn clearance_source_from_str_round_trips() {
+        assert_eq!(ClearanceSource::from_str("tower"), ClearanceSource::Tower);
+        assert_eq!(ClearanceSource::from_str("TWR"), ClearanceSource::Tower);
+        assert_eq!(ClearanceSource::from_str("ground"), ClearanceSource::Ground);
+        assert_eq!(ClearanceSource::from_str("ctaf"), ClearanceSource::Unicom);
+        assert_eq!(
+            ClearanceSource::from_str("clearance"),
+            ClearanceSource::Other("clearance".to_string()),
+        );
     }
 }

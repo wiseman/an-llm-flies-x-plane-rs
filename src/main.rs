@@ -81,12 +81,6 @@ struct Cli {
     #[arg(long)]
     headless: bool,
 
-    /// Use the new multi-pane "AI PILOT CONSOLE" TUI (header + flight plan
-    /// / state + attitude / agent panes / radio + log / status footer).
-    /// Off by default so the existing 4-pane TUI keeps shipping.
-    #[arg(long = "tui-v2")]
-    tui_v2: bool,
-
     #[arg(long, default_value_t = 10.0)]
     control_hz: f64,
 
@@ -328,7 +322,6 @@ fn main() -> Result<()> {
                     llm_reasoning_effort: args.pilot_llm_reasoning_effort,
                     atc_messages: args.atc_message,
                     interactive: !args.headless,
-                    tui_v2: args.tui_v2,
                     control_hz: args.control_hz,
                     status_interval_s: args.status_interval_s,
                     engage_profile: args.engage_profile,

@@ -20,7 +20,9 @@ use crate::bus::SimBus;
 use crate::config::ConfigBundle;
 use crate::eval_runner::{try_send_outcome, MissionOutcome};
 use crate::llm::backend::ToolDef;
-use crate::core::mission_manager::{PilotCore, StatusSnapshot};
+use crate::core::mission_manager::{
+    ActiveClearance, ClearanceSource, MissionGoal, PilotCore, StatusSnapshot,
+};
 use crate::core::profiles::{
     AltitudeHoldProfile, ExtendMode, HeadingHoldProfile, PatternClearanceGate, PatternFlyProfile,
     PatternLeg, SpeedHoldProfile, TakeoffProfile, TaxiProfile,
@@ -2518,6 +2520,87 @@ fn duckdb_value_to_str(value: &duckdb::types::Value) -> String {
     }
 }
 
+// ---------- mission intent / clearance (TUI transparency) ----------
+
+pub fn tool_set_goal(ctx: &ToolContext, args: &Map<String, Value>) -> String {
+    let kind = match arg_str(args, "kind") {
+        Ok(s) => s.trim().to_string(),
+        Err(e) => return format!("error: {}", e),
+    };
+    if kind.is_empty() {
+        return "error: kind must be a non-empty short label (e.g. 'land', 'taxi', 'cruise')".to_string();
+    }
+    let target = args
+        .get("target")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    let notes = args
+        .get("notes")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    let goal = MissionGoal {
+        kind: kind.clone(),
+        target: target.clone(),
+        notes: notes.clone(),
+    };
+    ctx.pilot.lock().set_mission_goal(goal);
+    let target_part = target
+        .as_deref()
+        .map(|t| format!(" target={}", t))
+        .unwrap_or_default();
+    let notes_part = notes
+        .as_deref()
+        .map(|n| format!(" notes={:?}", n))
+        .unwrap_or_default();
+    format!("goal recorded: kind={}{}{}", kind, target_part, notes_part)
+}
+
+pub fn tool_clear_goal(ctx: &ToolContext, _args: &Map<String, Value>) -> String {
+    ctx.pilot.lock().clear_mission_goal();
+    "goal cleared".to_string()
+}
+
+pub fn tool_record_clearance(ctx: &ToolContext, args: &Map<String, Value>) -> String {
+    let text = match arg_str(args, "text") {
+        Ok(s) => s.trim().to_string(),
+        Err(e) => return format!("error: {}", e),
+    };
+    if text.is_empty() {
+        return "error: text must be a non-empty clearance description".to_string();
+    }
+    let source = args
+        .get("source")
+        .and_then(|v| v.as_str())
+        .map(ClearanceSource::from_str)
+        .unwrap_or(ClearanceSource::Tower);
+    let freq_mhz = args.get("freq_mhz").and_then(|v| v.as_f64());
+    let clearance = ActiveClearance {
+        text: text.clone(),
+        source: source.clone(),
+        freq_mhz,
+        issued_at: chrono::Utc::now(),
+    };
+    ctx.pilot.lock().record_clearance(clearance);
+    let freq_part = freq_mhz
+        .map(|f| format!(" freq={:.3}", f))
+        .unwrap_or_default();
+    format!(
+        "clearance recorded: source={}{} text={:?}",
+        source.label(),
+        freq_part,
+        text,
+    )
+}
+
+pub fn tool_clear_clearance(ctx: &ToolContext, _args: &Map<String, Value>) -> String {
+    ctx.pilot.lock().clear_active_clearance();
+    "clearance cleared".to_string()
+}
+
 pub fn tool_mission_complete(ctx: &ToolContext, args: &Map<String, Value>) -> String {
     let Some(tx) = ctx.mission_complete_tx.as_ref() else {
         return "error: mission_complete is only available in the eval harness".to_string();
@@ -2583,6 +2666,10 @@ pub fn dispatch_tool(name: &str, arguments: &str, ctx: &ToolContext) -> ToolResu
         "choose_runway_exit" => tool_choose_runway_exit(ctx, &map),
         "list_runway_exits" => tool_list_runway_exits(ctx, &map),
         "engage_line_up" => tool_engage_line_up(ctx, &map),
+        "set_goal" => tool_set_goal(ctx, &map),
+        "clear_goal" => tool_clear_goal(ctx, &map),
+        "record_clearance" => tool_record_clearance(ctx, &map),
+        "clear_clearance" => tool_clear_clearance(ctx, &map),
         "mission_complete" => tool_mission_complete(ctx, &map),
         other => format!("error: unknown tool {:?}", other),
     };
@@ -2951,6 +3038,56 @@ pub fn tool_schemas(include_mission_complete: bool) -> Vec<ToolDef> {
                 }
             }),
             &["airport_ident", "runway_ident"],
+        ),
+        schema(
+            "set_goal",
+            "Declare your top-level mission goal so the human supervisor sees what you are trying to do. Surfaced verbatim on the AI Pilot Console's Mission Intent pane until cleared or replaced. Call this at the start of every mission and any time the goal changes (diversion, alternate, hold). Does not affect aircraft control — pure transparency.",
+            json!({
+                "kind": {
+                    "type": "string",
+                    "description": "Short label for the goal kind, e.g. 'land', 'takeoff', 'cruise', 'taxi', 'hold', 'divert'."
+                },
+                "target": {
+                    "type": ["string", "null"],
+                    "description": "The destination/object: airport+runway, waypoint, fix, holding pattern. Null when not applicable. Example: 'KEMT runway 19'."
+                },
+                "notes": {
+                    "type": ["string", "null"],
+                    "description": "One-line clarifier the operator might need. Null when none."
+                }
+            }),
+            &["kind", "target", "notes"],
+        ),
+        schema(
+            "clear_goal",
+            "Remove the currently declared mission goal. Use when the previous goal is fulfilled and you have not yet declared the next one (typically rare — prefer calling set_goal again to replace it).",
+            json!({}),
+            &[],
+        ),
+        schema(
+            "record_clearance",
+            "Pin the active ATC clearance on the AI Pilot Console's Mission Intent pane. The radio buffer keeps the full transmission history; this single line is the operating contract the supervisor needs to see at a glance. Call immediately after every ATC clearance you readback (cleared to land, cleared T&G, cleared takeoff, line up and wait, cleared as filed, etc.) so the supervisor can verify what you're authorized to do. Does not change aircraft control.",
+            json!({
+                "text": {
+                    "type": "string",
+                    "description": "Concise readback-style summary of the clearance, e.g. 'cleared touch-and-go runway 19, report midfield'."
+                },
+                "source": {
+                    "type": ["string", "null"],
+                    "description": "Issuing controller: 'tower', 'ground', 'approach', 'departure', 'center', 'unicom', or any short label. Null defaults to 'tower'."
+                },
+                "freq_mhz": {
+                    "type": ["number", "null"],
+                    "description": "Frequency in MHz (e.g. 124.30). Null when unknown."
+                }
+            }),
+            &["text", "source", "freq_mhz"],
+        ),
+        schema(
+            "clear_clearance",
+            "Remove the pinned ATC clearance (e.g. once it has been satisfied, cancelled, or superseded). Prefer calling record_clearance with the new clearance text instead — that replaces the pin in one step.",
+            json!({}),
+            &[],
         ),
     ];
     if include_mission_complete {

@@ -72,6 +72,12 @@ fn make_snapshot(
         debug_lines: Vec::new(),
         completed_profiles: Vec::new(),
         profile_mode_line_suffixes: Vec::new(),
+        mission_goal: None,
+        active_clearance: None,
+        transition_hint: None,
+        lateral_owner_idx: None,
+        vertical_owner_idx: None,
+        speed_owner_idx: None,
     }
 }
 

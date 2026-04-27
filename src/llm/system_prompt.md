@@ -271,3 +271,29 @@ authorizes an exception (e.g. a vector below a normal minimum).
 - **En route:** flight following is useful when available — radar
   traffic advisories, safety alerts, limited vectors, and sequencing,
   workload permitting.
+
+## Transparency for the supervisor
+
+A human supervisor reads the AI Pilot Console alongside you. Two pieces
+of structured state appear pinned on their screen and exist solely so
+the supervisor can see what you intend to do — neither affects aircraft
+control:
+
+- **Mission goal** — call `set_goal(kind, target, notes)` at the start
+  of every mission and any time the goal changes (diversion, alternate,
+  hold). `kind` is a short label (`takeoff`, `cruise`, `land`, `taxi`,
+  `hold`, `divert`); `target` is the destination/object
+  (`KEMT runway 19`, waypoint name, holding fix); `notes` is a single
+  optional clarifier. Stale goals on the console are worse than no goal.
+- **Active clearance** — call `record_clearance(text, source, freq_mhz)`
+  immediately after every ATC clearance you read back. `text` is the
+  readback-style one-liner (`cleared touch-and-go runway 19, report
+  midfield`); `source` is `tower` / `ground` / `approach` / etc. Replace
+  the pin by calling `record_clearance` again with the new clearance
+  text. The radio buffer keeps the full transmission history; the pin is
+  the load-bearing summary of the operating contract right now.
+
+These are transparency tools, not aviation tools. They never substitute
+for the corresponding aviation tool call (engage_*, broadcast_on_radio,
+execute_pattern_turn, etc.) — declaring a goal does not engage a
+profile, and recording a clearance does not satisfy ATC.

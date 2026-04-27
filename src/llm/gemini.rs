@@ -311,6 +311,34 @@ fn parse_usage(response: &Value) -> LlmUsage {
     }
 }
 
+/// Detect Gemini's leading `. ` / `? ` aside marker. Accepts any
+/// whitespace after the marker char (Gemini frequently emits the marker
+/// on its own line, i.e. `".\n<body>"`, not `". <body>"`). Returns the
+/// body with the marker + leading whitespace stripped, or `None` for
+/// anything else. Gemini-only quirk — other providers don't emit this
+/// convention, so it's checked here in the backend rather than in the
+/// generic conversation loop.
+fn strip_thought_marker(text: &str) -> Option<String> {
+    let leading = text.trim_start_matches([' ', '\t', '\n', '\r']);
+    let mut chars = leading.chars();
+    let marker = chars.next()?;
+    if marker != '.' && marker != '?' {
+        return None;
+    }
+    let after = chars.as_str();
+    // Marker must be followed by whitespace, otherwise this is regular
+    // prose (sentence-ending period, ellipsis, "?why?" etc.).
+    if !after.starts_with(|c: char| c.is_whitespace()) {
+        return None;
+    }
+    let trimmed = after.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
 fn parse_output(
     response: &Value,
     call_counter: &AtomicU64,
@@ -343,6 +371,12 @@ fn parse_output(
         if let Some(text) = block.get("text").and_then(|v| v.as_str()) {
             if is_thought {
                 thoughts.push(text.to_string());
+            } else if let Some(stripped) = strip_thought_marker(text) {
+                // Gemini sometimes prefaces an internal aside with ". "
+                // or "? " — reclassify those as thoughts so they land in
+                // the cyan-italic LogKind::Thinking lane instead of the
+                // user-facing assistant-text lane.
+                thoughts.push(stripped);
             } else {
                 out.push(Part::Text(text.to_string()));
             }
@@ -569,6 +603,69 @@ mod tests {
             Part::Text(t) => assert_eq!(t, "Cleared for takeoff runway 30."),
             _ => panic!("expected Text"),
         }
+    }
+
+    #[test]
+    fn parse_output_reroutes_dot_prefix_to_thoughts() {
+        let counter = AtomicU64::new(0);
+        let signatures = Mutex::new(HashMap::new());
+        let payload = json!({
+            "candidates": [{
+                "content": {
+                    "parts": [
+                        {"text": ". muttering to myself about the wind"},
+                        {"text": "? wonder if tower will let us extend"},
+                        {"text": "Cleared touch-and-go runway 19."}
+                    ]
+                }
+            }]
+        });
+        let (parts, thoughts) = parse_output(&payload, &counter, &signatures).unwrap();
+        assert_eq!(parts.len(), 1);
+        match &parts[0] {
+            Part::Text(t) => assert_eq!(t, "Cleared touch-and-go runway 19."),
+            _ => panic!("expected Text"),
+        }
+        assert_eq!(thoughts.len(), 2);
+        assert_eq!(thoughts[0], "muttering to myself about the wind");
+        assert_eq!(thoughts[1], "wonder if tower will let us extend");
+    }
+
+    #[test]
+    fn strip_thought_marker_handles_only_known_prefixes() {
+        assert_eq!(
+            strip_thought_marker(". hello").as_deref(),
+            Some("hello"),
+        );
+        assert_eq!(
+            strip_thought_marker("? hello").as_deref(),
+            Some("hello"),
+        );
+        // Marker on its own line (Gemini's actual emission shape).
+        assert_eq!(
+            strip_thought_marker(".\nThe aircraft is on the ground.").as_deref(),
+            Some("The aircraft is on the ground."),
+        );
+        assert_eq!(
+            strip_thought_marker("?\nWhat is the runway?").as_deref(),
+            Some("What is the runway?"),
+        );
+        // Leading whitespace before the marker is tolerated.
+        assert_eq!(
+            strip_thought_marker("  . hello").as_deref(),
+            Some("hello"),
+        );
+        // Period without trailing whitespace (e.g. "..." or "...thinking")
+        // is NOT a marker.
+        assert_eq!(strip_thought_marker("...thinking..."), None);
+        // Plain assertions stay user-facing.
+        assert_eq!(
+            strip_thought_marker("Cleared for takeoff."),
+            None,
+        );
+        // Empty body after stripping → not a thought.
+        assert_eq!(strip_thought_marker(". "), None);
+        assert_eq!(strip_thought_marker(".\n"), None);
     }
 
     #[test]

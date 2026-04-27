@@ -249,6 +249,18 @@ pub struct CacheSnapshot {
     pub total_requests: u64,
 }
 
+impl CacheSnapshot {
+    /// Cache-hit ratio as a 0..=100 percentage. Returns 0.0 when no
+    /// input tokens have been billed yet.
+    pub fn hit_percent(&self) -> f64 {
+        if self.total_input_tokens == 0 {
+            0.0
+        } else {
+            self.total_cached_tokens as f64 / self.total_input_tokens as f64 * 100.0
+        }
+    }
+}
+
 /// Thread-safe cumulative token counter shared across every call on one
 /// backend. Each provider holds an `Arc<CacheStats>` and surfaces it via
 /// `cache_snapshot()` for the conversation loop's token log line and via

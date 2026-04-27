@@ -86,6 +86,18 @@ impl ProfileTick {
     }
 }
 
+/// SA-Level-3 hint surfaced on the TUI's MISSION INTENT pane: the next
+/// phase the autopilot expects to enter, the predicate it's waiting on
+/// (in human-readable form), and an optional time-to-event estimate.
+/// Profiles that own a phase machine (today: `pattern_fly`, `takeoff`)
+/// override `GuidanceProfile::next_transition_hint` to expose this.
+#[derive(Debug, Clone)]
+pub struct TransitionHint {
+    pub next_phase: FlightPhase,
+    pub condition_text: String,
+    pub eta_s: Option<f64>,
+}
+
 pub trait GuidanceProfile: Send {
     fn name(&self) -> &'static str;
     fn owns(&self) -> BTreeSet<Axis>;
@@ -124,6 +136,14 @@ pub trait GuidanceProfile: Send {
     /// heartbeat diffs active profile names, not these summaries, so
     /// suffix churn is fine.
     fn mode_line_suffix(&self, _state: &AircraftState) -> Option<String> {
+        None
+    }
+
+    /// SA-Level-3 transparency hint: what phase is the profile expecting
+    /// next, what predicate is it waiting on, and (optionally) how long
+    /// until the predicate fires. Default `None` for profiles without a
+    /// phase machine. Surfaced on `StatusSnapshot::transition_hint`.
+    fn next_transition_hint(&self, _state: &AircraftState) -> Option<TransitionHint> {
         None
     }
 }
@@ -1313,6 +1333,134 @@ impl GuidanceProfile for PatternFlyProfile {
             field_elevation_ft: Some(self.config.airport.field_elevation_ft),
             phase: self.phase,
         })
+    }
+
+    fn next_transition_hint(&self, state: &AircraftState) -> Option<TransitionHint> {
+        // Distance helpers in feet → ETA seconds via current ground speed.
+        // GS below ~5 kt makes ETA noisy; we still emit it so the operator
+        // sees the countdown, but cap it so the UI stays readable.
+        let eta_from = |distance_ft: f64| -> Option<f64> {
+            if state.gs_kt < 5.0 || distance_ft <= 0.0 {
+                return None;
+            }
+            let gs_fps = state.gs_kt * 1.6878; // kt → ft/s
+            let eta = distance_ft / gs_fps;
+            if eta.is_finite() && eta > 0.0 {
+                Some(eta.min(900.0))
+            } else {
+                None
+            }
+        };
+        match self.phase {
+            FlightPhase::TakeoffRoll => Some(TransitionHint {
+                next_phase: FlightPhase::Rotate,
+                condition_text: format!(
+                    "rotate at Vr {:.0} kt (now {:.0})",
+                    self.config.performance.vr_kt, state.ias_kt
+                ),
+                eta_s: None,
+            }),
+            FlightPhase::Rotate => Some(TransitionHint {
+                next_phase: FlightPhase::InitialClimb,
+                condition_text: "wheels off, vs > 250 fpm".to_string(),
+                eta_s: None,
+            }),
+            FlightPhase::InitialClimb => {
+                let target_agl = (self.config.pattern.altitude_agl_ft - 300.0).max(400.0);
+                Some(TransitionHint {
+                    next_phase: FlightPhase::Crosswind,
+                    condition_text: format!(
+                        "AGL ≥ {:.0} ft (now {:.0})",
+                        target_agl, state.alt_agl_ft
+                    ),
+                    eta_s: None,
+                })
+            }
+            FlightPhase::Crosswind => Some(TransitionHint {
+                next_phase: FlightPhase::Downwind,
+                condition_text: "downwind track captured & at offset".to_string(),
+                eta_s: None,
+            }),
+            FlightPhase::Downwind => {
+                // Distance along downwind to the (extended) base-turn point.
+                let rx = state.runway_x_ft.unwrap_or(0.0);
+                let target_x = self.pattern.base_turn_x_ft;
+                let dist_ft = (rx - target_x).max(0.0);
+                Some(TransitionHint {
+                    next_phase: FlightPhase::Base,
+                    condition_text: "abeam base-turn point".to_string(),
+                    eta_s: eta_from(dist_ft),
+                })
+            }
+            FlightPhase::Base => {
+                let leg = self.pattern.base_leg;
+                let path = leg.end_ft - leg.start_ft;
+                let path_len = path.length().max(1.0);
+                let rel = state.position_ft - leg.start_ft;
+                let along = rel.dot(path.normalized()).clamp(0.0, path_len);
+                let remaining_ft = (path_len * 0.65 - along).max(0.0);
+                Some(TransitionHint {
+                    next_phase: FlightPhase::Final,
+                    condition_text: "established on final / 65% along base".to_string(),
+                    eta_s: eta_from(remaining_ft),
+                })
+            }
+            FlightPhase::Final => {
+                let target_agl = self.config.flare.roundout_height_ft;
+                let descent_remaining_ft = (state.alt_agl_ft - target_agl).max(0.0);
+                let eta = if state.vs_fpm < -10.0 {
+                    // -vs_fpm ft/min → divide by 60 → ft/s
+                    let descent_fps = (-state.vs_fpm) / 60.0;
+                    if descent_fps > 0.5 && descent_remaining_ft > 0.0 {
+                        Some((descent_remaining_ft / descent_fps).min(900.0))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                Some(TransitionHint {
+                    next_phase: FlightPhase::Roundout,
+                    condition_text: format!(
+                        "AGL ≤ {:.0} ft (now {:.0})",
+                        target_agl, state.alt_agl_ft
+                    ),
+                    eta_s: eta,
+                })
+            }
+            FlightPhase::Roundout => Some(TransitionHint {
+                next_phase: FlightPhase::Flare,
+                condition_text: format!(
+                    "AGL ≤ {:.0} ft",
+                    self.config.flare.flare_start_ft
+                ),
+                eta_s: None,
+            }),
+            FlightPhase::Flare => Some(TransitionHint {
+                next_phase: FlightPhase::Rollout,
+                condition_text: "wheels on the ground".to_string(),
+                eta_s: None,
+            }),
+            FlightPhase::Rollout => Some(TransitionHint {
+                next_phase: FlightPhase::RunwayExit,
+                condition_text: "off centerline (>75 ft) or stopped past end".to_string(),
+                eta_s: None,
+            }),
+            FlightPhase::RunwayExit => Some(TransitionHint {
+                next_phase: FlightPhase::TaxiClear,
+                condition_text: "stopped, off runway".to_string(),
+                eta_s: None,
+            }),
+            FlightPhase::GoAround => Some(TransitionHint {
+                next_phase: FlightPhase::Downwind,
+                condition_text: format!(
+                    "climb to pattern alt {:.0} ft, then re-engage holds",
+                    self.config.pattern_altitude_msl_ft()
+                ),
+                eta_s: None,
+            }),
+            _ => None,
+        }
     }
 }
 
