@@ -808,7 +808,7 @@ fn decorate_profiles(names: &[String], suffixes: &[Option<String>]) -> String {
 /// the line. Adds an auto-space before/after only when the adjacent
 /// characters aren't already whitespace. `cursor` is advanced to sit
 /// immediately after the inserted text.
-fn insert_transcript_at_cursor(
+pub(crate) fn insert_transcript_at_cursor(
     buffer: &mut String,
     cursor: &mut usize,
     transcript: &str,
@@ -851,20 +851,20 @@ fn insert_transcript_at_cursor(
 /// true silence shows as a quiet cell instead of a floor bar.
 const AMP_GLYPHS: [char; 9] = [' ', '░', '▁', '▂', '▃', '▄', '▅', '▆', '█'];
 
-fn amp_glyph(level: u8) -> char {
+pub(crate) fn amp_glyph(level: u8) -> char {
     AMP_GLYPHS[level.min(8) as usize]
 }
 
 /// EMA-smooth the raw 0..=8 amp bucket so the rendered bar doesn't
 /// strobe at cpal's callback rate. `prev` is last render's smoothed
 /// value; `raw` is the newest reading.
-fn smooth_amp(prev: f32, raw: u8) -> f32 {
+pub(crate) fn smooth_amp(prev: f32, raw: u8) -> f32 {
     const EMA_NEW_WEIGHT: f32 = 0.7;
     prev * (1.0 - EMA_NEW_WEIGHT) + (raw as f32) * EMA_NEW_WEIGHT
 }
 
 /// Map the smoothed float level back into the 0..=8 glyph index.
-fn amp_level_from_smoothed(smoothed: f32) -> u8 {
+pub(crate) fn amp_level_from_smoothed(smoothed: f32) -> u8 {
     smoothed.round().clamp(0.0, 8.0) as u8
 }
 
@@ -872,24 +872,24 @@ fn amp_level_from_smoothed(smoothed: f32) -> u8 {
 /// into calls to the `PttController`. Handles both the Kitty-protocol path
 /// (real Press/Repeat/Release events) and the repeat-gap fallback.
 #[derive(Default)]
-struct PttKeyTracker {
-    pending: Option<PendingPtt>,
+pub(crate) struct PttKeyTracker {
+    pub(crate) pending: Option<PendingPtt>,
     /// Set once we observe any non-Press KeyEventKind, which means the
     /// Kitty keyboard flags took effect. Until then we fall back to a
     /// repeat-gap timeout in the main loop.
-    kitty_observed: bool,
+    pub(crate) kitty_observed: bool,
 }
 
-struct PendingPtt {
-    key: PttKey,
+pub(crate) struct PendingPtt {
+    pub(crate) key: PttKey,
     /// True once we've confirmed this is a hold (not a single tap) and
     /// asked the `PttController` to start recording.
-    recording: bool,
-    last_seen: Instant,
+    pub(crate) recording: bool,
+    pub(crate) last_seen: Instant,
 }
 
 #[derive(Copy, Clone, PartialEq, Eq)]
-enum PttKey {
+pub(crate) enum PttKey {
     Space,
     Tab,
 }
@@ -918,7 +918,7 @@ impl PttKey {
 /// Minimal interface the TUI needs from a PTT engine — keeping
 /// `handle_ptt_key` decoupled from `PttController` makes it trivially
 /// unit-testable with a stub.
-trait PttControl {
+pub(crate) trait PttControl {
     fn start(&self, prefix: String, atc_mode: bool);
     fn stop(&self);
 }
@@ -932,7 +932,7 @@ impl PttControl for PttController {
     }
 }
 
-fn handle_ptt_key<P: PttControl + ?Sized>(
+pub(crate) fn handle_ptt_key<P: PttControl + ?Sized>(
     kind: &KeyEventKind,
     code: &KeyCode,
     tracker: &mut PttKeyTracker,
@@ -1026,13 +1026,13 @@ fn handle_ptt_key<P: PttControl + ?Sized>(
     }
 }
 
-fn break_outer(stop: &AtomicBool) {
+pub(crate) fn break_outer(stop: &AtomicBool) {
     stop.store(true, Ordering::Release);
 }
 
 /// Convert a char index into a byte index inside `s`. Clamps to `s.len()`
 /// when the char index is beyond the end.
-fn char_byte_index(s: &str, char_idx: usize) -> usize {
+pub(crate) fn char_byte_index(s: &str, char_idx: usize) -> usize {
     s.char_indices().nth(char_idx).map(|(i, _)| i).unwrap_or(s.len())
 }
 
@@ -1048,7 +1048,7 @@ const PROMPT_COLS: usize = 2;
 /// span in `spans`, so it naturally consumes 2 cells of row 0. Per-span
 /// `Style` is preserved on both sides of any split. Always returns at
 /// least one `Line`.
-fn wrap_input_spans(spans: Vec<Span<'_>>, content_width: u16) -> Vec<Line<'static>> {
+pub(crate) fn wrap_input_spans(spans: Vec<Span<'_>>, content_width: u16) -> Vec<Line<'static>> {
     let cap = (content_width as usize).max(1);
     let mut lines: Vec<Line<'static>> = Vec::new();
     let mut current: Vec<Span<'static>> = Vec::new();
@@ -1115,7 +1115,7 @@ fn row_end_char(row: usize, width: u16, total: usize) -> usize {
 /// row; if already at the start of a row, jump up to the start of the
 /// previous row. Bottoms out at char 0. Mirrors the behavior Claude Code
 /// uses in its prompt input.
-fn smart_home(cursor: usize, width: u16) -> usize {
+pub(crate) fn smart_home(cursor: usize, width: u16) -> usize {
     let (row, _) = cursor_row(cursor, width);
     let row_start = row_start_char(row, width);
     if cursor == row_start {
@@ -1128,7 +1128,7 @@ fn smart_home(cursor: usize, width: u16) -> usize {
 /// C-e: "smart end". Move the cursor to the end of the current visual
 /// row; if already at the end of a row with more content below, jump to
 /// the end of the next row. Saturates at the buffer's last char.
-fn smart_end(cursor: usize, buffer: &str, width: u16) -> usize {
+pub(crate) fn smart_end(cursor: usize, buffer: &str, width: u16) -> usize {
     let total = buffer.chars().count();
     let (row, _) = cursor_row(cursor, width);
     let row_end = row_end_char(row, width, total);
@@ -1142,7 +1142,7 @@ fn smart_end(cursor: usize, buffer: &str, width: u16) -> usize {
 /// C-k: kill from the cursor to the end of the current visual row. Mutates
 /// `buffer` in place; the cursor position is unchanged (it still points at
 /// what used to be `cursor` — the first char after the killed range).
-fn kill_to_row_end(buffer: &mut String, cursor: usize, width: u16) {
+pub(crate) fn kill_to_row_end(buffer: &mut String, cursor: usize, width: u16) {
     let total = buffer.chars().count();
     let (row, _) = cursor_row(cursor, width);
     let row_end = row_end_char(row, width, total);
@@ -1155,12 +1155,12 @@ fn kill_to_row_end(buffer: &mut String, cursor: usize, width: u16) {
 
 /// Cap on the number of retained history entries. Oldest are dropped when
 /// the cap is exceeded.
-const INPUT_HISTORY_MAX: usize = 200;
+pub(crate) const INPUT_HISTORY_MAX: usize = 200;
 
 /// Record a submitted entry in the input history. Consecutive duplicates
 /// are coalesced (bash-style), and the oldest entries are dropped once
 /// `max_len` is exceeded.
-fn history_record(history: &mut Vec<String>, entry: &str, max_len: usize) {
+pub(crate) fn history_record(history: &mut Vec<String>, entry: &str, max_len: usize) {
     if history.last().map(|s| s.as_str()) == Some(entry) {
         return;
     }
@@ -1174,7 +1174,7 @@ fn history_record(history: &mut Vec<String>, entry: &str, max_len: usize) {
 /// back (history_index is None), the current buffer is stashed into
 /// `pending_draft` so Down-arrow can restore it later. Saturates at the
 /// oldest entry.
-fn history_go_back(
+pub(crate) fn history_go_back(
     history: &[String],
     input_buffer: &mut String,
     input_cursor: &mut usize,
@@ -1200,7 +1200,7 @@ fn history_go_back(
 /// Down-arrow: walk forward through history. If the cursor was past the
 /// most-recent entry, the in-progress `pending_draft` is restored and
 /// history_index is cleared. No-op when not browsing history.
-fn history_go_forward(
+pub(crate) fn history_go_forward(
     history: &[String],
     input_buffer: &mut String,
     input_cursor: &mut usize,
@@ -1291,7 +1291,7 @@ const OPERATOR_BG: Color = Color::Rgb(32, 32, 38);
 /// Filter, insert a blank line at each operator↔llm turn, and tint
 /// operator lines to the pane's inner width so the bg extends past the
 /// text itself.
-fn build_log_lines(
+pub(crate) fn build_log_lines(
     entries: &[LogEntry],
     show_verbose: bool,
     show_thoughts: bool,
@@ -1443,7 +1443,7 @@ fn radio_color(source: RadioSource) -> Color {
 /// Render one RADIO entry as one-or-more styled `Line`s. The leading
 /// `[...]` tag is split off and rendered bold so the source reads at a
 /// glance; the body carries the same hue, un-bolded.
-fn render_radio_line(line: &str) -> Vec<Line<'static>> {
+pub(crate) fn render_radio_line(line: &str) -> Vec<Line<'static>> {
     let color = radio_color(classify_radio_line(line));
     let tag_style = Style::default().fg(color).add_modifier(Modifier::BOLD);
     let body_style = Style::default().fg(color);
@@ -1489,7 +1489,7 @@ fn leading_bracket_tag_end(line: &str) -> Option<usize> {
 /// `line_count(inner_width)` ratatui itself uses when rendering, so the pane
 /// doesn't overflow its border when long sql-query results wrap onto multiple
 /// screen rows.
-fn pin_to_bottom(lines: &[Line<'static>], area: ratatui::layout::Rect) -> u16 {
+pub(crate) fn pin_to_bottom(lines: &[Line<'static>], area: ratatui::layout::Rect) -> u16 {
     let inner_width = area.width.saturating_sub(2);
     let inner_height = area.height.saturating_sub(2) as usize;
     if inner_width == 0 || inner_height == 0 {
@@ -1541,7 +1541,7 @@ const PROP_FRAME_MS: u128 = 100;
 
 /// Mirrors the `<bar> <body>` shape of bar-styled log entries so it
 /// reads as a transient extra row rather than chrome.
-fn render_thinking_line(elapsed: Duration) -> Line<'static> {
+pub(crate) fn render_thinking_line(elapsed: Duration) -> Line<'static> {
     Line::from(vec![
         Span::styled(
             PROP_FRAMES[prop_frame_index(elapsed)].to_string(),

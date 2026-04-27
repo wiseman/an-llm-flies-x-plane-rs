@@ -426,6 +426,10 @@ pub struct LiveRunConfig {
     pub llm_reasoning_effort: Option<String>,
     pub atc_messages: Vec<String>,
     pub interactive: bool,
+    /// Opt-in to the multi-pane "AI PILOT CONSOLE" TUI. No effect when
+    /// `interactive == false`. Default-off so existing operators see no
+    /// behaviour change.
+    pub tui_v2: bool,
     pub control_hz: f64,
     pub status_interval_s: f64,
     pub engage_profile: String,
@@ -760,15 +764,30 @@ pub fn run_live_xplane(base_config: ConfigBundle, runtime: LiveRunConfig) -> Res
         } else {
             None
         };
-        let tui_result = run_tui(
-            bus.clone(),
-            input_tx.clone(),
-            control_stop.clone(),
-            pilot_arc.clone(),
-            heartbeat_pump.clone(),
-            cache_stats.clone(),
-            ptt,
-        );
+        let tui_result = if runtime.tui_v2 {
+            let aircraft_label = pilot_arc.lock().config.performance.aircraft.clone();
+            crate::tui_v2::run_tui_v2(
+                bus.clone(),
+                input_tx.clone(),
+                control_stop.clone(),
+                pilot_arc.clone(),
+                heartbeat_pump.clone(),
+                cache_stats.clone(),
+                ptt,
+                aircraft_label,
+                runtime.llm_model.clone(),
+            )
+        } else {
+            run_tui(
+                bus.clone(),
+                input_tx.clone(),
+                control_stop.clone(),
+                pilot_arc.clone(),
+                heartbeat_pump.clone(),
+                cache_stats.clone(),
+                ptt,
+            )
+        };
         control_stop.store(true, Ordering::Release);
         llm_stop.store(true, Ordering::Release);
         let _ = control_thread.join();
