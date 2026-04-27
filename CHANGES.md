@@ -5,6 +5,103 @@ The format is loosely based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project follows [Semantic Versioning](https://semver.org).
 
+## [0.6.0] — 2026-04-27
+
+### NOTAMs
+
+- Fly with Anthropic Claude or Google Gemini, not just OpenAI. Pick
+  the brain at startup with `--pilot-llm-provider anthropic` or
+  `--pilot-llm-provider gemini` plus a matching `--pilot-llm-model`.
+- New cockpit-style display: status pane up top, energy + risk
+  alongside, radio and action log side-by-side below, input at the
+  bottom. On narrow terminals the radio stacks above the log so ATC
+  doesn't get squeezed off the screen.
+- Flight sessions render to a standalone HTML transcript via the new
+  `sim-pilot-transcript` binary — radio and ATC traffic show up as
+  timeline events alongside pilot actions, with a mission-complete
+  summary footer.
+- A six-model bench-off comparing how OpenAI, Anthropic, and Gemini
+  models fly the same scenario, end-to-end on the offline simulator.
+  Results table in the README.
+- The pilot's thinking is more visible — Gemini reasoning traces
+  surface in the action log, and a propeller spinner appears while
+  the model is working.
+- Pattern altitude is held until ~1.2 nm from the runway before the
+  descent kicks in. Fewer "low and slow" base legs.
+- Default downwind offset widened — more room to set up the descent.
+- Heartbeats no longer fire on top of an in-flight model call; the
+  idle clock resets when the pilot finishes thinking.
+- Quieter elevator on combined altitude + speed holds — control
+  chatter killed.
+- LLM provider errors now surface the response body so failures are
+  diagnosable instead of just "non-2xx".
+
+### Added
+
+- Provider-neutral pilot-LLM trait. OpenAI Responses (existing),
+  Anthropic Messages, and Gemini are all wired through the same
+  conversation loop. New flags: `--pilot-llm-provider {openai,
+  anthropic, gemini}` and matching model overrides. Anthropic uses
+  prompt cache breakpoints placed on stable content for cost
+  discipline; Gemini surfaces its thought-trace into the action log.
+- End-to-end LLM eval harness on `SimpleAircraftModel`. One CLI
+  drives a fixed scenario across multiple model/provider pairs,
+  records per-run tool call + failure counts, writes a flight track
+  to CSV, and emits a normalized report. Six-model results table
+  added to the README.
+- `sim-pilot-transcript` CLI renders a session `.log` to HTML.
+  Operator turns, pilot replies, tool calls, radio/ATC traffic, and
+  heartbeats appear as a single timeline; a mission-complete summary
+  footer (touchdown stats, tokens, tool counts) lands at the bottom.
+- Narrow-terminal stacked layout for the radio + action-log split.
+  Below 100 columns the panes stack vertically (radio 1/4, log 3/4)
+  instead of being squeezed side by side.
+- Propeller spinner in the action-log pane while the LLM is busy.
+
+### Changed
+
+- TUI rebuilt as the "AI Pilot Console" multi-pane layout — status
+  / energy + risk / radio + action log / input. The previous v1 + v2
+  layouts are gone; `--tui-v2` is no longer needed.
+- Default C172 downwind offset widened from 3500 ft to 6000 ft.
+- Pattern altitude is held until within 1.2 nm of the runway before
+  the descent gate opens (was: descent gated only on abeam-the-
+  numbers + leg geometry).
+- Heartbeat pump gates on LLM-busy. The idle timer restarts from the
+  end of an LLM call instead of running concurrently with one, so a
+  long-thinking turn won't cause an overlapping heartbeat to fire.
+- `pattern_fly` auto-releases on a clean post-landing stop. The
+  three idle holds take over without an extra operator nudge.
+- Pitch derivative gain halved — kills the elevator chatter that
+  showed up on combined altitude + speed holds.
+- `Axis` ownership inside the profile composer moved from
+  `BTreeSet<Axis>` to a small bitmask (`AxisSet`); shared a test
+  fixture across the unit tests that used to copy-paste it.
+- Tool descriptions and the system prompt tightened.
+- ias / gs in the status payload spelled out with units so models
+  read them correctly.
+- `engage_pattern_fly` `start_phase` doc clarified.
+- Heartbeat lines drop the trailing `| status={...}` JSON in the
+  pane — the JSON still goes to disk for the LLM's heartbeat replay,
+  but the human only sees the human-readable reason.
+- Radio / ATC transmissions now appear as first-class timeline
+  events in the HTML transcript renderer, not just plain log lines.
+- Single-line tool summaries no longer truncated in the transcript.
+- Provider + model surfaced on eval-run log headers.
+- Anthropic cache-write tokens tracked for eval cost math.
+
+### Fixed
+
+- Anthropic cache hit-rate calculation summed three disjoint input
+  counters; previously the rate was understated.
+- Eval pilot snapshot uninit race — scenarios prime the snapshot
+  before LLM startup so the first turn doesn't see zeros.
+- Non-2xx LLM HTTP responses now include the response body in the
+  error, not just the status code.
+- `tools` shared takeoff-position gate + an override flag for runway
+  departures from non-standard configurations (intersection, hold-
+  short cluster mismatch).
+
 ## [0.5.0] — 2026-04-22
 
 ### NOTAMs

@@ -3,6 +3,28 @@
 Operator-level summary of what's landed in each release, in pilot
 language. For code-level detail see `CHANGES.md`.
 
+## [0.6.0] — 2026-04-27
+
+- Fly with Anthropic Claude or Google Gemini, not just OpenAI. Pick
+  the brain at startup with `--pilot-llm-provider anthropic` or
+  `--pilot-llm-provider gemini`.
+- New cockpit-style display: status up top, energy + risk alongside,
+  radio and action log side-by-side below, input at the bottom. On
+  narrow terminals the radio stacks above the log so ATC stays
+  visible.
+- Flight sessions render to a standalone HTML transcript — radio and
+  ATC traffic show up as timeline events alongside pilot actions,
+  with a mission-complete summary footer.
+- Six-model bench-off comparing OpenAI, Anthropic, and Gemini models
+  flying the same scenario end-to-end. Results table in the README.
+- The pilot's thinking is more visible — Gemini reasoning traces
+  surface in the action log, and a propeller spinner appears while
+  the model is working.
+- Pattern altitude held until ~1.2 nm from the runway before
+  descent. Fewer low-and-slow base legs.
+- Default downwind offset widened — more room to set up the descent.
+- Quieter elevator on combined altitude + speed holds.
+
 ## [0.5.0] — 2026-04-22
 
 - After landing the pilot leaves the runway. Rollout decelerates to
