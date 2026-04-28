@@ -521,6 +521,17 @@ pub fn run_live_xplane(base_config: ConfigBundle, runtime: LiveRunConfig) -> Res
     }
 
     let (input_tx, input_rx) = unbounded::<IncomingMessage>();
+    if let Some(tail) = bridge.aircraft_tail_number() {
+        // Heartbeats deliberately omit the tail number — it doesn't
+        // change during the session, so a single mention here keeps it
+        // in conversation history without bloating every recurring
+        // status payload.
+        bus.push_log_kind(LogKind::System, format!("aircraft_tail={}", tail));
+        let _ = input_tx.send(IncomingMessage::operator(format!(
+            "initial status: aircraft tail number {}",
+            tail
+        )));
+    }
     for msg in &runtime.atc_messages {
         let _ = input_tx.send(IncomingMessage::atc(msg.clone()));
     }

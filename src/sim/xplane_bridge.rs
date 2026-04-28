@@ -18,12 +18,12 @@ use serde_json::{json, Value};
 use tungstenite::{client::IntoClientRequest, stream::MaybeTlsStream, Message, WebSocket};
 
 use crate::sim::datarefs::{
-    DatarefSpec, BOOTSTRAP_DATAREFS, COMMAND_DATAREFS, ELEVATION_M, FLAP_HANDLE_DEPLOY_RATIO,
-    FLAP_HANDLE_REQUEST_RATIO, GEAR_HANDLE_DOWN, HEADING_DEG, IAS_KT, LATITUDE_DEG,
-    LEFT_BRAKE_RATIO, LOCAL_VX_M_S, LOCAL_VZ_M_S, LONGITUDE_DEG, ON_GROUND_0,
-    OVERRIDE_JOYSTICK_HEADING, OVERRIDE_TOE_BRAKES, PITCH_DEG, P_DEG_S, Q_DEG_S, RIGHT_BRAKE_RATIO, ROLL_DEG, R_DEG_S,
-    SIM_TIME_S, STATE_DATAREFS, THROTTLE_ALL, VS_FPM, YOKE_HEADING_RATIO, YOKE_PITCH_RATIO,
-    YOKE_ROLL_RATIO, Y_AGL_M,
+    DatarefSpec, ACF_TAILNUM, BOOTSTRAP_DATAREFS, COMMAND_DATAREFS, ELEVATION_M,
+    FLAP_HANDLE_DEPLOY_RATIO, FLAP_HANDLE_REQUEST_RATIO, GEAR_HANDLE_DOWN, HEADING_DEG, IAS_KT,
+    LATITUDE_DEG, LEFT_BRAKE_RATIO, LOCAL_VX_M_S, LOCAL_VZ_M_S, LONGITUDE_DEG, ON_GROUND_0,
+    OVERRIDE_JOYSTICK_HEADING, OVERRIDE_TOE_BRAKES, PITCH_DEG, P_DEG_S, Q_DEG_S, RESOLVE_ONLY_DATAREFS,
+    RIGHT_BRAKE_RATIO, ROLL_DEG, R_DEG_S, SIM_TIME_S, STATE_DATAREFS, THROTTLE_ALL, VS_FPM,
+    YOKE_HEADING_RATIO, YOKE_PITCH_RATIO, YOKE_ROLL_RATIO, Y_AGL_M,
 };
 use crate::sim::simple_dynamics::DynamicsState;
 use crate::types::{clamp, ActuatorCommands, Vec2};
@@ -192,19 +192,44 @@ fn url_encode(s: &str) -> String {
     out
 }
 
+/// One-shot REST fetch of `/datarefs/{id}/value`, returning the raw
+/// `data` payload (or `Value::Null` if absent). Shared by the bootstrap
+/// scalar reads and the byte-array tail-number decode.
+fn fetch_dataref_value(host: &str, port: u16, id: i64, timeout_secs: u64) -> Result<Value> {
+    let url = format!("{}/datarefs/{}/value", rest_base(host, port), id);
+    let payload: Value = ureq::get(&url)
+        .timeout(std::time::Duration::from_secs(timeout_secs))
+        .call()?
+        .into_json()?;
+    Ok(payload.get("data").cloned().unwrap_or(Value::Null))
+}
+
+fn fetch_tailnum_by_id(host: &str, port: u16, id: i64, timeout_secs: u64) -> Result<Option<String>> {
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    let raw = fetch_dataref_value(host, port, id, timeout_secs)?;
+    // X-Plane web API v3 returns byte-array (`value_type:"data"`)
+    // datarefs as a base64-encoded string. Older revs / some forks
+    // returned a raw integer array, so accept that shape too.
+    let bytes: Vec<u8> = if let Some(s) = raw.as_str() {
+        STANDARD.decode(s).context("base64-decoding tail dataref value")?
+    } else if let Some(arr) = raw.as_array() {
+        arr.iter().map_while(|v| v.as_u64().map(|n| n as u8)).collect()
+    } else {
+        bail!("unexpected tail-dataref value shape: {raw}");
+    };
+    let end = bytes.iter().position(|b| *b == 0).unwrap_or(bytes.len());
+    let text = String::from_utf8_lossy(&bytes[..end]).trim().to_string();
+    if text.is_empty() { Ok(None) } else { Ok(Some(text)) }
+}
+
 pub fn probe_bootstrap_sample(host: &str, port: u16, timeout_secs: u64) -> Result<BootstrapSample> {
     check_capabilities(host, port, timeout_secs)?;
     let resolved = resolve_dataref_ids(host, port, BOOTSTRAP_DATAREFS, timeout_secs)?;
     let mut values: HashMap<String, f64> = HashMap::new();
     for spec in BOOTSTRAP_DATAREFS {
-        let id = resolved.get(spec.name).unwrap();
-        let url = format!("{}/datarefs/{}/value", rest_base(host, port), id);
-        let payload: Value = ureq::get(&url)
-            .timeout(std::time::Duration::from_secs(timeout_secs))
-            .call()?
-            .into_json()?;
-        let raw = payload.get("data").unwrap_or(&Value::Null);
-        values.insert(spec.name.to_string(), select_index(raw, spec.index)?);
+        let id = *resolved.get(spec.name).unwrap();
+        let raw = fetch_dataref_value(host, port, id, timeout_secs)?;
+        values.insert(spec.name.to_string(), select_index(&raw, spec.index)?);
     }
     Ok(BootstrapSample {
         posi: PositionSample {
@@ -233,13 +258,18 @@ pub struct XPlaneWebBridge {
     last_gear_down: Arc<Mutex<bool>>,
     req_id: Arc<Mutex<i64>>,
     ws: Arc<Mutex<WebSocket<MaybeTlsStream<std::net::TcpStream>>>>,
+    tail_number: Option<String>,
 }
 
 impl XPlaneWebBridge {
     pub fn new(georef: GeoReference, host: &str, port: u16, timeout_secs: u64) -> Result<Self> {
         check_capabilities(host, port, timeout_secs)?;
         let mut specs_vec: Vec<DatarefSpec> = Vec::new();
-        for s in STATE_DATAREFS.iter().chain(COMMAND_DATAREFS.iter()) {
+        for s in STATE_DATAREFS
+            .iter()
+            .chain(COMMAND_DATAREFS.iter())
+            .chain(RESOLVE_ONLY_DATAREFS.iter())
+        {
             if !specs_vec.iter().any(|x| x.name == s.name) {
                 specs_vec.push(*s);
             }
@@ -258,6 +288,22 @@ impl XPlaneWebBridge {
         let request = url.into_client_request()?;
         let (ws, _) = tungstenite::connect(request)?;
 
+        // Best-effort: a missing tail just means no registration shows
+        // up in the initial status / keyterms. Log fetch errors via
+        // eprintln so they're visible without forcing the bus through.
+        let tail_number = match fetch_tailnum_by_id(
+            host,
+            port,
+            resolved[ACF_TAILNUM.name],
+            timeout_secs,
+        ) {
+            Ok(t) => t,
+            Err(e) => {
+                eprintln!("acf_tailnum fetch failed: {e:#}");
+                None
+            }
+        };
+
         let bridge = Self {
             georef,
             host: host.to_string(),
@@ -269,6 +315,7 @@ impl XPlaneWebBridge {
             last_gear_down: Arc::new(Mutex::new(true)),
             req_id: Arc::new(Mutex::new(0)),
             ws: Arc::new(Mutex::new(ws)),
+            tail_number,
         };
         bridge.subscribe_state()?;
         bridge.wait_for_initial_snapshot(timeout_secs)?;
@@ -585,6 +632,9 @@ impl crate::llm::tools::ToolBridge for XPlaneWebBridge {
     }
     fn write_dataref_values(&self, updates: &[(String, f64)]) -> anyhow::Result<()> {
         self.write_dataref_values(updates)
+    }
+    fn aircraft_tail_number(&self) -> Option<&str> {
+        self.tail_number.as_deref()
     }
 }
 

@@ -131,6 +131,11 @@ pub trait ToolBridge: Send + Sync {
     fn georef(&self) -> GeoReference;
     fn get_dataref_value(&self, name: &str) -> Option<f64>;
     fn write_dataref_values(&self, updates: &[(String, f64)]) -> Result<()>;
+    /// Aircraft tail number / registration (e.g. "N172SP"). Default
+    /// `None` covers the simple/eval bridge and test fakes; the live
+    /// X-Plane bridge fetches it once at startup from
+    /// `sim/aircraft/view/acf_tailnum`.
+    fn aircraft_tail_number(&self) -> Option<&str> { None }
 }
 
 pub struct ToolContext {

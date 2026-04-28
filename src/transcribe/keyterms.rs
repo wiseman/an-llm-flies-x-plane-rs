@@ -61,6 +61,9 @@ pub fn build_keyterms(
     if !aircraft.is_empty() {
         high.push(aircraft);
     }
+    if let Some(tail) = bridge.and_then(|b| b.aircraft_tail_number()) {
+        push_tail_terms(&mut high, &tail);
+    }
 
     if let Some(snap) = snapshot.as_ref() {
         for t in phase_terms(snap.phase) {
@@ -301,6 +304,57 @@ fn phase_terms(phase: Option<FlightPhase>) -> &'static [&'static str] {
     }
 }
 
+/// Push the raw tail, its full phonetic spell-out, and the trailing-three
+/// short form. The short form mirrors how ATC drops to the abbreviated
+/// callsign once two-way comms are established.
+fn push_tail_terms(high: &mut DedupList, tail: &str) {
+    let trimmed = tail.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+    high.push(trimmed.to_string());
+    if let Some(full) = phonetic_spell(trimmed) {
+        high.push(full);
+    }
+    if let Some((start, _)) = trimmed.char_indices().nth_back(2) {
+        if start > 0 {
+            if let Some(short) = phonetic_spell(&trimmed[start..]) {
+                high.push(short);
+            }
+        }
+    }
+}
+
+/// Returns `None` if the input has no ASCII-alphanumeric characters.
+fn phonetic_spell(s: &str) -> Option<String> {
+    let mut out = String::new();
+    for c in s.chars() {
+        if let Some(word) = phonetic_word(c) {
+            if !out.is_empty() {
+                out.push(' ');
+            }
+            out.push_str(word);
+        }
+    }
+    if out.is_empty() { None } else { Some(out) }
+}
+
+fn phonetic_word(c: char) -> Option<&'static str> {
+    Some(match c.to_ascii_uppercase() {
+        'A' => "alpha", 'B' => "bravo", 'C' => "charlie", 'D' => "delta",
+        'E' => "echo", 'F' => "foxtrot", 'G' => "golf", 'H' => "hotel",
+        'I' => "india", 'J' => "juliet", 'K' => "kilo", 'L' => "lima",
+        'M' => "mike", 'N' => "november", 'O' => "oscar", 'P' => "papa",
+        'Q' => "quebec", 'R' => "romeo", 'S' => "sierra", 'T' => "tango",
+        'U' => "uniform", 'V' => "victor", 'W' => "whiskey", 'X' => "x-ray",
+        'Y' => "yankee", 'Z' => "zulu",
+        '0' => "zero", '1' => "one", '2' => "two", '3' => "three",
+        '4' => "four", '5' => "five", '6' => "six", '7' => "seven",
+        '8' => "eight", '9' => "nine",
+        _ => return None,
+    })
+}
+
 /// Order-preserving case-insensitive deduping list.
 struct DedupList {
     seen: HashSet<String>,
@@ -412,6 +466,30 @@ mod tests {
         d.push("SoCal".to_string());
         let v = d.into_vec(10);
         assert_eq!(v, vec!["Whiteman".to_string(), "SoCal".to_string()]);
+    }
+
+    #[test]
+    fn tail_terms_emit_full_phonetic_and_short_phonetic() {
+        let mut high = DedupList::new();
+        push_tail_terms(&mut high, "N172SP");
+        let v = high.into_vec(100);
+        assert!(v.contains(&"N172SP".to_string()));
+        assert!(v.contains(&"november one seven two sierra papa".to_string()));
+        assert!(v.contains(&"two sierra papa".to_string()));
+    }
+
+    #[test]
+    fn tail_terms_short_skipped_when_tail_is_three_or_fewer_chars() {
+        let mut high = DedupList::new();
+        push_tail_terms(&mut high, "N1A");
+        let v = high.into_vec(100);
+        assert!(v.contains(&"N1A".to_string()));
+        // Full form is identical to the would-be short form, so no
+        // duplicate "short" entry should land.
+        assert_eq!(
+            v.iter().filter(|t| *t == "november one alpha").count(),
+            1
+        );
     }
 
     #[test]

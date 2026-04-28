@@ -71,6 +71,10 @@ pub const OVERRIDE_JOYSTICK_HEADING: DatarefSpec =
 pub const OVERRIDE_TOE_BRAKES: DatarefSpec =
     DatarefSpec::new("sim/operation/override/override_toe_brakes");
 
+/// Aircraft tail / registration. Byte array — fetched one-shot via REST
+/// at startup, not on the WS subscription.
+pub const ACF_TAILNUM: DatarefSpec = DatarefSpec::new("sim/aircraft/view/acf_tailnum");
+
 pub const COM1_FREQUENCY_HZ_833: DatarefSpec =
     DatarefSpec::new("sim/cockpit2/radios/actuators/com1_frequency_hz_833");
 pub const COM2_FREQUENCY_HZ_833: DatarefSpec =
@@ -105,6 +109,11 @@ pub const STATE_DATAREFS: &[DatarefSpec] = &[
     COM1_FREQUENCY_HZ_833,
     COM2_FREQUENCY_HZ_833,
 ];
+
+/// Datarefs resolved at startup but never subscribed over the WebSocket
+/// feed (one-shot REST reads only — typically string / byte-array data
+/// the bridge doesn't model as `f64`).
+pub const RESOLVE_ONLY_DATAREFS: &[DatarefSpec] = &[ACF_TAILNUM];
 
 pub const COMMAND_DATAREFS: &[DatarefSpec] = &[
     YOKE_PITCH_RATIO,
