@@ -229,7 +229,12 @@ fn build_url(keyterms: &[String]) -> Result<Url> {
         q.append_pair("channels", "1");
         q.append_pair("interim_results", "true");
         q.append_pair("punctuate", "true");
-        q.append_pair("smart_format", "true");
+        // smart_format is OFF on purpose: its entity-formatting pass
+        // rewrites spelled-out callsigns/headings ("november one seven
+        // two") as dates ("11/01/1972"). Punctuation alone is enough
+        // for aviation phraseology, and the LLM handles word-form
+        // numbers fine.
+        q.append_pair("smart_format", "false");
         q.append_pair("endpointing", "300");
         q.append_pair("utterance_end_ms", "1000");
         for term in keyterms {
