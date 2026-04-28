@@ -136,12 +136,22 @@ Common flags:
 
 ### TUI
 
-The interactive TUI is four stacked panes:
+The interactive TUI is the AI Pilot Console — pinned chrome on top and bottom,
+a flexing dialog area in the middle:
 
-- **STATUS** — phase, active profiles, position, altitude, speed, heading, control surfaces, flap/gear, throttle.
-- **LOG** — timestamped transcript of operator messages, ATC, LLM replies, tool calls, and heartbeats. Scrollable.
+- **Header** — title, current phase, sim-time clock, model + aircraft labels, prompt-cache stats (input/output tokens, cache hit %, request count).
+- **MISSION INTENT** — the pilot's declared top-level goal (set via the `set_goal` tool).
+- **AUTHORITY** — clearances and authority gates: who/what is in control of which axis.
+- **NAV** — position, altitude, speed, heading, flap/gear, throttle, control surfaces.
+- **ENERGY · RISK** — energy state and live risk indicators.
 - **RADIO** — radio transmissions only, labeled with the frequency they went out on.
+- **LLM / ACTION LOG** — timestamped transcript of operator messages, ATC, LLM replies, tool calls, and heartbeats. Scrollable. Toggle compact/full with Ctrl-T.
 - **INPUT** — type instructions to the LLM pilot, or act as ATC. emacs/bash-style keybindings; long lines wrap onto additional visual rows.
+- **Footer** — status badges (alerts, etc.).
+
+On terminals narrower than 100 columns the radio and action-log split stacks
+vertically (radio on top at 1/4 height, log below) instead of side by side, so
+ATC stays visible without crowding the assistant text.
 
 Keys:
 
@@ -180,6 +190,7 @@ stem (`sim_pilot-YYYYMMDD-HHMMSS`):
 | ---------------------- | ---------------------------------------------------------------------------------------------------- |
 | `get_status`           | Returns a JSON snapshot of aircraft state, phase, active profiles, and live position when available. |
 | `sleep`                | Ends the current LLM turn while the deterministic pilot keeps flying the active profiles.            |
+| `set_goal`             | Declares the pilot's top-level mission goal; surfaces verbatim on the Mission Intent pane.            |
 | `engage_heading_hold`  | Takes ownership of the lateral axis and turns to a target heading, optionally forcing left or right. |
 | `engage_altitude_hold` | Takes ownership of the vertical axis and holds a target altitude with TECS.                          |
 | `engage_speed_hold`    | Takes ownership of the speed axis and holds a target IAS.                                            |
@@ -200,6 +211,8 @@ stem (`sim_pilot-YYYYMMDD-HHMMSS`):
 | `go_around`             | Commands an immediate go-around during pattern flying.                                                                                            |
 | `execute_touch_and_go`  | Arms the next landing to skip rollout braking and transition straight back to takeoff.                                                            |
 | `join_pattern`          | Acknowledges a pattern-entry instruction while `pattern_fly` is active.                                                                           |
+| `list_runway_exits`     | Lists candidate exit taxiways for a landing runway with their stationing from the threshold.                                                       |
+| `choose_runway_exit`    | Records a preferred runway-exit taxiway; the rollout slows to turnoff speed at that exit and hands off the aircraft stopped clear of the runway.  |
 
 ### Ground, Radio, And Airport Data
 
@@ -212,4 +225,6 @@ stem (`sim_pilot-YYYYMMDD-HHMMSS`):
 | `engage_line_up`     | Crosses the hold short, enters the runway, aligns to runway heading, and stops in line-up position.                             |
 | `engage_taxi`        | Plans and then flies a taxi route to a runway hold-short point with deterministic ground steering.                              |
 | `plan_taxi_route`    | Plans a taxi route only, including legs, taxiway sequence, distance, and runway conflict zones.                                 |
-| `sql_query`          | Runs read-only SQL against the apt.dat-derived DuckDB views for airports, runways, comms, taxi network, and optional airspaces. |
+| `engage_park`        | Taxis to a named parking spot and stops with the nose on the spot's painted heading.                                            |
+| `plan_park_route`    | Plan-only variant of `engage_park` — previews the taxi route to the parking spot without engaging.                              |
+| `sql_query`          | Runs read-only SQL against the apt.dat-derived DuckDB views for airports, runways, comms, taxi network, parking spots, and optional airspaces. |
