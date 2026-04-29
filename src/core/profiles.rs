@@ -424,7 +424,36 @@ pub fn build_rotate_guidance(
     }
 }
 
-fn guidance_to_contribution(g: GuidanceTargets) -> ProfileContribution {
+/// Decide whether a three-axis landing profile should release control to
+/// the idle trio after touchdown. Fires on the first tick of `TaxiClear`
+/// (the nominal exit) or once the aircraft has stopped in any post-
+/// landing phase (catch-all: aircraft braked to a stop on the runway
+/// without finding an exit). Returns the replacement profiles when a
+/// hand-off should happen, `None` otherwise.
+///
+/// Shared between `PatternFlyProfile` and `DeadStickLandingProfile` —
+/// both run the same Final → Roundout → Flare → Rollout flow and need
+/// the same hand-off semantics.
+pub(crate) fn post_landing_handoff(
+    phase: FlightPhase,
+    previous_phase: FlightPhase,
+    gs_kt: f64,
+) -> Option<Vec<Box<dyn GuidanceProfile>>> {
+    let post_landing = matches!(
+        phase,
+        FlightPhase::Rollout | FlightPhase::RunwayExit | FlightPhase::TaxiClear
+    );
+    let first_tick_taxi_clear =
+        phase == FlightPhase::TaxiClear && previous_phase != FlightPhase::TaxiClear;
+    let stopped_post_landing = post_landing && gs_kt < 0.5;
+    if first_tick_taxi_clear || stopped_post_landing {
+        Some(idle_profile_trio(0.0))
+    } else {
+        None
+    }
+}
+
+pub(crate) fn guidance_to_contribution(g: GuidanceTargets) -> ProfileContribution {
     ProfileContribution {
         lateral_mode: Some(g.lateral_mode),
         vertical_mode: Some(g.vertical_mode),
@@ -1351,26 +1380,13 @@ impl GuidanceProfile for PatternFlyProfile {
                 Box::new(SpeedHoldProfile::new(self.config.performance.vy_kt)),
             ]);
         }
-        // Post-landing hand-off: release the three-axis pattern profile
-        // either on the first tick of TaxiClear (the happy path: aircraft
-        // is laterally clear of the runway and decelerating) OR whenever
-        // the aircraft is stopped in any post-landing phase (the catch-all:
-        // aircraft braked to a stop on the runway because rollout couldn't
-        // make the chosen exit, or the LLM never called choose_runway_exit
-        // at all). Without this, pattern_fly sits engaged with no
-        // "completed" signal to wait for, and the LLM thinks it has to
-        // wait. PilotCore::last_known_phase preserves the post-landing
-        // phase value for downstream readers (`pilot.phase()`) after the
-        // hand-off so scenario tests still see Rollout / TaxiClear.
-        let post_landing = matches!(
-            self.phase,
-            FlightPhase::Rollout | FlightPhase::RunwayExit | FlightPhase::TaxiClear
-        );
-        let first_tick_taxi_clear = self.phase == FlightPhase::TaxiClear
-            && previous_phase != FlightPhase::TaxiClear;
-        let stopped_post_landing = post_landing && state.gs_kt < 0.5;
-        if first_tick_taxi_clear || stopped_post_landing {
-            hand_off = Some(idle_profile_trio(0.0));
+        // Post-landing hand-off: release pattern_fly to idle once the
+        // aircraft is clear or stopped. PilotCore::last_known_phase
+        // preserves the phase value for downstream readers
+        // (`pilot.phase()`) after the hand-off, so scenario tests still
+        // see Rollout / TaxiClear.
+        if let Some(replacement) = post_landing_handoff(self.phase, previous_phase, state.gs_kt) {
+            hand_off = Some(replacement);
         }
         if let Some(queued) = self.handoff_request.take() {
             hand_off = Some(queued);

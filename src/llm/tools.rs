@@ -1021,6 +1021,289 @@ pub fn tool_engage_takeoff(ctx: &ToolContext, args: &Map<String, Value>) -> Stri
     )
 }
 
+// ---------- dead-stick (engine-out) landing tools ----------
+
+/// Default traffic pattern side when the LLM omits the `side` argument.
+const DEFAULT_TRAFFIC_SIDE: &str = "left";
+
+/// Cap on rows returned by `find_dead_stick_candidates`. Bound by the
+/// SQL LIMIT so the database doesn't waste work surfacing rows the
+/// caller will discard.
+const MAX_DEAD_STICK_CANDIDATES: i64 = 25;
+
+/// Default candidate count when the LLM omits `max_candidates`.
+const DEFAULT_DEAD_STICK_CANDIDATES: i64 = 5;
+
+/// Minimum runway length we'll suggest for a dead-stick landing.
+const MIN_DEAD_STICK_LENGTH_FT: f64 = 1500.0;
+
+/// Score weights applied to each candidate after the SQL pass.
+/// `margin_nm` is the dominant term (1.0); a 20-knot headwind is worth
+/// roughly 1 NM of margin (`SCORE_HEADWIND_PER_KT * 20 = 1.0`); each
+/// 1000 ft of runway length adds 0.1 NM-equivalent.
+const SCORE_HEADWIND_PER_KT: f64 = 0.05;
+const SCORE_LENGTH_PER_FT: f64 = 0.0001;
+
+/// Reach buffer on the still-air glide — refuse engagement if the
+/// runway is more than `1.05 × glide_ratio × alt_agl` away. Catches
+/// gross mistakes; wind isn't subtracted yet so the LLM should bias
+/// toward `margin_nm > 1` from the candidates query.
+const REACH_BUFFER_FACTOR: f64 = 1.05;
+
+const FT_PER_NM: f64 = 6076.12;
+
+/// One scored runway end candidate for a dead-stick landing. Built from
+/// the SQL result + post-scored on the Rust side for headwind alignment
+/// and length preference.
+#[derive(Debug, Clone)]
+struct DeadStickCandidate {
+    airport_ident: String,
+    rwy_ident: String,
+    course_deg: f64,
+    length_ft: f64,
+    surface: String,
+    dist_nm: f64,
+    margin_nm: f64,
+    headwind_kt: f64,
+    score: f64,
+}
+
+pub fn tool_find_dead_stick_candidates(ctx: &ToolContext, args: &Map<String, Value>) -> String {
+    let lat = match arg_f64(args, "lat") {
+        Ok(v) => v,
+        Err(e) => return format!("error: {}", e),
+    };
+    let lon = match arg_f64(args, "lon") {
+        Ok(v) => v,
+        Err(e) => return format!("error: {}", e),
+    };
+    let alt_agl_ft = match arg_f64(args, "alt_agl_ft") {
+        Ok(v) => v,
+        Err(e) => return format!("error: {}", e),
+    };
+    // heading_deg is required by the schema for symmetry with the rest of
+    // the position-scoring helpers, but the v1 scorer doesn't actually
+    // use it (we score by reach margin + headwind alignment + length, not
+    // by the aircraft's current heading). Accept it and ignore.
+    let _heading_deg = args.get("heading_deg").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let wind_dir_deg = args
+        .get("wind_dir_deg")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.0);
+    let wind_kt = args.get("wind_kt").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let max_candidates = args
+        .get("max_candidates")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(DEFAULT_DEAD_STICK_CANDIDATES)
+        .clamp(1, MAX_DEAD_STICK_CANDIDATES);
+    let glide_ratio = ctx.config.lock().performance.glide_ratio.max(1.0);
+
+    if ctx.apt_dat_cache_dir.is_none() {
+        return "error: apt.dat parquet cache is not configured".to_string();
+    }
+    if let Err(e) = ensure_runway_conn(ctx) {
+        return format!("error: could not open apt.dat parquet cache: {}", e);
+    }
+    let guard = ctx.runway_conn.lock().unwrap();
+    let conn = guard.as_ref().unwrap();
+
+    // Filter out closed and absurdly short runways. Both runway ends
+    // are unioned so the LLM sees each landable direction independently.
+    let sql = format!("\
+        WITH params AS ( \
+            SELECT ?::DOUBLE AS lat, ?::DOUBLE AS lon, \
+                   ?::DOUBLE AS alt_agl, ?::DOUBLE AS glide_ratio \
+        ), \
+        runway_ends AS ( \
+            SELECT airport_ident, le_ident AS rwy_ident, \
+                   le_latitude_deg AS thr_lat, le_longitude_deg AS thr_lon, \
+                   le_heading_degT AS course_deg, length_ft, surface \
+            FROM runways WHERE closed = 0 AND length_ft >= {min_len} \
+              AND le_latitude_deg IS NOT NULL AND le_longitude_deg IS NOT NULL \
+            UNION ALL \
+            SELECT airport_ident, he_ident, he_latitude_deg, he_longitude_deg, \
+                   he_heading_degT, length_ft, surface \
+            FROM runways WHERE closed = 0 AND length_ft >= {min_len} \
+              AND he_latitude_deg IS NOT NULL AND he_longitude_deg IS NOT NULL \
+        ), \
+        scored AS ( \
+            SELECT re.*, \
+                   3440.065 * 2 * ASIN(SQRT( \
+                       POWER(SIN(RADIANS((re.thr_lat - p.lat)/2)), 2) + \
+                       COS(RADIANS(p.lat)) * COS(RADIANS(re.thr_lat)) * \
+                         POWER(SIN(RADIANS((re.thr_lon - p.lon)/2)), 2) \
+                   )) AS dist_nm, \
+                   (p.alt_agl * p.glide_ratio / {ft_per_nm}) AS reach_nm \
+            FROM runway_ends re CROSS JOIN params p \
+        ) \
+        SELECT airport_ident, rwy_ident, course_deg, length_ft, COALESCE(surface, '') AS surface, \
+               dist_nm, (reach_nm - dist_nm) AS margin_nm \
+        FROM scored \
+        WHERE dist_nm <= reach_nm \
+        ORDER BY margin_nm DESC \
+        LIMIT ?",
+        min_len = MIN_DEAD_STICK_LENGTH_FT,
+        ft_per_nm = FT_PER_NM,
+    );
+    let mut stmt = match conn.prepare(&sql) {
+        Ok(s) => s,
+        Err(e) => return format!("error: {}", e),
+    };
+    let mut rows = match stmt
+        .query(duckdb::params![lat, lon, alt_agl_ft, glide_ratio, max_candidates])
+    {
+        Ok(r) => r,
+        Err(e) => return format!("error: {}", e),
+    };
+    let mut candidates: Vec<DeadStickCandidate> = Vec::new();
+    loop {
+        let row = match rows.next() {
+            Ok(Some(r)) => r,
+            Ok(None) => break,
+            Err(e) => return format!("error: {}", e),
+        };
+        let airport_ident: String = row.get(0).unwrap_or_default();
+        let rwy_ident: String = row.get(1).unwrap_or_default();
+        let course_deg: f64 = row.get(2).unwrap_or(0.0);
+        let length_ft: f64 = row.get(3).unwrap_or(0.0);
+        let surface: String = row.get(4).unwrap_or_default();
+        let dist_nm: f64 = row.get(5).unwrap_or(0.0);
+        let margin_nm: f64 = row.get(6).unwrap_or(0.0);
+        let headwind_kt = if wind_kt.abs() > 0.01 {
+            // Headwind on landing = wind_kt * cos(wind_dir - course).
+            // Positive when wind blows from runway course direction (into
+            // the nose on landing). cos((wind_from) - course): if wind is
+            // from 90° and runway course is 90°, headwind is wind_kt.
+            wind_kt * (((wind_dir_deg - course_deg).to_radians()).cos())
+        } else {
+            0.0
+        };
+        let score = margin_nm
+            + SCORE_HEADWIND_PER_KT * headwind_kt
+            + SCORE_LENGTH_PER_FT * length_ft;
+        candidates.push(DeadStickCandidate {
+            airport_ident,
+            rwy_ident,
+            course_deg,
+            length_ft,
+            surface,
+            dist_nm,
+            margin_nm,
+            headwind_kt,
+            score,
+        });
+    }
+    drop(rows);
+    drop(stmt);
+    drop(guard);
+
+    if candidates.is_empty() {
+        return format!(
+            "0 reachable runways within glide (alt_agl={:.0}ft, glide_ratio={:.1} → reach≈{:.1}NM)",
+            alt_agl_ft,
+            glide_ratio,
+            alt_agl_ft * glide_ratio / FT_PER_NM
+        );
+    }
+    candidates
+        .sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    candidates.truncate(max_candidates as usize);
+
+    let mut lines = vec![
+        "airport_ident\trunway_ident\tdist_nm\tmargin_nm\tcourse_deg\tlength_ft\tsurface\theadwind_kt\tscore"
+            .to_string(),
+    ];
+    for c in &candidates {
+        lines.push(format!(
+            "{}\t{}\t{:.2}\t{:.2}\t{:.0}\t{:.0}\t{}\t{:.1}\t{:.3}",
+            c.airport_ident,
+            c.rwy_ident,
+            c.dist_nm,
+            c.margin_nm,
+            c.course_deg,
+            c.length_ft,
+            c.surface,
+            c.headwind_kt,
+            c.score
+        ));
+    }
+    lines.join("\n")
+}
+
+pub fn tool_engage_dead_stick_landing(ctx: &ToolContext, args: &Map<String, Value>) -> String {
+    let airport = match arg_str(args, "airport_ident") {
+        Ok(s) => s.to_string(),
+        Err(e) => return format!("error: {}", e),
+    };
+    let runway_ident = match arg_str(args, "runway_ident") {
+        Ok(s) => s.to_string(),
+        Err(e) => return format!("error: {}", e),
+    };
+    let side = args
+        .get("side")
+        .and_then(|v| v.as_str())
+        .unwrap_or(DEFAULT_TRAFFIC_SIDE)
+        .to_string();
+
+    // Snapshot + glide_ratio in one pass each so the on-ground / reach
+    // checks don't reacquire locks they already held.
+    let (snap_opt, glide_ratio) = {
+        let snap_opt = ctx.pilot.lock().latest_snapshot.clone();
+        let glide_ratio = ctx.config.lock().performance.glide_ratio.max(1.0);
+        (snap_opt, glide_ratio)
+    };
+    let Some(snap) = snap_opt else {
+        return "error: no aircraft state yet — call get_status first so the control loop publishes a snapshot".to_string();
+    };
+    if snap.state.on_ground {
+        return "error: aircraft is on the ground; dead-stick landing requires being airborne".to_string();
+    }
+
+    let (runway, field_elev) =
+        match lookup_runway_for_pattern(ctx, &airport, &runway_ident, &side) {
+            Ok(v) => v,
+            Err(e) => return format!("error: {}", e),
+        };
+
+    // Reach validation: refuse runways that aren't physically makeable
+    // in the still-air glide.
+    let alt_agl_ft = snap.state.alt_agl_ft.max(0.0);
+    let reach_ft = alt_agl_ft * glide_ratio;
+    let dist_ft = (snap.state.position_ft - runway.threshold_ft).length();
+    let reach_nm = reach_ft / FT_PER_NM;
+    let dist_nm = dist_ft / FT_PER_NM;
+    if dist_ft > reach_ft * REACH_BUFFER_FACTOR {
+        return format!(
+            "error: runway {}/{} not reachable in glide (need {:.1} NM, have {:.1} NM at AGL={:.0}ft, glide_ratio={:.1}). Pick a closer candidate from find_dead_stick_candidates.",
+            airport, runway_ident, dist_nm, reach_nm, alt_agl_ft, glide_ratio
+        );
+    }
+
+    install_runway_in_pilot_core(ctx, &airport, runway, field_elev);
+
+    let new_config = ctx.config.lock().clone();
+    let (entry_phase, displaced) = {
+        let mut pilot = ctx.pilot.lock();
+        let profile = crate::core::dead_stick_profile::DeadStickLandingProfile::new(
+            new_config,
+            pilot.runway_frame.clone(),
+            &snap.state,
+        );
+        let phase = profile.phase;
+        let displaced = pilot.engage_profile(Box::new(profile));
+        (phase, displaced)
+    };
+    format!(
+        "engaged dead_stick_landing {} runway {} (entry phase {}; reach {:.1}/{:.1} NM){}",
+        airport,
+        runway_ident,
+        entry_phase.value(),
+        dist_nm,
+        reach_nm,
+        format_displaced(&displaced)
+    )
+}
+
 pub fn tool_takeoff_checklist(ctx: &ToolContext, _args: &Map<String, Value>) -> String {
     let pilot = ctx.pilot.lock();
     let snap = pilot.latest_snapshot.clone();
@@ -2650,6 +2933,8 @@ pub fn dispatch_tool(name: &str, arguments: &str, ctx: &ToolContext) -> ToolResu
         "engage_cruise" => tool_engage_cruise(ctx, &map),
         "engage_pattern_fly" => tool_engage_pattern_fly(ctx, &map),
         "engage_takeoff" => tool_engage_takeoff(ctx, &map),
+        "find_dead_stick_candidates" => tool_find_dead_stick_candidates(ctx, &map),
+        "engage_dead_stick_landing" => tool_engage_dead_stick_landing(ctx, &map),
         "takeoff_checklist" => tool_takeoff_checklist(ctx, &map),
         "disengage_profile" => tool_disengage_profile(ctx, &map),
         "list_profiles" => tool_list_profiles(ctx, &map),
@@ -2774,6 +3059,30 @@ pub fn tool_schemas(include_mission_complete: bool) -> Vec<ToolDef> {
                 "override": {"type": ["boolean", "null"], "description": "Pass true to bypass the centerline, along-track, and heading-alignment checks. Use for off-field / bush / taxiway departures where the aircraft isn't lined up on a paved runway. Pass null (or false) for a normal runway departure."}
             }),
             &["airport_ident", "runway_ident", "override"],
+        ),
+        schema(
+            "find_dead_stick_candidates",
+            "Find runways reachable in a still-air glide from the current position. Returns a TSV with one row per runway end (both directions of every paved-or-grass runway ≥1500 ft within glide range), scored by reach margin in NM, with optional headwind alignment if wind is known. Uses the configured aircraft glide_ratio. The top of the list is the best dead-stick choice; bias toward margin_nm > 1 NM and longer / paved surfaces, and prefer the end with the most positive headwind_kt. Call this BEFORE engage_dead_stick_landing so you (and the operator on the radio) know the options. Returns '0 reachable runways' when nothing is in glide — at that point the answer is an off-airport landing, not this tool.",
+            json!({
+                "lat": {"type": "number", "description": "Current latitude in degrees."},
+                "lon": {"type": "number", "description": "Current longitude in degrees."},
+                "alt_agl_ft": {"type": "number", "description": "Current altitude above ground level in feet (used with the configured glide_ratio to compute reach in NM)."},
+                "heading_deg": {"type": "number", "description": "Current heading in degrees true. Reserved for future scoring; not used in v1."},
+                "wind_dir_deg": {"type": ["number", "null"], "description": "Optional wind FROM direction in degrees true (e.g. 270 = wind from the west). Used to compute headwind alignment on each runway end. Default 0."},
+                "wind_kt": {"type": ["number", "null"], "description": "Optional wind speed in knots. Default 0 (no wind weighting). Pass values from ATIS/METAR or a current AWOS broadcast."},
+                "max_candidates": {"type": ["integer", "null"], "description": "Maximum rows to return. Default 5; capped at 25."}
+            }),
+            &["lat", "lon", "alt_agl_ft", "heading_deg", "wind_dir_deg", "wind_kt", "max_candidates"],
+        ),
+        schema(
+            "engage_dead_stick_landing",
+            "Engage the engine-out / dead-stick landing profile on the named runway. Owns all three axes. Glides at best-glide speed (vbg) toward the Low Key fix (abeam touchdown on the pattern side at ~1000 ft AGL), then runs Downwind → Base → Final → Roundout → Flare → Rollout with throttle locked at zero throughout. There is NO go-around — a powerless aircraft can't climb. Use when the operator declares engine failure or pulls power to idle and asks you to land. Refuses if the aircraft is on the ground or if the chosen runway is outside still-air glide range (use find_dead_stick_candidates to enumerate reachable options first). Bias toward candidates with margin_nm > 1 so you have buffer for headwinds and pattern maneuvering. After engaging, do NOT call engage_pattern_fly or any hold — talk to ATC, brief the operator, and let the autopilot fly. Profile auto-releases to idle after rollout completes.",
+            json!({
+                "airport_ident": {"type": "string", "description": "ICAO airport code of the chosen runway (e.g. 'KSEA')."},
+                "runway_ident": {"type": "string", "description": "Runway end identifier (e.g. '16L', '34R')."},
+                "side": {"type": ["string", "null"], "description": "Traffic pattern side: 'left' (default, standard US) or 'right'. Pass null to accept the default."}
+            }),
+            &["airport_ident", "runway_ident", "side"],
         ),
         schema(
             "takeoff_checklist",

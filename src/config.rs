@@ -36,6 +36,8 @@ pub struct PerformanceConfig {
     pub vapp_kt: f64,
     pub vref_kt: f64,
     pub vso_landing_kt: f64,
+    pub vbg_kt: f64,
+    pub glide_ratio: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -179,6 +181,10 @@ struct RawAircraft {
     vapp_kt: f64,
     vref_kt: f64,
     vso_landing_kt: f64,
+    #[serde(default = "default_vbg_kt")]
+    vbg_kt: f64,
+    #[serde(default = "default_glide_ratio")]
+    glide_ratio: f64,
     pattern: RawPattern,
     flare: RawFlare,
     #[serde(default)]
@@ -188,6 +194,14 @@ struct RawAircraft {
 #[derive(Debug, Deserialize)]
 struct RawPostLanding {
     turnoff_speed_kt: f64,
+}
+
+fn default_vbg_kt() -> f64 {
+    68.0
+}
+
+fn default_glide_ratio() -> f64 {
+    9.0
 }
 
 #[derive(Debug, Deserialize)]
@@ -277,6 +291,8 @@ fn load_config_bundle_from(
         vapp_kt: aircraft.vapp_kt,
         vref_kt: aircraft.vref_kt,
         vso_landing_kt: aircraft.vso_landing_kt,
+        vbg_kt: aircraft.vbg_kt,
+        glide_ratio: aircraft.glide_ratio,
     };
     let pattern = PatternConfig {
         altitude_agl_ft: aircraft.pattern.altitude_agl_ft,

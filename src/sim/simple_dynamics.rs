@@ -106,9 +106,37 @@ impl SimpleAircraftModel {
         state.q_rad_s = pitch_rate_deg_s.to_radians();
 
         let thrust = 10.5 * state.throttle_pos;
-        let drag = 0.085 * state.ias_kt + 0.025 * state.roll_deg.abs() + 0.1 * state.pitch_deg.max(0.0);
+        // Drag scales with throttle. The base coefficient (0.085 kt/s per
+        // kt of IAS) was originally tuned for powered-flight equilibrium —
+        // at full throttle it balances thrust at climb/cruise speeds.
+        // When the engine is at idle the propeller windmills rather than
+        // driving the aircraft, contributing far less retarding force, so
+        // drag should drop proportionally. Without the scale, throttle =
+        // 0 produces ~6 kt/s deceleration at vbg — IAS decays to zero in
+        // ~15 s, no glide possible. With (0.3 + 0.7·throttle), a steady
+        // dead-stick glide is reachable: drag at vbg ≈ 1.7 kt/s, balanced
+        // by the gravity-along-flight-path term at ≈ −5° flight path
+        // (close to the published C172 9:1 ratio).
+        let drag_throttle_scale = 0.3 + 0.7 * state.throttle_pos.clamp(0.0, 1.0);
+        let drag = 0.085 * state.ias_kt * drag_throttle_scale
+            + 0.025 * state.roll_deg.abs()
+            + 0.1 * state.pitch_deg.max(0.0);
         let brake = commands.brakes * 24.0;
-        state.ias_kt = (state.ias_kt + (thrust - drag - brake) * dt).max(0.0);
+        // Gravity-along-flight-path component: descending converts PE→KE
+        // (aircraft accelerates), climbing converts KE→PE (decelerates).
+        // Without this term, throttle-pinned-to-zero glide is impossible —
+        // IAS decays to 0 since drag has nothing to balance against.
+        // Magnitude is small in normal climbs/descents (~1 kt/s at 3°
+        // flight path), so existing powered scenarios are largely
+        // unaffected. Only applies when airborne — ground roll doesn't
+        // have a flight path.
+        let glide_accel_kt_s = if !state.on_ground {
+            let flight_path_deg = state.pitch_deg - 2.0;
+            -G_FT_S2 * flight_path_deg.to_radians().sin() / KT_TO_FPS
+        } else {
+            0.0
+        };
+        state.ias_kt = (state.ias_kt + (thrust - drag - brake + glide_accel_kt_s) * dt).max(0.0);
         let airspeed_ft_s = (state.ias_kt * KT_TO_FPS).max(1.0);
 
         let mut yaw_rate_deg_s;

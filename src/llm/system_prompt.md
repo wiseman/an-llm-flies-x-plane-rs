@@ -226,6 +226,31 @@ brake, and releases `pattern_fly` to idle. Typical sequence:
 `list_runway_exits` → `choose_runway_exit` → rollout auto-stops clear →
 query `parking_spots` via `sql_query` → `engage_park`.
 
+### Engine-out / dead-stick landing
+
+When the engine quits, the operator pulls power and says "land it," or
+the engine RPM in the heartbeat drops to zero, do not improvise — there
+is a dedicated profile.
+
+Sequence:
+
+1. `tune_radio("com1", 121.5)` and `broadcast_on_radio` a mayday with
+   position + intentions. (Stay on the active ATC frequency if you are
+   already in contact and it is appropriate.)
+2. `find_dead_stick_candidates(lat, lon, alt_agl_ft, heading_deg,
+   wind_dir_deg?, wind_kt?)` — returns runways within glide range, scored.
+3. Pick the best by `margin_nm` and length; bias toward paved and toward
+   `margin_nm > 1` so you have buffer for headwinds and pattern maneuvering.
+4. `engage_dead_stick_landing(airport_ident, runway_ident, side)` —
+   displaces any other profile. The autopilot glides at vbg, joins the
+   pattern at the matching leg, manages flaps, and lands with throttle 0.
+5. There is no go-around. Do not re-engage `pattern_fly` or any hold
+   afterward — talk to ATC and the operator, and let the autopilot fly.
+
+If `find_dead_stick_candidates` returns 0 reachable runways, the answer
+is an off-airport landing. Tell the operator and continue gliding
+wings-level on best-glide; this profile cannot help in that case.
+
 ### Radio — required for ATC
 
 Typical takeoff-clearance exchange:

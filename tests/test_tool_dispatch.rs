@@ -1831,3 +1831,188 @@ fn list_runway_exits_enumerates_annotated_taxiways() {
     let a7_pos = r.find("A7").unwrap();
     assert!(a5_pos < a7_pos, "A5 should precede A7 by stationing:\n{}", r);
 }
+
+// ---------- dead-stick landing ----------
+
+/// Stage an airborne snapshot with the given runway-frame position, AGL,
+/// heading, and ground speed so the dead-stick reach + on-ground checks
+/// have something to read.
+fn stage_airborne_snapshot(
+    ctx: &ToolContext,
+    position_ft: Vec2,
+    alt_msl_ft: f64,
+    alt_agl_ft: f64,
+    heading_deg: f64,
+    gs_kt: f64,
+) {
+    let mut state = AircraftState::synthetic_default();
+    state.on_ground = false;
+    state.position_ft = position_ft;
+    state.alt_msl_ft = alt_msl_ft;
+    state.alt_agl_ft = alt_agl_ft;
+    state.heading_deg = heading_deg;
+    state.track_deg = heading_deg;
+    state.gs_kt = gs_kt;
+    state.ias_kt = gs_kt.max(60.0);
+    let mut snap = StatusSnapshot::synthetic_default();
+    snap.state = state;
+    ctx.pilot.lock().latest_snapshot = Some(snap);
+}
+
+#[test]
+fn find_dead_stick_candidates_returns_runways_in_glide() {
+    // Aircraft 0.05° (~5 km / 2.7 NM) east of KSEA at 5000 ft AGL with
+    // glide_ratio=9 reaches ~7.4 NM — so the KSEA runways are reachable.
+    let dir = TempDir::new().unwrap();
+    build_fake_parquet(dir.path(), &[]);
+    let (ctx, _bridge) = make_ctx_with_parquet(dir.path());
+    let r = dispatch(
+        "find_dead_stick_candidates",
+        json!({
+            "lat": 47.4500,
+            "lon": -122.260,
+            "alt_agl_ft": 5000.0,
+            "heading_deg": 270.0,
+        }),
+        &ctx,
+    );
+    assert!(!r.starts_with("error"), "got: {}", r);
+    assert!(
+        r.contains("KSEA"),
+        "expected KSEA in candidates, got:\n{}",
+        r
+    );
+    // Header is the first line; at least one data row follows.
+    let lines: Vec<&str> = r.lines().collect();
+    assert!(lines.len() >= 2, "expected ≥2 lines (header + ≥1 row): {}", r);
+    assert!(lines[0].contains("airport_ident"));
+    assert!(lines[0].contains("margin_nm"));
+}
+
+#[test]
+fn find_dead_stick_candidates_zero_when_too_low() {
+    // Same position but only 100 ft AGL — reach ≈ 0.15 NM, nothing in range.
+    let dir = TempDir::new().unwrap();
+    build_fake_parquet(dir.path(), &[]);
+    let (ctx, _bridge) = make_ctx_with_parquet(dir.path());
+    let r = dispatch(
+        "find_dead_stick_candidates",
+        json!({
+            "lat": 47.5500,
+            "lon": -122.000,
+            "alt_agl_ft": 100.0,
+            "heading_deg": 0.0,
+        }),
+        &ctx,
+    );
+    // Either "0 reachable" message or no rows.
+    assert!(
+        r.contains("0 reachable") || !r.contains("KSEA"),
+        "expected no reachable runways, got:\n{}",
+        r
+    );
+}
+
+#[test]
+fn engage_dead_stick_landing_refuses_on_ground() {
+    let dir = TempDir::new().unwrap();
+    build_fake_parquet(dir.path(), &[]);
+    let (ctx, _bridge) = make_ctx_with_parquet(dir.path());
+    // Stopped on the ground.
+    stage_stopped_snapshot(&ctx, Vec2::new(0.0, 0.0), 0.0);
+    let r = dispatch(
+        "engage_dead_stick_landing",
+        json!({"airport_ident": "KSEA", "runway_ident": "16L", "side": "left"}),
+        &ctx,
+    );
+    assert!(r.starts_with("error:"), "got: {}", r);
+    assert!(
+        r.contains("ground"),
+        "expected on-ground refusal, got: {}",
+        r
+    );
+}
+
+#[test]
+fn engage_dead_stick_landing_refuses_unreachable_runway() {
+    // Aircraft only 200 ft AGL but trying to land at KJFK from KSEA's
+    // location — trivially unreachable in glide.
+    let dir = TempDir::new().unwrap();
+    build_fake_parquet(dir.path(), &[]);
+    let (ctx, _bridge) = make_ctx_with_parquet(dir.path());
+    stage_airborne_snapshot(&ctx, Vec2::new(0.0, 0.0), 700.0, 200.0, 90.0, 70.0);
+    let r = dispatch(
+        "engage_dead_stick_landing",
+        json!({"airport_ident": "KJFK", "runway_ident": "04L", "side": "left"}),
+        &ctx,
+    );
+    assert!(r.starts_with("error:"), "got: {}", r);
+    assert!(
+        r.contains("not reachable") || r.contains("glide"),
+        "expected reach-error, got: {}",
+        r
+    );
+}
+
+#[test]
+fn engage_dead_stick_landing_engages_profile_when_reachable() {
+    // Aircraft 1 NM east of KSEA at 5000 ft AGL, well within glide reach
+    // for the runway at the georef anchor point.
+    let dir = TempDir::new().unwrap();
+    build_fake_parquet(dir.path(), &[]);
+    let (ctx, _bridge) = make_ctx_with_parquet(dir.path());
+    // Position the aircraft 1 NM north of the runway threshold (in the
+    // east-bridge frame: position_ft is the local Cartesian relative to
+    // the bridge anchor, with y north). 1 NM = 6076 ft.
+    stage_airborne_snapshot(&ctx, Vec2::new(0.0, 6076.0), 5500.0, 5000.0, 180.0, 70.0);
+    let r = dispatch(
+        "engage_dead_stick_landing",
+        json!({"airport_ident": "KSEA", "runway_ident": "16L", "side": "left"}),
+        &ctx,
+    );
+    assert!(!r.starts_with("error:"), "got: {}", r);
+    assert!(r.contains("dead_stick_landing"), "got: {}", r);
+    let names = ctx.pilot.lock().list_profile_names();
+    assert!(
+        names.contains(&"dead_stick_landing".to_string()),
+        "active profiles: {:?}",
+        names
+    );
+}
+
+#[test]
+fn engage_dead_stick_landing_displaces_existing_pattern_fly() {
+    // First engage pattern_fly, then engage dead-stick — pattern_fly must
+    // be displaced (both own all axes).
+    let dir = TempDir::new().unwrap();
+    build_fake_parquet(dir.path(), &[]);
+    let (ctx, _bridge) = make_ctx_with_parquet(dir.path());
+    stage_airborne_snapshot(&ctx, Vec2::new(0.0, 6076.0), 5500.0, 5000.0, 180.0, 70.0);
+    let _ = dispatch(
+        "engage_pattern_fly",
+        json!({
+            "airport_ident": "KSEA",
+            "runway_ident": "16L",
+            "side": "left",
+            "start_phase": "downwind",
+        }),
+        &ctx,
+    );
+    let r = dispatch(
+        "engage_dead_stick_landing",
+        json!({"airport_ident": "KSEA", "runway_ident": "16L", "side": "left"}),
+        &ctx,
+    );
+    assert!(!r.starts_with("error:"), "got: {}", r);
+    let names = ctx.pilot.lock().list_profile_names();
+    assert!(
+        names.contains(&"dead_stick_landing".to_string()),
+        "expected dead_stick_landing engaged, got {:?}",
+        names
+    );
+    assert!(
+        !names.contains(&"pattern_fly".to_string()),
+        "pattern_fly should have been displaced, got {:?}",
+        names
+    );
+}

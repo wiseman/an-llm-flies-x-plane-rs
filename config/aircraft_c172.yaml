@@ -11,6 +11,8 @@ final_speed_kt: 62
 vapp_kt: 62
 vref_kt: 61
 vso_landing_kt: 48
+vbg_kt: 68
+glide_ratio: 9.0
 pattern:
   altitude_agl_ft: 1000
   downwind_offset_ft: 6000
