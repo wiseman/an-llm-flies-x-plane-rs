@@ -229,6 +229,12 @@ pub enum VerticalMode {
     /// Ground taxi: `GroundSpeedController` drives throttle and brake from
     /// `target_speed_kt`. Elevator is held to zero pitch.
     Taxi,
+    /// Pitch-for-airspeed (PI on `target_speed_kt - ias_kt`). No altitude
+    /// term, no VS damping. Throttle is left to whatever the profile's
+    /// `throttle_limit` clamps to. The right answer when there is no
+    /// thrust authority — engine-out / dead-stick — where the FAA rule
+    /// is "pitch for best glide first, geometry second."
+    PitchForAirspeed,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]

@@ -64,6 +64,21 @@ pub fn geodetic_offset_ft(lat_deg: f64, lon_deg: f64, georef: GeoReference) -> V
     Vec2::new(east_ft, north_ft)
 }
 
+/// Inverse of `geodetic_offset_ft`: convert an east/north offset in feet
+/// from a `GeoReference` anchor back into (lat, lon) in degrees. Shares
+/// the same flat-earth assumption; good for the sub-100 nm scales we
+/// operate on.
+pub fn latlon_from_offset_ft(offset_ft: Vec2, georef: GeoReference) -> (f64, f64) {
+    let anchor_lat_rad = georef.threshold_lat_deg.to_radians();
+    let lat_delta_rad = offset_ft.y / EARTH_RADIUS_FT;
+    let new_lat_rad = anchor_lat_rad + lat_delta_rad;
+    let mean_lat_rad = (anchor_lat_rad + new_lat_rad) * 0.5;
+    let cos_mean = mean_lat_rad.cos().max(1e-9);
+    let lon_delta_rad = offset_ft.x / (EARTH_RADIUS_FT * cos_mean);
+    let new_lon_rad = georef.threshold_lon_deg.to_radians() + lon_delta_rad;
+    (new_lat_rad.to_degrees(), new_lon_rad.to_degrees())
+}
+
 pub fn coerce_scalar(value: &Value) -> f64 {
     match value {
         Value::Number(n) => n.as_f64().unwrap_or(0.0),
@@ -243,6 +258,69 @@ pub fn probe_bootstrap_sample(host: &str, port: u16, timeout_secs: u64) -> Resul
         alt_agl_ft: values[Y_AGL_M.name] * M_TO_FT,
         on_ground: values[ON_GROUND_0.name] >= 0.5,
     })
+}
+
+/// POST `/api/v3/flight` with an `lle_air_start`. Spawns the C172 SP at
+/// the given lat/lon/elevation/heading/speed with engines running.
+/// Used by the live test binaries; the live pilot uses
+/// `probe_bootstrap_sample` against an existing flight instead.
+pub fn post_air_start(
+    host: &str,
+    port: u16,
+    lat_deg: f64,
+    lon_deg: f64,
+    elevation_m: f64,
+    heading_true_deg: f64,
+    speed_mps: f64,
+) -> Result<()> {
+    let url = format!("http://{host}:{port}/api/v3/flight");
+    let body = serde_json::json!({
+        "data": {
+            "aircraft": {
+                "path": "Aircraft/Laminar Research/Cessna 172 SP/Cessna_172SP.acf"
+            },
+            "lle_air_start": {
+                "latitude": lat_deg,
+                "longitude": lon_deg,
+                "elevation_in_meters": elevation_m,
+                "heading_true": heading_true_deg,
+                "speed_in_meters_per_second": speed_mps,
+                "pitch_in_degrees": 0.0
+            },
+            "engine_status": {"all_engines": {"running": true}}
+        }
+    });
+    let resp = ureq::post(&url)
+        .set("Content-Type", "application/json")
+        .send_string(&body.to_string())
+        .map_err(|e| anyhow!("X-Plane flight POST failed: {e}"))?;
+    if resp.status() / 100 != 2 {
+        bail!(
+            "X-Plane returned {} on flight init: {}",
+            resp.status(),
+            resp.into_string().unwrap_or_default()
+        );
+    }
+    Ok(())
+}
+
+/// Resolve a named X-Plane command and fire it once.
+pub fn activate_command(host: &str, port: u16, name: &str) -> Result<()> {
+    let lookup = format!("http://{host}:{port}/api/v3/commands");
+    let resp = ureq::get(&lookup)
+        .query("filter[name]", name)
+        .call()
+        .map_err(|e| anyhow!("command lookup for {name:?} failed: {e}"))?;
+    let payload: serde_json::Value = resp.into_json()?;
+    let id = payload["data"][0]["id"]
+        .as_i64()
+        .ok_or_else(|| anyhow!("command {name:?} not found"))?;
+    let url = format!("http://{host}:{port}/api/v3/command/{id}/activate");
+    ureq::post(&url)
+        .set("Content-Type", "application/json")
+        .send_string(r#"{"duration":0}"#)
+        .map_err(|e| anyhow!("command activate for {name:?} failed: {e}"))?;
+    Ok(())
 }
 
 // -------- bridge --------

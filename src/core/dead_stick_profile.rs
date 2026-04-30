@@ -32,7 +32,7 @@ use crate::core::profiles::{
 use crate::core::safety_monitor::SafetyMonitor;
 use crate::guidance::lateral::L1PathFollower;
 use crate::guidance::pattern_manager::{
-    build_pattern_geometry, glidepath_target_altitude_ft_default, PatternGeometry,
+    build_pattern_geometry, PatternGeometry,
 };
 use crate::guidance::route_manager::RouteManager;
 use crate::guidance::runway_geometry::RunwayFrame;
@@ -41,20 +41,49 @@ use crate::types::{
     LateralMode, TrafficSide, Vec2, VerticalMode, Waypoint,
 };
 
-/// Range to the Low Key fix (in feet) at which Descent advances to
-/// PatternEntry. Mirrors the 2500 ft gate the standard pattern-entry
-/// transition uses.
-const LOW_KEY_CAPTURE_RADIUS_FT: f64 = 2500.0;
+// FAA Power-Off 180. Three fixes: HighKey overhead the aim-point at
+// HIGH_KEY_AGL_FT, a descending spiral toward the pattern side, then
+// LowKey abeam the aim-point at pattern altitude — from there a short
+// tight Downwind/Base/Final to the threshold.
+
+const DEAD_STICK_HIGH_KEY_AGL_FT: f64 = 1500.0;
+
+/// Spiral exits to Downwind once below this AGL — pattern path from
+/// LowKey to threshold (~8500 ft at the current offset, mixed clean/
+/// flap config) bleeds ~1200 ft of altitude, so this exit altitude
+/// delivers the aircraft to the threshold with little margin either way.
+const SPIRAL_EXIT_AGL_FT: f64 = 1500.0;
+
+/// Turn radius for a 30° bank at vbg ≈ V²/(g·tan bank).
+const SPIRAL_RADIUS_FT: f64 = 750.0;
+
+/// Engine-out cap on bank — 30°. Steeper turns near vbg eat into stall
+/// margin, and there's no power to recover. Clamps the safety-monitor's
+/// per-phase limit (enroute 45°, pattern 30°, final 20°) so the
+/// enroute value never applies here.
+const DEAD_STICK_MAX_BANK_DEG: f64 = 30.0;
+
+/// Arc-length lookahead for orbit following.
+const SPIRAL_LOOKAHEAD_FT: f64 = 600.0;
+
+const HIGH_KEY_CAPTURE_RADIUS_FT: f64 = 1500.0;
+
+/// Lateral pattern offset for the dead-stick downwind + base legs. The
+/// 30° base-turn radius is ~750 ft (1500 ft diameter); 2500 ft offset
+/// leaves ~1000 ft of perpendicular margin so the turn-to-final rolls
+/// out on the centerline rather than overshooting it.
+pub const DEAD_STICK_PATTERN_OFFSET_FT: f64 = 2500.0;
 
 /// Final-approach AGL below which we deploy full flaps (vs 20° above).
-/// Late deployment preserves glide range while still letting the
-/// aircraft slow to vref before flare.
-const LATE_FLAP_AGL_FT: f64 = 300.0;
+/// Higher than the powered-pattern value: dead-stick needs the full
+/// flap drag for most of Final to fit the altitude budget.
+const LATE_FLAP_AGL_FT: f64 = 700.0;
 
-/// Minimum fraction of the base leg the aircraft must traverse before
-/// we'll release the turn-final clearance. Prevents mode_manager from
-/// firing Base→Final before the aircraft has enough lateral motion to
-/// be honestly "established."
+/// Final-approach AGL at which the speed target steps from vbg to vref.
+/// Above this we keep best glide so the runway stays reachable; below
+/// it the field is made and we can trade speed for touchdown attitude.
+const SHORT_FINAL_AGL_FT: f64 = 300.0;
+
 const BASE_LEG_FRACTION_GATE: f64 = 0.5;
 
 pub struct DeadStickLandingProfile {
@@ -66,14 +95,16 @@ pub struct DeadStickLandingProfile {
     pub lateral_guidance: L1PathFollower,
     pub route_manager: RouteManager,
     pub phase: FlightPhase,
-    /// Reason from `SafetyMonitor::evaluate` if a go-around would have
-    /// been triggered. We suppress the go-around (powerless aircraft
-    /// can't climb) but keep the reason for telemetry.
     pub last_safety_reason: Option<String>,
-    /// Runway-frame coordinates of the Low Key fix.
+    /// Runway-frame coords of the Low Key fix (abeam touchdown on the
+    /// pattern side). Cached for `low_key_runway_ft()`.
     low_key_runway_ft: Vec2,
-    /// World-frame coordinates of the Low Key fix (cached).
-    low_key_world_ft: Vec2,
+    /// World-frame coords of fixed dead-stick fixes — derived from
+    /// the runway frame, which is constant for the profile's lifetime.
+    /// Cached so the per-tick guidance and capture predicates don't
+    /// recompute `to_world_frame` calls every cycle.
+    high_key_world_ft: Vec2,
+    spiral_center_world_ft: Vec2,
 }
 
 impl DeadStickLandingProfile {
@@ -82,20 +113,34 @@ impl DeadStickLandingProfile {
         runway_frame: RunwayFrame,
         state: &AircraftState,
     ) -> Self {
-        let downwind_offset_ft = config.pattern.downwind_offset_ft;
-        let pattern = build_pattern_geometry(&runway_frame, downwind_offset_ft, 0.0, 0.0);
-
-        // Low Key fix in runway frame: abeam the touchdown aim point on the
-        // pattern side at pattern altitude. y is the signed downwind offset.
-        let low_key_runway_ft = Vec2::new(
-            runway_frame.touchdown_runway_x_ft(),
-            pattern.downwind_y_ft,
+        let pattern = build_pattern_geometry(
+            &runway_frame,
+            DEAD_STICK_PATTERN_OFFSET_FT,
+            0.0,
+            0.0,
         );
+
+        let low_key_runway_ft =
+            Vec2::new(runway_frame.touchdown_runway_x_ft(), pattern.downwind_y_ft);
         let low_key_world_ft = runway_frame.to_world_frame(low_key_runway_ft);
 
-        // Route with a single "pattern_entry_start" waypoint at Low Key —
-        // matches the name `ModeManager` looks for so the standard
-        // PatternEntry → Downwind transition predicates work.
+        let high_key_world_ft =
+            runway_frame.to_world_frame(Vec2::new(runway_frame.touchdown_runway_x_ft(), 0.0));
+
+        // Spiral center sits between LowKey and centerline, offset
+        // SPIRAL_RADIUS_FT toward centerline so one tangent of the
+        // circle is at LowKey heading downwind direction.
+        let side_sign = match runway_frame.runway.traffic_side {
+            TrafficSide::Left => -1.0,
+            TrafficSide::Right => 1.0,
+        };
+        let spiral_center_world_ft = runway_frame.to_world_frame(Vec2::new(
+            runway_frame.touchdown_runway_x_ft(),
+            side_sign * DEAD_STICK_PATTERN_OFFSET_FT - side_sign * SPIRAL_RADIUS_FT,
+        ));
+
+        // The "pattern_entry_start" name matches what ModeManager looks
+        // for so the standard PatternEntry → Downwind predicates fire.
         let route_manager = RouteManager::new(vec![Waypoint {
             name: "pattern_entry_start".to_string(),
             position_ft: low_key_world_ft,
@@ -113,16 +158,19 @@ impl DeadStickLandingProfile {
             phase,
             last_safety_reason: None,
             low_key_runway_ft,
-            low_key_world_ft,
+            high_key_world_ft,
+            spiral_center_world_ft,
             config,
             runway_frame,
         }
     }
 
     fn guidance_for_phase(&mut self, state: &AircraftState, phase: FlightPhase) -> GuidanceTargets {
-        let bank_limit = self.safety_monitor.bank_limit_deg(phase);
+        let bank_limit = self
+            .safety_monitor
+            .bank_limit_deg(phase)
+            .min(DEAD_STICK_MAX_BANK_DEG);
         let perf = &self.config.performance;
-        let field_elev_ft = self.config.airport.field_elevation_ft;
         let course = self.runway_frame.runway.course_deg;
         let side_sign = match self.runway_frame.runway.traffic_side {
             TrafficSide::Left => -1.0,
@@ -131,63 +179,58 @@ impl DeadStickLandingProfile {
 
         match phase {
             FlightPhase::Descent => {
-                // Glide-to-Low-Key. Track the world-frame Low Key waypoint
-                // via L1's direct_to. Vertical: TECS holds vbg via pitch
-                // (throttle pinned to 0 means no climb authority, so the
-                // energy split goes entirely into speed control). Aim the
-                // altitude target at the field — TECS will see "above
-                // target", quit trying to climb, and let pitch hold vbg.
+                // Glide direct to High Key. Arrival heading is whatever
+                // the start position dictates; the spiral handles
+                // downwind alignment.
                 let waypoint = Waypoint {
-                    name: "low_key".to_string(),
-                    position_ft: self.low_key_world_ft,
-                    altitude_ft: Some(self.config.pattern_altitude_msl_ft()),
+                    name: "high_key".to_string(),
+                    position_ft: self.high_key_world_ft,
+                    altitude_ft: Some(
+                        self.config.airport.field_elevation_ft + DEAD_STICK_HIGH_KEY_AGL_FT,
+                    ),
                 };
                 let (desired_track, bank_cmd) =
                     self.lateral_guidance.direct_to(state, &waypoint, bank_limit);
                 GuidanceTargets {
                     lateral_mode: LateralMode::TrackHold,
-                    vertical_mode: VerticalMode::Tecs,
+                    vertical_mode: VerticalMode::PitchForAirspeed,
                     target_bank_deg: Some(bank_cmd),
                     target_track_deg: Some(desired_track),
                     target_heading_deg: Some(desired_track),
                     target_waypoint: Some(waypoint),
-                    target_altitude_ft: Some(field_elev_ft),
                     target_speed_kt: Some(perf.vbg_kt),
                     throttle_limit: Some((0.0, 0.0)),
                     flaps_cmd: Some(0),
-                    tecs_phase_override: Some(FlightPhase::Descent),
                     ..Default::default()
                 }
             }
             FlightPhase::PatternEntry => {
-                // Direct-to the join point at pattern altitude. Throttle is
-                // pinned at 0 so the aircraft can't actually hold pattern
-                // altitude — it will glide down to whatever altitude vbg
-                // permits. Setting the target near or above current alt
-                // (rather than at the field) keeps TECS from commanding a
-                // dive: drag at vbg roughly balances gravity-along-path,
-                // so pitch settles at the natural glide angle.
-                let join_world = self
-                    .runway_frame
-                    .to_world_frame(self.pattern.join_point_runway_ft);
-                let pattern_alt = self.config.pattern_altitude_msl_ft();
-                let join_waypoint = Waypoint {
-                    name: "pattern_join".to_string(),
-                    position_ft: join_world,
-                    altitude_ft: Some(pattern_alt),
+                // Orbit a center positioned so one tangent of the
+                // circle is at LowKey on downwind heading; circling
+                // (CCW for left traffic) bleeds altitude until the
+                // exit predicate fires.
+                let target = orbit_target_world_ft(
+                    state.position_ft,
+                    self.spiral_center_world_ft,
+                    SPIRAL_RADIUS_FT,
+                    SPIRAL_LOOKAHEAD_FT,
+                    /* ccw = */ side_sign < 0.0,
+                );
+                let waypoint = Waypoint {
+                    name: "spiral_target".to_string(),
+                    position_ft: target,
+                    altitude_ft: None,
                 };
-                let (desired_track, bank_cmd) = self
-                    .lateral_guidance
-                    .direct_to(state, &join_waypoint, bank_limit);
+                let (desired_track, bank_cmd) =
+                    self.lateral_guidance.direct_to(state, &waypoint, bank_limit);
                 let display_heading = wrap_degrees_360(course + 180.0);
                 GuidanceTargets {
-                    lateral_mode: LateralMode::PathFollow,
-                    vertical_mode: VerticalMode::Tecs,
+                    lateral_mode: LateralMode::TrackHold,
+                    vertical_mode: VerticalMode::PitchForAirspeed,
                     target_bank_deg: Some(bank_cmd),
                     target_track_deg: Some(desired_track),
                     target_heading_deg: Some(display_heading),
-                    target_waypoint: Some(join_waypoint),
-                    target_altitude_ft: Some(pattern_alt),
+                    target_waypoint: Some(waypoint),
                     target_speed_kt: Some(perf.vbg_kt),
                     throttle_limit: Some((0.0, 0.0)),
                     flaps_cmd: Some(0),
@@ -199,15 +242,13 @@ impl DeadStickLandingProfile {
                 let (desired_track, bank_cmd) =
                     self.lateral_guidance.follow_leg(state, leg, bank_limit);
                 let display_heading = wrap_degrees_360(course + 180.0);
-                let pattern_alt = self.config.pattern_altitude_msl_ft();
                 GuidanceTargets {
                     lateral_mode: LateralMode::PathFollow,
-                    vertical_mode: VerticalMode::Tecs,
+                    vertical_mode: VerticalMode::PitchForAirspeed,
                     target_bank_deg: Some(bank_cmd),
                     target_track_deg: Some(desired_track),
                     target_heading_deg: Some(display_heading),
                     target_path: Some(leg),
-                    target_altitude_ft: Some(pattern_alt),
                     target_speed_kt: Some(perf.vbg_kt),
                     throttle_limit: Some((0.0, 0.0)),
                     flaps_cmd: Some(0),
@@ -218,27 +259,15 @@ impl DeadStickLandingProfile {
                 let leg = self.pattern.base_leg;
                 let (desired_track, bank_cmd) =
                     self.lateral_guidance.follow_leg(state, leg, bank_limit);
-                // Track the 3° glidepath altitude at current x throughout
-                // base. Earlier dead-stick base used pattern_altitude as a
-                // ceiling — that cued TECS to climb back up when dead-stick
-                // arrived low, draining airspeed in the turn. Tracking the
-                // glidepath instead keeps the aircraft on a flyable
-                // trajectory whether it arrives high or low.
-                let target_alt = glidepath_target_altitude_ft_default(
-                    &self.runway_frame,
-                    state.runway_x_ft.unwrap_or(self.pattern.base_turn_x_ft),
-                    field_elev_ft,
-                );
                 let display_heading = wrap_degrees_360(course - side_sign * 90.0);
                 GuidanceTargets {
                     lateral_mode: LateralMode::PathFollow,
-                    vertical_mode: VerticalMode::Tecs,
+                    vertical_mode: VerticalMode::PitchForAirspeed,
                     target_bank_deg: Some(bank_cmd),
                     target_track_deg: Some(desired_track),
                     target_heading_deg: Some(display_heading),
                     target_path: Some(leg),
-                    target_altitude_ft: Some(target_alt),
-                    target_speed_kt: Some((perf.vbg_kt - 3.0).max(perf.vref_kt)),
+                    target_speed_kt: Some(perf.vbg_kt),
                     throttle_limit: Some((0.0, 0.0)),
                     flaps_cmd: Some(10),
                     ..Default::default()
@@ -248,27 +277,30 @@ impl DeadStickLandingProfile {
                 let leg = self.pattern.final_leg;
                 let (desired_track, bank_cmd) =
                     self.lateral_guidance.follow_leg(state, leg, bank_limit);
-                let target_alt = glidepath_target_altitude_ft_default(
-                    &self.runway_frame,
-                    state.runway_x_ft.unwrap_or(-3000.0),
-                    field_elev_ft,
-                );
                 let glidepath = Glidepath {
                     slope_deg: 3.0,
                     threshold_crossing_height_ft: 0.0,
                     aimpoint_ft_from_threshold: self.runway_frame.touchdown_runway_x_ft(),
                 };
-                // Late flap deployment to preserve glide.
+                // Hold best glide all the way down final until short
+                // final, then step to vref for the flare. Late flap
+                // deployment matches: 20° while we're still protecting
+                // glide range, full flaps once the runway is made.
+                let on_short_final = state.alt_agl_ft <= SHORT_FINAL_AGL_FT;
+                let target_speed = if on_short_final {
+                    perf.vref_kt
+                } else {
+                    perf.vbg_kt
+                };
                 let flaps = if state.alt_agl_ft > LATE_FLAP_AGL_FT { 20 } else { 30 };
                 GuidanceTargets {
                     lateral_mode: LateralMode::PathFollow,
-                    vertical_mode: VerticalMode::GlidepathTrack,
+                    vertical_mode: VerticalMode::PitchForAirspeed,
                     target_bank_deg: Some(bank_cmd),
                     target_track_deg: Some(desired_track),
                     target_heading_deg: Some(course),
                     target_path: Some(leg),
-                    target_altitude_ft: Some(target_alt),
-                    target_speed_kt: Some(perf.vref_kt),
+                    target_speed_kt: Some(target_speed),
                     glidepath: Some(glidepath),
                     throttle_limit: Some((0.0, 0.0)),
                     flaps_cmd: Some(flaps),
@@ -355,6 +387,23 @@ impl DeadStickLandingProfile {
     pub fn low_key_runway_ft(&self) -> Vec2 {
         self.low_key_runway_ft
     }
+
+    fn captured_at_high_key(&self, state: &AircraftState) -> bool {
+        state.position_ft.distance_to(self.high_key_world_ft) <= HIGH_KEY_CAPTURE_RADIUS_FT
+    }
+
+    /// Spiral exit predicate: AGL has bled to pattern altitude AND
+    /// heading is roughly aligned with downwind direction (so the
+    /// transition doesn't dump the aircraft mid-turn pointed the wrong
+    /// way).
+    fn ready_to_exit_spiral(&self, state: &AircraftState) -> bool {
+        if state.alt_agl_ft > SPIRAL_EXIT_AGL_FT {
+            return false;
+        }
+        let downwind_heading = wrap_degrees_360(self.runway_frame.runway.course_deg + 180.0);
+        let track_err = wrap_degrees_180(state.track_deg - downwind_heading).abs();
+        track_err <= 30.0
+    }
 }
 
 impl GuidanceProfile for DeadStickLandingProfile {
@@ -369,33 +418,32 @@ impl GuidanceProfile for DeadStickLandingProfile {
     fn contribute(&mut self, state: &AircraftState, _dt: f64) -> ProfileTick {
         let previous_phase = self.phase;
 
-        // Suppress go-around: a powerless aircraft can't climb. Capture
-        // the reason for telemetry, then zero the request before passing
-        // into the mode manager.
+        // Suppress go-around: powerless aircraft can't climb. Stash
+        // the reason for telemetry; zero the request.
         let mut safety = self.safety_monitor.evaluate(state, self.phase);
         if safety.request_go_around {
             self.last_safety_reason = safety.reason.clone();
             safety.request_go_around = false;
         }
 
-        // Descent → PatternEntry: handled here (not by ModeManager) because
-        // the standard transition requires altitude convergence which a
-        // pure glide can't guarantee. We advance purely on horizontal
-        // range to the Low Key fix.
         if self.phase == FlightPhase::Descent {
-            let dist_to_low_key = state.position_ft.distance_to(self.low_key_world_ft);
-            if dist_to_low_key <= LOW_KEY_CAPTURE_RADIUS_FT {
-                self.phase = FlightPhase::PatternEntry;
+            if self.captured_at_high_key(state) {
+                self.phase = if state.alt_agl_ft > SPIRAL_EXIT_AGL_FT {
+                    FlightPhase::PatternEntry
+                } else {
+                    FlightPhase::Downwind
+                };
+            }
+        } else if self.phase == FlightPhase::PatternEntry {
+            if self.ready_to_exit_spiral(state) {
+                self.phase = FlightPhase::Downwind;
             }
         } else {
-            // Dead-stick flies on geometry, not on the adaptive
-            // ground-speed-based base-turn relief mode_manager applies.
-            // That relief tightens the pattern when gs is well below
-            // `downwind_speed_kt` — and dead-stick is *always* below it
-            // (we're at vbg with no throttle), so the relief saturates
-            // and mode_manager fires base immediately. Gate the turns
-            // ourselves: only release the corresponding clearance when
-            // the aircraft is physically past the geometry trigger.
+            // Mode_manager's adaptive base-turn relief assumes powered
+            // flight: it tightens the pattern when gs is below
+            // downwind_speed_kt, but dead-stick is *always* below it,
+            // so the relief saturates and base would fire immediately.
+            // Gate the turns ourselves on the geometry trigger.
             let mut clearances = PatternClearances::default();
             let rx = state.runway_x_ft.unwrap_or(0.0);
             // Base turn: physically past the nominal base-turn x.
@@ -435,8 +483,8 @@ impl GuidanceProfile for DeadStickLandingProfile {
 
         let guidance = self.guidance_for_phase(state, self.phase);
         let mut guidance = self.safety_monitor.apply_limits(guidance, self.phase);
-        // Belt-and-suspenders: ensure throttle stays clamped at zero even
-        // if a sub-helper forgot to set it.
+        // Belt-and-suspenders: every guidance branch already sets this,
+        // but a missing throttle clamp here would re-enable the engine.
         guidance.throttle_limit = Some((0.0, 0.0));
 
         let hand_off = post_landing_handoff(self.phase, previous_phase, state.gs_kt);
@@ -468,19 +516,24 @@ impl GuidanceProfile for DeadStickLandingProfile {
         };
         match self.phase {
             FlightPhase::Descent => {
-                let dist_ft = state.position_ft.distance_to(self.low_key_world_ft);
+                let dist_to_high_key = state.position_ft.distance_to(self.high_key_world_ft);
                 Some(TransitionHint {
                     next_phase: FlightPhase::PatternEntry,
                     condition_text: format!(
-                        "within {:.0} ft of low-key fix (now {:.0})",
-                        LOW_KEY_CAPTURE_RADIUS_FT, dist_ft
+                        "within {:.0} ft of high-key fix (now {:.0})",
+                        HIGH_KEY_CAPTURE_RADIUS_FT, dist_to_high_key
                     ),
-                    eta_s: eta_from((dist_ft - LOW_KEY_CAPTURE_RADIUS_FT).max(0.0)),
+                    eta_s: eta_from(
+                        (dist_to_high_key - HIGH_KEY_CAPTURE_RADIUS_FT).max(0.0),
+                    ),
                 })
             }
             FlightPhase::PatternEntry => Some(TransitionHint {
                 next_phase: FlightPhase::Downwind,
-                condition_text: "join point reached on pattern side".to_string(),
+                condition_text: format!(
+                    "spiral exit: AGL ≤ {:.0} ft and heading toward downwind (now AGL {:.0})",
+                    SPIRAL_EXIT_AGL_FT, state.alt_agl_ft
+                ),
                 eta_s: None,
             }),
             FlightPhase::Downwind => {
@@ -543,6 +596,33 @@ impl GuidanceProfile for DeadStickLandingProfile {
             _ => None,
         }
     }
+}
+
+/// Lyapunov-style orbit target: blends "head inward toward the circle"
+/// and "tangent along the circle" using `tanh(radial_error / radius)` —
+/// monotonic, never pulls the aircraft the wrong way around.
+fn orbit_target_world_ft(
+    aircraft_pos_ft: Vec2,
+    center_ft: Vec2,
+    radius_ft: f64,
+    lookahead_ft: f64,
+    ccw: bool,
+) -> Vec2 {
+    let radial = aircraft_pos_ft - center_ft;
+    let radial_len = radial.length().max(1.0);
+    let radial_unit = radial * (1.0 / radial_len);
+    // Rotate radial 90° (CCW for ccw orbit, CW otherwise) to get the
+    // tangent direction at the aircraft's projection on the circle.
+    let tangent = if ccw {
+        Vec2::new(-radial_unit.y, radial_unit.x)
+    } else {
+        Vec2::new(radial_unit.y, -radial_unit.x)
+    };
+    let inward = Vec2::new(-radial_unit.x, -radial_unit.y);
+    let inward_weight = ((radial_len - radius_ft) / radius_ft.max(1.0)).tanh();
+    let tangent_weight = (1.0 - inward_weight.abs()).max(0.0);
+    let desired_dir = (tangent * tangent_weight + inward * inward_weight).normalized();
+    aircraft_pos_ft + desired_dir * lookahead_ft.max(1.0)
 }
 
 /// Pick the entry phase for a fresh dead-stick engagement based on the

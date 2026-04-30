@@ -25,7 +25,7 @@ use crate::sim::datarefs::{
 };
 use crate::sim::simple_dynamics::DynamicsState;
 use crate::sim::xplane_bridge::{
-    flap_ratio_to_setting, flap_setting_to_ratio, GeoReference, EARTH_RADIUS_FT, M_TO_FT,
+    flap_ratio_to_setting, flap_setting_to_ratio, latlon_from_offset_ft, GeoReference, M_TO_FT,
 };
 use crate::types::Vec2;
 
@@ -115,18 +115,8 @@ impl SimpleToolBridge {
     }
 
     /// Feet (east, north) offset from the georef anchor → geodetic
-    /// (lat, lon) degrees. Inverse of `geodetic_offset_ft` in
-    /// `xplane_bridge.rs`. Shares the same flat-earth assumption; good
-    /// for the sub-100 nm scales the eval operates on.
     fn offset_to_latlon(&self, offset_ft: Vec2) -> (f64, f64) {
-        let anchor_lat_rad = self.georef.threshold_lat_deg.to_radians();
-        let lat_delta_rad = offset_ft.y / EARTH_RADIUS_FT;
-        let new_lat_rad = anchor_lat_rad + lat_delta_rad;
-        let mean_lat_rad = (anchor_lat_rad + new_lat_rad) * 0.5;
-        let cos_mean = mean_lat_rad.cos().max(1e-9);
-        let lon_delta_rad = offset_ft.x / (EARTH_RADIUS_FT * cos_mean);
-        let new_lon_rad = self.georef.threshold_lon_deg.to_radians() + lon_delta_rad;
-        (new_lat_rad.to_degrees(), new_lon_rad.to_degrees())
+        latlon_from_offset_ft(offset_ft, self.georef)
     }
 }
 

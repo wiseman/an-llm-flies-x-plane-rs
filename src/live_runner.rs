@@ -13,7 +13,7 @@ use crate::config::{AirportConfig, ConfigBundle};
 use crate::core::mission_manager::PilotCore;
 use crate::llm::conversation::IncomingMessage;
 use crate::sim::xplane_bridge::{BootstrapSample, M_TO_FT};
-use crate::types::{FlightPhase, Runway};
+use crate::types::{AircraftState, FlightPhase, Runway};
 
 /// A trivial monotonic clock abstraction so tests can advance virtual time.
 pub trait Clock: Send + Sync {
@@ -402,6 +402,7 @@ use crossbeam_channel::unbounded;
 use parking_lot::Mutex as PLMutex;
 
 use crate::bus::FileLog;
+use crate::core::dead_stick_profile::DeadStickLandingProfile;
 use crate::core::profiles::PatternFlyProfile;
 use crate::llm::anthropic::AnthropicBackend;
 use crate::llm::backend::{LlmBackend, LlmProvider, ReasoningEffort};
@@ -955,8 +956,23 @@ fn engage_startup_profile(
                 .engage_profile(Box::new(PatternFlyProfile::new(config.clone(), rf)));
             Ok(())
         }
+        "dead_stick" | "dead_stick_landing" => {
+            // engage runs before the first update tick, so seed
+            // decide_entry_phase with a synthetic state — entry phase
+            // resolves to Descent for any reasonable air-start.
+            let state = AircraftState::synthetic_default();
+            let rf = pilot.lock().runway_frame.clone();
+            pilot
+                .lock()
+                .engage_profile(Box::new(DeadStickLandingProfile::new(
+                    config.clone(),
+                    rf,
+                    &state,
+                )));
+            Ok(())
+        }
         other => Err(anyhow::anyhow!(
-            "Unknown --engage-profile value {:?}; expected one of: idle, pattern_fly",
+            "Unknown --engage-profile value {:?}; expected one of: idle, pattern_fly, dead_stick",
             other
         )),
     }

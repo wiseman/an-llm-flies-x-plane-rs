@@ -15,6 +15,14 @@ path = "src/main.rs"
 name = "sim-pilot-transcript"
 path = "src/bin/transcript.rs"
 
+[[bin]]
+name = "xplane-dead-stick-test"
+path = "src/bin/xplane_dead_stick_test.rs"
+
+[[bin]]
+name = "xplane-measure-flap-drag"
+path = "src/bin/xplane_measure_flap_drag.rs"
+
 [lib]
 name = "xplane_pilot"
 path = "src/lib.rs"

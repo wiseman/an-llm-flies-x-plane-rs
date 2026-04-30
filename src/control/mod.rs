@@ -3,5 +3,6 @@ pub mod centerline_rollout;
 pub mod ground_speed;
 pub mod nose_wheel;
 pub mod pid;
+pub mod pitch_for_airspeed;
 pub mod pitch_hold;
 pub mod tecs_lite;

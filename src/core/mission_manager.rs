@@ -14,6 +14,7 @@ use crate::control::bank_hold::{BankController, CoordinationController};
 use crate::control::centerline_rollout::CenterlineRolloutController;
 use crate::control::ground_speed::GroundSpeedController;
 use crate::control::nose_wheel::NoseWheelController;
+use crate::control::pitch_for_airspeed::PitchForAirspeedController;
 use crate::control::pitch_hold::PitchController;
 use crate::control::tecs_lite::TECSLite;
 use crate::core::profiles::{
@@ -183,6 +184,7 @@ pub struct PilotCore {
     pub pitch_controller: PitchController,
     pub rollout_controller: CenterlineRolloutController,
     pub tecs: TECSLite,
+    pub pitch_for_airspeed: PitchForAirspeedController,
     pub flare_controller: FlareController,
     pub nose_wheel_controller: NoseWheelController,
     pub ground_speed_controller: GroundSpeedController,
@@ -215,6 +217,7 @@ impl PilotCore {
             pitch_controller,
             rollout_controller: CenterlineRolloutController::new(),
             tecs,
+            pitch_for_airspeed: PitchForAirspeedController::new(),
             flare_controller: flare,
             nose_wheel_controller: NoseWheelController::new(),
             ground_speed_controller: GroundSpeedController::new(),
@@ -575,6 +578,12 @@ impl PilotCore {
                 guidance.target_speed_kt.unwrap_or(state.ias_kt) - state.ias_kt,
             );
             (pitch_cmd, 0.0)
+        } else if guidance.vertical_mode == VerticalMode::PitchForAirspeed {
+            let target = guidance.target_speed_kt.unwrap_or(state.ias_kt);
+            let pitch_cmd = self
+                .pitch_for_airspeed
+                .update(target, state.ias_kt, state.dt);
+            (pitch_cmd, throttle_limit.1)
         } else {
             (guidance.target_pitch_deg.unwrap_or(0.0), throttle_limit.1)
         };

@@ -106,19 +106,34 @@ impl SimpleAircraftModel {
         state.q_rad_s = pitch_rate_deg_s.to_radians();
 
         let thrust = 10.5 * state.throttle_pos;
-        // Drag scales with throttle. The base coefficient (0.085 kt/s per
-        // kt of IAS) was originally tuned for powered-flight equilibrium —
-        // at full throttle it balances thrust at climb/cruise speeds.
-        // When the engine is at idle the propeller windmills rather than
-        // driving the aircraft, contributing far less retarding force, so
-        // drag should drop proportionally. Without the scale, throttle =
-        // 0 produces ~6 kt/s deceleration at vbg — IAS decays to zero in
-        // ~15 s, no glide possible. With (0.3 + 0.7·throttle), a steady
-        // dead-stick glide is reachable: drag at vbg ≈ 1.7 kt/s, balanced
-        // by the gravity-along-flight-path term at ≈ −5° flight path
-        // (close to the published C172 9:1 ratio).
-        let drag_throttle_scale = 0.3 + 0.7 * state.throttle_pos.clamp(0.0, 1.0);
-        let drag = 0.085 * state.ias_kt * drag_throttle_scale
+        // Drag = parasitic (∝ IAS, scaled by throttle and flap) +
+        // induced (∝ 1/IAS, throttle-independent — set by aircraft
+        // weight, not engine state). The coefficients balance two
+        // operating regimes: powered cruise (throttle 1, IAS ~110) and
+        // engine-off glide. The parasitic-throttle scale preserves the
+        // original powered-flight equilibrium; induced is added on top
+        // and tuned (with the flap multipliers) against X-Plane
+        // settled-glide measurements:
+        //     IAS 68 flap  0  → drag 2.35 kt/s  (L/D 9.0)
+        //     IAS 61 flap  0  → drag 2.38 kt/s  (L/D 9.2)
+        //     IAS 68 flap 30  → drag 3.41 kt/s  (L/D 6.0)
+        //     IAS 61 flap 30  → drag 3.21 kt/s  (L/D 6.6)
+        const PARA_DRAG_K: f64 = 0.085;
+        const PARA_DRAG_IDLE_FRACTION: f64 = 0.3;
+        const INDUCED_DRAG_K: f64 = 42.0;
+        const INDUCED_IAS_FLOOR: f64 = 40.0;
+        let para_throttle_scale = PARA_DRAG_IDLE_FRACTION
+            + (1.0 - PARA_DRAG_IDLE_FRACTION) * state.throttle_pos.clamp(0.0, 1.0);
+        let flap_drag_factor = match state.flap_index {
+            i if i <= 0 => 1.00,
+            i if i <= 10 => 1.18,
+            i if i <= 20 => 1.40,
+            _ => 1.62,
+        };
+        let parasitic_drag = PARA_DRAG_K * state.ias_kt * para_throttle_scale * flap_drag_factor;
+        let induced_drag = INDUCED_DRAG_K / state.ias_kt.max(INDUCED_IAS_FLOOR);
+        let drag = parasitic_drag
+            + induced_drag
             + 0.025 * state.roll_deg.abs()
             + 0.1 * state.pitch_deg.max(0.0);
         let brake = commands.brakes * 24.0;

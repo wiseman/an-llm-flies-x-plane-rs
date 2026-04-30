@@ -14,7 +14,9 @@
 //! live in X-Plane.
 
 use xplane_pilot::config::{load_default_config_bundle, ConfigBundle};
-use xplane_pilot::core::dead_stick_profile::DeadStickLandingProfile;
+use xplane_pilot::core::dead_stick_profile::{
+    DeadStickLandingProfile, DEAD_STICK_PATTERN_OFFSET_FT,
+};
 use xplane_pilot::core::mission_manager::PilotCore;
 use xplane_pilot::guidance::pattern_manager::build_pattern_geometry;
 use xplane_pilot::guidance::runway_geometry::RunwayFrame;
@@ -32,6 +34,12 @@ struct DeadStickResult {
     /// Catches a profile bug that lets throttle leak above zero.
     throttle_stayed_zero: bool,
     max_throttle_cmd: f64,
+    /// Maximum IAS recorded during the pre-Final portion of the run
+    /// (Descent through Base). The dead-stick profile must hold close to
+    /// vbg through these phases — this catches a regression where TECS
+    /// or some other controller pushes the aircraft well above vbg and
+    /// burns the only energy we have.
+    max_pre_final_ias_kt: f64,
 }
 
 /// Spawn an airborne aircraft at the given runway-frame position, glide it
@@ -98,6 +106,7 @@ fn run_dead_stick_scenario(
     let mut prev_airborne = !raw_state.on_ground;
     let mut throttle_stayed_zero = true;
     let mut max_throttle_cmd = 0.0_f64;
+    let mut max_pre_final_ias_kt = 0.0_f64;
 
     while raw_state.time_s <= max_time_s {
         let (_estimated, commands) = pilot.update(&raw_state, dt);
@@ -109,7 +118,28 @@ fn run_dead_stick_scenario(
         if commands.throttle > 0.001 {
             throttle_stayed_zero = false;
         }
-
+        if matches!(
+            phase,
+            FlightPhase::Descent
+                | FlightPhase::PatternEntry
+                | FlightPhase::Downwind
+                | FlightPhase::Base
+        ) {
+            max_pre_final_ias_kt = max_pre_final_ias_kt.max(raw_state.ias_kt);
+        }
+        if std::env::var("DEAD_STICK_TRACE").is_ok() && (raw_state.time_s as i32) % 5 == 0 {
+            let rf = pilot.runway_frame.to_runway_frame(raw_state.position_ft);
+            eprintln!(
+                "t={:5.1} ph={:13?} rfx={:6.0} rfy={:6.0} agl={:5.0} ias={:4.1} hdg={:5.1} bank={:5.1}",
+                raw_state.time_s,
+                phase,
+                rf.x, rf.y,
+                raw_state.altitude_ft - pilot.config.airport.field_elevation_ft,
+                raw_state.ias_kt,
+                raw_state.heading_deg,
+                raw_state.roll_deg,
+            );
+        }
         model.step(&mut raw_state, &commands, dt);
 
         if prev_airborne && raw_state.on_ground && touchdown_runway_x_ft.is_none() {
@@ -139,6 +169,7 @@ fn run_dead_stick_scenario(
         touchdown_centerline_ft,
         throttle_stayed_zero,
         max_throttle_cmd,
+        max_pre_final_ias_kt,
     }
 }
 
@@ -192,20 +223,28 @@ fn dead_stick_engaged_on_final_lands() {
         "throttle leaked above zero (max {:.3}); profile must keep throttle pinned",
         result.max_throttle_cmd
     );
+    // The on-final scenario starts at 600 ft AGL, well below short
+    // final, so the speed target is already vref — no pre-final IAS
+    // budget assertion applies here.
 }
 
 #[test]
 fn dead_stick_engaged_on_downwind_progresses_through_pattern() {
     let config = load_default_config_bundle();
+    // Use the dead-stick controller's pattern offset, not the config's
+    // standard powered-pattern offset — the dead-stick profile builds
+    // its geometry against the tighter dead-stick value, so spawning
+    // the aircraft on the config-sized downwind would put it on a
+    // leg the controller doesn't see.
     let pattern = build_pattern_geometry(
         &RunwayFrame::new(config.airport.runway.clone()),
-        config.pattern.downwind_offset_ft,
+        DEAD_STICK_PATTERN_OFFSET_FT,
         0.0,
         0.0,
     );
     let perf = config.performance.clone();
-    let pattern_alt_agl = config.pattern.altitude_agl_ft;
     let runway_length = config.airport.runway.length_ft;
+    let vbg_kt = perf.vbg_kt;
 
     // Mid-downwind on the pattern side. With the default left-traffic
     // 16/36 fixture, downwind_y_ft is negative; mid_x is between the
@@ -214,12 +253,18 @@ fn dead_stick_engaged_on_downwind_progresses_through_pattern() {
     let mid_x = (pattern.join_point_runway_ft.x + pattern.base_turn_x_ft) * 0.5;
     let recip = (config.airport.runway.course_deg + 180.0).rem_euclid(360.0);
 
+    // Start a bit above pattern altitude. A standard 6000-ft-offset
+    // pattern is ~18 kft of horizontal travel from mid-downwind to the
+    // threshold; with the C172's published 9:1 glide that needs ~2000
+    // ft of altitude to make the field. Standard pattern altitude
+    // alone (1000 AGL) is intentionally not enough — operationally
+    // dead-stick aircraft arrive at the pattern high, not low.
     let result = run_dead_stick_scenario(
         config,
         Vec2::new(mid_x, pattern.downwind_y_ft),
-        pattern_alt_agl,
+        2200.0,
         recip,
-        perf.vbg_kt,
+        vbg_kt,
         0.0,
         600.0,
     );
@@ -259,6 +304,16 @@ fn dead_stick_engaged_on_downwind_progresses_through_pattern() {
         "throttle leaked above zero (max {:.3}); profile must keep throttle pinned",
         result.max_throttle_cmd
     );
+    // Dead-stick must hold close to vbg through the pattern — never let
+    // the aircraft accelerate well above best glide. A few knots over
+    // is fine while the controller settles, but anything north of
+    // vbg + 8 kt means the speed loop is broken.
+    assert!(
+        result.max_pre_final_ias_kt <= vbg_kt + 8.0,
+        "pre-final IAS reached {:.1} (vbg {:.1} + 8 kt budget); dead-stick lost speed control",
+        result.max_pre_final_ias_kt,
+        vbg_kt
+    );
 }
 
 #[test]
@@ -266,7 +321,7 @@ fn dead_stick_engaged_at_altitude_glides_through_descent_to_landing() {
     let config = load_default_config_bundle();
     let pattern = build_pattern_geometry(
         &RunwayFrame::new(config.airport.runway.clone()),
-        config.pattern.downwind_offset_ft,
+        DEAD_STICK_PATTERN_OFFSET_FT,
         0.0,
         0.0,
     );
@@ -293,12 +348,13 @@ fn dead_stick_engaged_at_altitude_glides_through_descent_to_landing() {
     // Convert back to runway-frame coords for the harness signature.
     let start_runway = runway_frame.to_runway_frame(start_world);
 
+    let vbg_kt = perf.vbg_kt;
     let result = run_dead_stick_scenario(
         config,
         start_runway,
         5000.0,
         heading_deg,
-        perf.vbg_kt,
+        vbg_kt,
         0.0,
         1500.0,
     );
@@ -339,5 +395,92 @@ fn dead_stick_engaged_at_altitude_glides_through_descent_to_landing() {
         result.throttle_stayed_zero,
         "throttle leaked above zero (max {:.3}); profile must keep throttle pinned",
         result.max_throttle_cmd
+    );
+    assert!(
+        result.max_pre_final_ias_kt <= vbg_kt + 8.0,
+        "pre-final IAS reached {:.1} (vbg {:.1} + 8 kt budget); dead-stick lost speed control",
+        result.max_pre_final_ias_kt,
+        vbg_kt
+    );
+}
+
+/// Aircraft starts on the *opposite* side of the runway from the pattern
+/// (wrong-side entry). Mirrors the X-Plane test where dead-stick was
+/// engaged at KWHP rwy 30 with the aircraft NE of the runway centerline
+/// — the side opposite the left-traffic downwind. The dead-stick descent
+/// must cross over the centerline, intercept the downwind axis, and
+/// fly Downwind → Base → Final to the runway with a reasonable altitude
+/// budget.
+///
+/// Starts ~3000 ft AGL above field, slightly upwind of the threshold,
+/// 10,000 ft to the WRONG side of centerline (right of course = right
+/// side, while pattern is left). Heading roughly northbound (along
+/// runway course). Glide budget is the same `find_dead_stick_candidates`
+/// would see in the live tool: AGL × glide_ratio.
+#[test]
+fn dead_stick_engaged_on_wrong_side_of_runway() {
+    // Override the test-fixture runway to a real-world short length —
+    // KWHP rwy 30 is 4124 ft. The default 21,000 ft fixture hides
+    // float-long bugs because everything fits in the box; using
+    // KWHP's length makes the simple-sim test a faithful proxy for
+    // the live X-Plane test.
+    let mut config = load_default_config_bundle();
+    config.airport.runway.length_ft = 4124.0;
+    let perf = config.performance.clone();
+    let runway_length = config.airport.runway.length_ft;
+    let vbg_kt = perf.vbg_kt;
+
+    // Default fixture: course 360°, left traffic. So +y in runway frame
+    // is "right of course" — the WRONG side. Pattern is at -1500 (the
+    // dead-stick-tightened offset).
+    let start_runway = Vec2::new(600.0, 10_000.0);
+    let result = run_dead_stick_scenario(
+        config,
+        start_runway,
+        3000.0,
+        0.0, // heading north, roughly aligned with course
+        vbg_kt,
+        0.0,
+        900.0,
+    );
+
+    println!(
+        "wrong-side dead-stick: final_phase={:?} duration={:.0}s phases={:?} td_x={:?} td_y={:?}",
+        result.final_phase,
+        result.duration_s,
+        result.phases_seen,
+        result.touchdown_runway_x_ft,
+        result.touchdown_centerline_ft,
+    );
+    assert!(
+        matches!(
+            result.final_phase,
+            FlightPhase::Rollout | FlightPhase::RunwayExit | FlightPhase::TaxiClear
+        ),
+        "wrong-side dead-stick failed to reach the ground in a landed phase; got {:?} after {:.0}s, phases={:?}",
+        result.final_phase,
+        result.duration_s,
+        result.phases_seen
+    );
+    let td_x = result
+        .touchdown_runway_x_ft
+        .expect("expected touchdown to be recorded");
+    assert!(
+        (0.0..=runway_length).contains(&td_x),
+        "wrong-side dead-stick touched down x={:.0} ft, outside runway [0, {:.0}] — landed off airport. phases={:?}",
+        td_x,
+        runway_length,
+        result.phases_seen,
+    );
+    assert!(
+        result.throttle_stayed_zero,
+        "throttle leaked above zero (max {:.3})",
+        result.max_throttle_cmd
+    );
+    assert!(
+        result.max_pre_final_ias_kt <= vbg_kt + 8.0,
+        "pre-final IAS reached {:.1} (vbg {:.1} + 8 kt budget)",
+        result.max_pre_final_ias_kt,
+        vbg_kt
     );
 }
