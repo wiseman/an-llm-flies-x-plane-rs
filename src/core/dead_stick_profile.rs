@@ -41,18 +41,25 @@ use crate::types::{
     LateralMode, TrafficSide, Vec2, VerticalMode, Waypoint,
 };
 
-// FAA Power-Off 180. Three fixes: HighKey overhead the aim-point at
-// HIGH_KEY_AGL_FT, a descending spiral toward the pattern side, then
-// LowKey abeam the aim-point at pattern altitude — from there a short
-// tight Downwind/Base/Final to the threshold.
-
-const DEAD_STICK_HIGH_KEY_AGL_FT: f64 = 1500.0;
+// FAA Power-Off 180, simplified. Glide direct to the LowKey fix (abeam
+// touchdown on the pattern side at pattern altitude). On capture, either
+// transition straight to Downwind (if heading already aligned) or run
+// the spiral (PatternEntry) to bleed altitude and align with downwind
+// before joining. The classical HighKey-overhead-the-threshold entry is
+// gone — targeting it from a same-side starting position drags the
+// glide path across the downwind line and forces an altitude-eating
+// recapture turn after capture.
 
 /// Spiral exits to Downwind once below this AGL — pattern path from
 /// LowKey to threshold (~8500 ft at the current offset, mixed clean/
 /// flap config) bleeds ~1200 ft of altitude, so this exit altitude
 /// delivers the aircraft to the threshold with little margin either way.
 const SPIRAL_EXIT_AGL_FT: f64 = 1500.0;
+
+/// Heading tolerance (deg) for "already aligned with downwind" — used
+/// both to skip the spiral on LowKey capture when arrival heading is
+/// good, and as the spiral exit alignment gate.
+const DOWNWIND_HEADING_TOLERANCE_DEG: f64 = 30.0;
 
 /// Turn radius for a 30° bank at vbg ≈ V²/(g·tan bank).
 const SPIRAL_RADIUS_FT: f64 = 750.0;
@@ -66,7 +73,23 @@ const DEAD_STICK_MAX_BANK_DEG: f64 = 30.0;
 /// Arc-length lookahead for orbit following.
 const SPIRAL_LOOKAHEAD_FT: f64 = 600.0;
 
-const HIGH_KEY_CAPTURE_RADIUS_FT: f64 = 1500.0;
+/// Capture radius for declaring the aircraft to have arrived at LowKey.
+/// 1500 ft tolerates direct-to overshoot from poor initial alignment
+/// and sets the floor for the Descent → PatternEntry/Downwind handoff.
+const LOW_KEY_CAPTURE_RADIUS_FT: f64 = 1500.0;
+
+/// Tighter "at LowKey" tolerance for the spiral exit predicate. With
+/// 30°-bank orbit physics the aircraft tracks a ~900 ft circle around
+/// the spiral center, so the closest LowKey approach per orbit is
+/// ~150 ft. 600 ft gives the predicate a comfortable window that fires
+/// once per orbit without false positives mid-arc.
+const LOW_KEY_EXIT_RADIUS_FT: f64 = 600.0;
+
+/// Extra altitude budget above pattern altitude that still allows the
+/// spiral to exit. Without it, an orbit that passes LowKey just above
+/// pattern altitude has to spiral one more time and lose ~500 ft before
+/// the next aligned LowKey pass.
+const SPIRAL_EXIT_AGL_BUFFER_FT: f64 = 600.0;
 
 /// Lateral pattern offset for the dead-stick downwind + base legs. The
 /// 30° base-turn radius is ~750 ft (1500 ft diameter); 2500 ft offset
@@ -103,8 +126,18 @@ pub struct DeadStickLandingProfile {
     /// the runway frame, which is constant for the profile's lifetime.
     /// Cached so the per-tick guidance and capture predicates don't
     /// recompute `to_world_frame` calls every cycle.
-    high_key_world_ft: Vec2,
+    low_key_world_ft: Vec2,
     spiral_center_world_ft: Vec2,
+    /// Where the Descent phase glides toward — usually LowKey, but
+    /// re-routed to the base-turn entry when the aircraft is on the
+    /// pattern side and far behind the base turn at low altitude. Picked
+    /// once at engage time so the route stays stable.
+    descent_target_world_ft: Vec2,
+    /// Phase to enter when Descent capture fires AND the aircraft is at
+    /// or below the spiral's AGL exit window. Above the window, capture
+    /// always enters PatternEntry (spiral) regardless. Tied to the
+    /// chosen `descent_target_world_ft`.
+    capture_phase_low: FlightPhase,
 }
 
 impl DeadStickLandingProfile {
@@ -124,9 +157,6 @@ impl DeadStickLandingProfile {
             Vec2::new(runway_frame.touchdown_runway_x_ft(), pattern.downwind_y_ft);
         let low_key_world_ft = runway_frame.to_world_frame(low_key_runway_ft);
 
-        let high_key_world_ft =
-            runway_frame.to_world_frame(Vec2::new(runway_frame.touchdown_runway_x_ft(), 0.0));
-
         // Spiral center sits between LowKey and centerline, offset
         // SPIRAL_RADIUS_FT toward centerline so one tangent of the
         // circle is at LowKey heading downwind direction.
@@ -138,6 +168,39 @@ impl DeadStickLandingProfile {
             runway_frame.touchdown_runway_x_ft(),
             side_sign * DEAD_STICK_PATTERN_OFFSET_FT - side_sign * SPIRAL_RADIUS_FT,
         ));
+
+        // Pick the Descent target. Default route is LowKey → Downwind.
+        // The exception: when the aircraft is at or below the spiral
+        // exit window AND already on the pattern side AND far behind
+        // the base turn, gliding to LowKey overshoots through the
+        // downwind leg and forces a costly recapture. In that case,
+        // route direct to the base-turn entry and join Base — saves
+        // ~3000 ft of glide path and the alignment turn at LowKey.
+        let aircraft_runway = if state.runway_x_ft.is_some() && state.runway_y_ft.is_some() {
+            Vec2::new(
+                state.runway_x_ft.unwrap_or(0.0),
+                state.runway_y_ft.unwrap_or(0.0),
+            )
+        } else {
+            runway_frame.to_runway_frame(state.position_ft)
+        };
+        let on_pattern_side = side_sign * aircraft_runway.y > 0.0;
+        let far_behind_base_turn = aircraft_runway.x <= pattern.base_turn_x_ft - 500.0;
+        let high_altitude =
+            state.alt_agl_ft > SPIRAL_EXIT_AGL_FT + SPIRAL_EXIT_AGL_BUFFER_FT;
+
+        let (descent_target_runway_ft, capture_phase_low) = if !high_altitude
+            && on_pattern_side
+            && far_behind_base_turn
+        {
+            (
+                Vec2::new(pattern.base_turn_x_ft, pattern.downwind_y_ft),
+                FlightPhase::Base,
+            )
+        } else {
+            (low_key_runway_ft, FlightPhase::Downwind)
+        };
+        let descent_target_world_ft = runway_frame.to_world_frame(descent_target_runway_ft);
 
         // The "pattern_entry_start" name matches what ModeManager looks
         // for so the standard PatternEntry → Downwind predicates fire.
@@ -158,8 +221,10 @@ impl DeadStickLandingProfile {
             phase,
             last_safety_reason: None,
             low_key_runway_ft,
-            high_key_world_ft,
+            low_key_world_ft,
             spiral_center_world_ft,
+            descent_target_world_ft,
+            capture_phase_low,
             config,
             runway_frame,
         }
@@ -179,14 +244,20 @@ impl DeadStickLandingProfile {
 
         match phase {
             FlightPhase::Descent => {
-                // Glide direct to High Key. Arrival heading is whatever
-                // the start position dictates; the spiral handles
-                // downwind alignment.
+                // Glide direct to the chosen pattern entry point —
+                // typically Low Key (abeam touchdown on the pattern
+                // side), or the base-turn entry when the aircraft is
+                // low and far behind the pattern. Same-side aircraft
+                // track parallel to the runway and arrive on the
+                // downwind axis without crossing centerline; wrong-side
+                // aircraft cross naturally en route. The spiral
+                // (PatternEntry) only engages after capture, when extra
+                // altitude bleed is needed.
                 let waypoint = Waypoint {
-                    name: "high_key".to_string(),
-                    position_ft: self.high_key_world_ft,
+                    name: "pattern_entry".to_string(),
+                    position_ft: self.descent_target_world_ft,
                     altitude_ft: Some(
-                        self.config.airport.field_elevation_ft + DEAD_STICK_HIGH_KEY_AGL_FT,
+                        self.config.airport.field_elevation_ft + SPIRAL_EXIT_AGL_FT,
                     ),
                 };
                 let (desired_track, bank_cmd) =
@@ -388,21 +459,37 @@ impl DeadStickLandingProfile {
         self.low_key_runway_ft
     }
 
-    fn captured_at_high_key(&self, state: &AircraftState) -> bool {
-        state.position_ft.distance_to(self.high_key_world_ft) <= HIGH_KEY_CAPTURE_RADIUS_FT
+    fn captured_at_descent_target(&self, state: &AircraftState) -> bool {
+        state.position_ft.distance_to(self.descent_target_world_ft)
+            <= LOW_KEY_CAPTURE_RADIUS_FT
     }
 
-    /// Spiral exit predicate: AGL has bled to pattern altitude AND
-    /// heading is roughly aligned with downwind direction (so the
-    /// transition doesn't dump the aircraft mid-turn pointed the wrong
-    /// way).
-    fn ready_to_exit_spiral(&self, state: &AircraftState) -> bool {
-        if state.alt_agl_ft > SPIRAL_EXIT_AGL_FT {
-            return false;
-        }
+    /// True iff `state.track_deg` is within `DOWNWIND_HEADING_TOLERANCE_DEG`
+    /// of the downwind heading (course + 180°). Drives both the spiral
+    /// exit and the "skip the spiral" branch on LowKey capture.
+    fn aligned_with_downwind(&self, state: &AircraftState) -> bool {
         let downwind_heading = wrap_degrees_360(self.runway_frame.runway.course_deg + 180.0);
         let track_err = wrap_degrees_180(state.track_deg - downwind_heading).abs();
-        track_err <= 30.0
+        track_err <= DOWNWIND_HEADING_TOLERANCE_DEG
+    }
+
+    /// Spiral exit predicate: aircraft is near the LowKey fix (so the
+    /// CCW tangent naturally points down the downwind heading), aligned
+    /// within `DOWNWIND_HEADING_TOLERANCE_DEG`, and AGL has bled into
+    /// the exit window.
+    ///
+    /// Position-based: waiting for both AGL ≤ pattern_alt AND alignment
+    /// at any orbit point lets AGL drop ~500 ft per missed alignment
+    /// window. Pinning the exit to LowKey passes guarantees the aircraft
+    /// is at the right spot to join Downwind, and the AGL window adds
+    /// one orbit's worth of buffer so a passage that's just over
+    /// pattern altitude still exits.
+    fn ready_to_exit_spiral(&self, state: &AircraftState) -> bool {
+        let dist_to_low_key = state.position_ft.distance_to(self.low_key_world_ft);
+        let near_low_key = dist_to_low_key <= LOW_KEY_EXIT_RADIUS_FT;
+        let agl_low_enough =
+            state.alt_agl_ft <= SPIRAL_EXIT_AGL_FT + SPIRAL_EXIT_AGL_BUFFER_FT;
+        near_low_key && self.aligned_with_downwind(state) && agl_low_enough
     }
 }
 
@@ -427,11 +514,17 @@ impl GuidanceProfile for DeadStickLandingProfile {
         }
 
         if self.phase == FlightPhase::Descent {
-            if self.captured_at_high_key(state) {
-                self.phase = if state.alt_agl_ft > SPIRAL_EXIT_AGL_FT {
+            if self.captured_at_descent_target(state) {
+                // Above the spiral exit window — must bleed altitude
+                // through the orbit overhead the runway. Otherwise
+                // join the leg the descent route was aiming at
+                // (Downwind from LowKey, Base from base-turn entry).
+                self.phase = if state.alt_agl_ft
+                    > SPIRAL_EXIT_AGL_FT + SPIRAL_EXIT_AGL_BUFFER_FT
+                {
                     FlightPhase::PatternEntry
                 } else {
-                    FlightPhase::Downwind
+                    self.capture_phase_low
                 };
             }
         } else if self.phase == FlightPhase::PatternEntry {
@@ -516,15 +609,16 @@ impl GuidanceProfile for DeadStickLandingProfile {
         };
         match self.phase {
             FlightPhase::Descent => {
-                let dist_to_high_key = state.position_ft.distance_to(self.high_key_world_ft);
+                let dist_to_target =
+                    state.position_ft.distance_to(self.descent_target_world_ft);
                 Some(TransitionHint {
                     next_phase: FlightPhase::PatternEntry,
                     condition_text: format!(
-                        "within {:.0} ft of high-key fix (now {:.0})",
-                        HIGH_KEY_CAPTURE_RADIUS_FT, dist_to_high_key
+                        "within {:.0} ft of pattern entry fix (now {:.0})",
+                        LOW_KEY_CAPTURE_RADIUS_FT, dist_to_target
                     ),
                     eta_s: eta_from(
-                        (dist_to_high_key - HIGH_KEY_CAPTURE_RADIUS_FT).max(0.0),
+                        (dist_to_target - LOW_KEY_CAPTURE_RADIUS_FT).max(0.0),
                     ),
                 })
             }

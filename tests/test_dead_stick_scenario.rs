@@ -484,3 +484,99 @@ fn dead_stick_engaged_on_wrong_side_of_runway() {
         vbg_kt
     );
 }
+
+/// Aircraft starts on the *correct* pattern side but **far out laterally**
+/// — well beyond the dead-stick downwind offset — and arrives at the
+/// pattern entry with low altitude. Mirrors the live KVNY 16R run where
+/// engine-out fired with the aircraft ~1.7 NM NE of the field at 2700 ft
+/// AGL. Dead-stick was engaged with `side=left` (the configured pattern
+/// side), and the descent flew direct to the High-Key fix overhead the
+/// threshold (y=0). That route drags the aircraft *across* the y=-2500
+/// downwind line on the way in. By the time it captured High-Key it was
+/// at y=-1000 with AGL already below the spiral-exit gate — so the
+/// profile transitioned straight to Downwind from a point 1500 ft inboard
+/// of the leg, then burned the remaining altitude in a corrective S-turn
+/// without ever reaching base. Touchdown was 0.4 NM off centerline.
+///
+/// The fix: in Descent, target the Low-Key fix (abeam touchdown on the
+/// pattern side) instead of High-Key when the aircraft is already on the
+/// pattern side. That keeps the glide track parallel to the runway and
+/// arrives on the downwind leg without an altitude-eating recapture.
+#[test]
+fn dead_stick_far_out_on_pattern_side_lands_on_runway() {
+    let config = load_default_config_bundle();
+    let perf = config.performance.clone();
+    let runway_length = config.airport.runway.length_ft;
+    let vbg_kt = perf.vbg_kt;
+
+    // Default fixture: course 360°, left traffic → pattern side is -y
+    // (west of the runway). Spawn the aircraft at runway-frame
+    // (-10000, -8000): 10,000 ft south of the threshold (10,000 ft of
+    // glide ahead) and 8,000 ft out on the pattern side (well past the
+    // 2,500 ft dead-stick downwind offset). 2,700 ft AGL — same budget
+    // the live KVNY case had at engage.
+    let start_runway = Vec2::new(-10_000.0, -8_000.0);
+
+    // Heading toward the High-Key fix at runway-frame (touchdown_x≈1000, 0).
+    // Forward = north, right = east; world delta from start to high-key
+    // is (+8000 east, +11000 north) → heading ≈ 36°.
+    let heading_deg = 36.0;
+
+    let result = run_dead_stick_scenario(
+        config,
+        start_runway,
+        2_700.0,
+        heading_deg,
+        vbg_kt,
+        0.0,
+        600.0,
+    );
+
+    println!(
+        "far-out same-side: final_phase={:?} duration={:.0}s phases={:?} td_x={:?} td_y={:?}",
+        result.final_phase,
+        result.duration_s,
+        result.phases_seen,
+        result.touchdown_runway_x_ft,
+        result.touchdown_centerline_ft,
+    );
+
+    assert!(
+        matches!(
+            result.final_phase,
+            FlightPhase::Rollout | FlightPhase::RunwayExit | FlightPhase::TaxiClear
+        ),
+        "far-out dead-stick did not reach a landed phase; got {:?} after {:.0}s, phases={:?}",
+        result.final_phase,
+        result.duration_s,
+        result.phases_seen
+    );
+    let td_x = result
+        .touchdown_runway_x_ft
+        .expect("expected touchdown to be recorded");
+    assert!(
+        (0.0..=runway_length).contains(&td_x),
+        "far-out dead-stick touched down x={:.0} ft, outside runway [0, {:.0}] — landed off airport. phases={:?}",
+        td_x,
+        runway_length,
+        result.phases_seen,
+    );
+    let td_y = result.touchdown_centerline_ft.unwrap_or(9999.0);
+    assert!(
+        td_y.abs() < 150.0,
+        "far-out dead-stick touched down {:.0} ft off centerline (allowed ±150 ft); phases={:?}",
+        td_y,
+        result.phases_seen,
+    );
+    assert!(
+        result.throttle_stayed_zero,
+        "throttle leaked above zero (max {:.3})",
+        result.max_throttle_cmd
+    );
+    assert!(
+        result.max_pre_final_ias_kt <= vbg_kt + 8.0,
+        "pre-final IAS reached {:.1} (vbg {:.1} + 8 kt budget)",
+        result.max_pre_final_ias_kt,
+        vbg_kt
+    );
+}

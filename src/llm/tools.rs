@@ -1051,6 +1051,10 @@ const SCORE_LENGTH_PER_FT: f64 = 0.0001;
 const REACH_BUFFER_FACTOR: f64 = 1.05;
 
 const FT_PER_NM: f64 = 6076.12;
+/// Approximate feet per degree of latitude (great-circle, near-equator
+/// equivalent). Good to ~0.5% across the latitudes we care about — fine
+/// for the side-of-centerline heuristic in `find_dead_stick_candidates`.
+const FT_PER_DEG_LAT: f64 = 364567.0;
 
 /// One scored runway end candidate for a dead-stick landing. Built from
 /// the SQL result + post-scored on the Rust side for headwind alignment
@@ -1065,6 +1069,14 @@ struct DeadStickCandidate {
     dist_nm: f64,
     margin_nm: f64,
     headwind_kt: f64,
+    /// Recommended traffic-pattern side ("left" or "right") for the
+    /// dead-stick join. Picked so the aircraft's current position is
+    /// already on the pattern side — joining the pattern from the
+    /// inside saves the centerline-crossing maneuver and the altitude
+    /// burned in the recapture turn. Ignores published traffic-side
+    /// convention since with the engine out, glide path beats
+    /// procedure.
+    side: &'static str,
     score: f64,
 }
 
@@ -1137,7 +1149,7 @@ pub fn tool_find_dead_stick_candidates(ctx: &ToolContext, args: &Map<String, Val
             FROM runway_ends re CROSS JOIN params p \
         ) \
         SELECT airport_ident, rwy_ident, course_deg, length_ft, COALESCE(surface, '') AS surface, \
-               dist_nm, (reach_nm - dist_nm) AS margin_nm \
+               dist_nm, (reach_nm - dist_nm) AS margin_nm, thr_lat, thr_lon \
         FROM scored \
         WHERE dist_nm <= reach_nm \
         ORDER BY margin_nm DESC \
@@ -1169,6 +1181,8 @@ pub fn tool_find_dead_stick_candidates(ctx: &ToolContext, args: &Map<String, Val
         let surface: String = row.get(4).unwrap_or_default();
         let dist_nm: f64 = row.get(5).unwrap_or(0.0);
         let margin_nm: f64 = row.get(6).unwrap_or(0.0);
+        let thr_lat: f64 = row.get(7).unwrap_or(0.0);
+        let thr_lon: f64 = row.get(8).unwrap_or(0.0);
         let headwind_kt = if wind_kt.abs() > 0.01 {
             // Headwind on landing = wind_kt * cos(wind_dir - course).
             // Positive when wind blows from runway course direction (into
@@ -1178,6 +1192,20 @@ pub fn tool_find_dead_stick_candidates(ctx: &ToolContext, args: &Map<String, Val
         } else {
             0.0
         };
+        // Recommend the pattern side that puts the aircraft's current
+        // position on the inside of the pattern. Project (aircraft −
+        // threshold) onto the runway's right vector (course + 90°): a
+        // positive runway-frame y means aircraft is right of course →
+        // right traffic; negative → left traffic. Right beats published
+        // convention with no engine: glide path is what makes the field.
+        let lat_rad = lat.to_radians();
+        let dlat_ft = (lat - thr_lat) * FT_PER_DEG_LAT;
+        let dlon_ft = (lon - thr_lon) * FT_PER_DEG_LAT * lat_rad.cos();
+        // forward = (sin(course), cos(course)) in (east, north); right
+        // = forward rotated +90° = (cos(course), -sin(course)).
+        let course_rad = course_deg.to_radians();
+        let runway_y_ft = dlon_ft * course_rad.cos() - dlat_ft * course_rad.sin();
+        let side = if runway_y_ft >= 0.0 { "right" } else { "left" };
         let score = margin_nm
             + SCORE_HEADWIND_PER_KT * headwind_kt
             + SCORE_LENGTH_PER_FT * length_ft;
@@ -1190,6 +1218,7 @@ pub fn tool_find_dead_stick_candidates(ctx: &ToolContext, args: &Map<String, Val
             dist_nm,
             margin_nm,
             headwind_kt,
+            side,
             score,
         });
     }
@@ -1210,12 +1239,12 @@ pub fn tool_find_dead_stick_candidates(ctx: &ToolContext, args: &Map<String, Val
     candidates.truncate(max_candidates as usize);
 
     let mut lines = vec![
-        "airport_ident\trunway_ident\tdist_nm\tmargin_nm\tcourse_deg\tlength_ft\tsurface\theadwind_kt\tscore"
+        "airport_ident\trunway_ident\tdist_nm\tmargin_nm\tcourse_deg\tlength_ft\tsurface\theadwind_kt\tside\tscore"
             .to_string(),
     ];
     for c in &candidates {
         lines.push(format!(
-            "{}\t{}\t{:.2}\t{:.2}\t{:.0}\t{:.0}\t{}\t{:.1}\t{:.3}",
+            "{}\t{}\t{:.2}\t{:.2}\t{:.0}\t{:.0}\t{}\t{:.1}\t{}\t{:.3}",
             c.airport_ident,
             c.rwy_ident,
             c.dist_nm,
@@ -1224,6 +1253,7 @@ pub fn tool_find_dead_stick_candidates(ctx: &ToolContext, args: &Map<String, Val
             c.length_ft,
             c.surface,
             c.headwind_kt,
+            c.side,
             c.score
         ));
     }
@@ -3062,7 +3092,7 @@ pub fn tool_schemas(include_mission_complete: bool) -> Vec<ToolDef> {
         ),
         schema(
             "find_dead_stick_candidates",
-            "Find runways reachable in a still-air glide from the current position. Returns a TSV with one row per runway end (both directions of every paved-or-grass runway ≥1500 ft within glide range), scored by reach margin in NM, with optional headwind alignment if wind is known. Uses the configured aircraft glide_ratio. The top of the list is the best dead-stick choice; bias toward margin_nm > 1 NM and longer / paved surfaces, and prefer the end with the most positive headwind_kt. Call this BEFORE engage_dead_stick_landing so you (and the operator on the radio) know the options. Returns '0 reachable runways' when nothing is in glide — at that point the answer is an off-airport landing, not this tool.",
+            "Find runways reachable in a still-air glide from the current position. Returns a TSV with one row per runway end (both directions of every paved-or-grass runway ≥1500 ft within glide range), scored by reach margin in NM, with optional headwind alignment if wind is known. Uses the configured aircraft glide_ratio. The top of the list is the best dead-stick choice; bias toward margin_nm > 1 NM and longer / paved surfaces, and prefer the end with the most positive headwind_kt. Call this BEFORE engage_dead_stick_landing so you (and the operator on the radio) know the options. Pass the `side` value from the chosen row straight through to engage_dead_stick_landing — it's picked so the aircraft is already on the inside of the pattern, which avoids the centerline-crossing maneuver that costs altitude in an engine-out. Ignore published traffic-side conventions for dead-stick; glide path beats procedure when there's no engine. Returns '0 reachable runways' when nothing is in glide — at that point the answer is an off-airport landing, not this tool.",
             json!({
                 "lat": {"type": "number", "description": "Current latitude in degrees."},
                 "lon": {"type": "number", "description": "Current longitude in degrees."},
@@ -3080,7 +3110,7 @@ pub fn tool_schemas(include_mission_complete: bool) -> Vec<ToolDef> {
             json!({
                 "airport_ident": {"type": "string", "description": "ICAO airport code of the chosen runway (e.g. 'KSEA')."},
                 "runway_ident": {"type": "string", "description": "Runway end identifier (e.g. '16L', '34R')."},
-                "side": {"type": ["string", "null"], "description": "Traffic pattern side: 'left' (default, standard US) or 'right'. Pass null to accept the default."}
+                "side": {"type": ["string", "null"], "description": "Traffic pattern side: 'left' or 'right'. Pass the value from the corresponding row of `find_dead_stick_candidates` — it's picked to keep the aircraft on the inside of the pattern (no centerline crossing, no extra turning under glide). Defaults to 'left' if omitted, which is rarely what you want for a dead-stick."}
             }),
             &["airport_ident", "runway_ident", "side"],
         ),

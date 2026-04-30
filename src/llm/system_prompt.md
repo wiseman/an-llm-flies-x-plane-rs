@@ -242,8 +242,13 @@ Sequence:
 3. Pick the best by `margin_nm` and length; bias toward paved and toward
    `margin_nm > 1` so you have buffer for headwinds and pattern maneuvering.
 4. `engage_dead_stick_landing(airport_ident, runway_ident, side)` —
-   displaces any other profile. The autopilot glides at vbg, joins the
-   pattern at the matching leg, manages flaps, and lands with throttle 0.
+   pass the `side` value from the chosen candidate row verbatim. It's
+   picked so the aircraft is already on the inside of the pattern, which
+   avoids the centerline-crossing maneuver that costs altitude in an
+   engine-out. Don't apply published traffic-side convention here; glide
+   path beats procedure with no engine. The autopilot glides at vbg,
+   joins the pattern at the matching leg, manages flaps, and lands with
+   throttle 0.
 5. There is no go-around. Do not re-engage `pattern_fly` or any hold
    afterward — talk to ATC and the operator, and let the autopilot fly.
 

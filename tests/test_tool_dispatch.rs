@@ -1890,6 +1890,67 @@ fn find_dead_stick_candidates_returns_runways_in_glide() {
 }
 
 #[test]
+fn find_dead_stick_candidates_recommends_pattern_side_from_position() {
+    // Aircraft east of all KSEA runways. KSEA strips run roughly
+    // north-south (course ≈ 180° for the "16x" ends, ≈ 0° for the
+    // "34x" ends). For "16x" (landing south), the right side of course
+    // is *west* — aircraft east of runway = left side → recommend
+    // "left". For "34x" (landing north), the right side of course is
+    // *east* — aircraft east = right side → recommend "right".
+    let dir = TempDir::new().unwrap();
+    build_fake_parquet(dir.path(), &[]);
+    let (ctx, _bridge) = make_ctx_with_parquet(dir.path());
+    let r = dispatch(
+        "find_dead_stick_candidates",
+        json!({
+            "lat": 47.4500,
+            "lon": -122.260,
+            "alt_agl_ft": 5000.0,
+            "heading_deg": 270.0,
+        }),
+        &ctx,
+    );
+    assert!(!r.starts_with("error"), "got: {}", r);
+    let lines: Vec<&str> = r.lines().collect();
+    let header = lines[0];
+    assert!(header.contains("side"), "header missing `side`: {}", header);
+    let cols: Vec<&str> = header.split('\t').collect();
+    let rwy_col = cols.iter().position(|c| *c == "runway_ident").unwrap();
+    let side_col = cols.iter().position(|c| *c == "side").unwrap();
+    let mut saw_16x_left = false;
+    let mut saw_34x_right = false;
+    for row in lines.iter().skip(1) {
+        let fields: Vec<&str> = row.split('\t').collect();
+        if fields.len() <= side_col {
+            continue;
+        }
+        let rwy = fields[rwy_col];
+        let side = fields[side_col];
+        if rwy.starts_with("16") {
+            assert_eq!(
+                side, "left",
+                "row {} (south-bound) with aircraft east should be left traffic, got {}",
+                rwy, side
+            );
+            saw_16x_left = true;
+        }
+        if rwy.starts_with("34") {
+            assert_eq!(
+                side, "right",
+                "row {} (north-bound) with aircraft east should be right traffic, got {}",
+                rwy, side
+            );
+            saw_34x_right = true;
+        }
+    }
+    assert!(
+        saw_16x_left && saw_34x_right,
+        "expected at least one 16x and 34x row; got:\n{}",
+        r
+    );
+}
+
+#[test]
 fn find_dead_stick_candidates_zero_when_too_low() {
     // Same position but only 100 ft AGL — reach ≈ 0.15 NM, nothing in range.
     let dir = TempDir::new().unwrap();
