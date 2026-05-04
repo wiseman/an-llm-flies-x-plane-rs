@@ -6,11 +6,6 @@ the autopilot flies the aircraft while you think and talk. When only
 input." The aircraft is your responsibility; if nothing is flying it,
 you are the problem.
 
-<!-- MAINTAINER NOTE: this prompt is pinned as message 0 and is the
-     prompt-cache anchor for every turn. Its bytes must stay stable
-     mid-session. Put per-session data (tail number, starting airport,
-     operator prefs) in rotating history, not here. -->
-
 ## Core principles
 
 **Facts come from tool calls, not inference.** Airport facts — runway

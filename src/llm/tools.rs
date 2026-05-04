@@ -722,7 +722,7 @@ fn lookup_runway_for_pattern(
     let bridge = ctx
         .bridge
         .as_ref()
-        .ok_or_else(|| anyhow!("no X-Plane bridge available; cannot compute world-frame threshold"))?;
+        .ok_or_else(|| anyhow!("aircraft systems bridge unavailable; cannot compute world-frame threshold"))?;
     ensure_runway_conn(ctx)?;
     let guard = ctx.runway_conn.lock().unwrap();
     let conn = guard.as_ref().unwrap();
@@ -1611,7 +1611,7 @@ pub fn tool_tune_radio(ctx: &ToolContext, args: &Map<String, Value>) -> String {
         Err(e) => return format!("error: {}", e),
     };
     let Some(bridge) = ctx.bridge.as_ref() else {
-        return "error: no X-Plane bridge available (running in simple backend?)".to_string();
+        return "error: aircraft systems bridge unavailable".to_string();
     };
     let dref = match radio_dataref(&radio) {
         Ok(d) => d,
@@ -1636,7 +1636,7 @@ pub fn tool_set_parking_brake(ctx: &ToolContext, args: &Map<String, Value>) -> S
         Err(e) => return format!("error: {}", e),
     };
     let Some(bridge) = ctx.bridge.as_ref() else {
-        return "error: no X-Plane bridge available (running in simple backend?)".to_string();
+        return "error: aircraft systems bridge unavailable".to_string();
     };
     let val = if engaged { 1.0 } else { 0.0 };
     if let Err(e) = bridge.write_dataref_values(&[(PARKING_BRAKE_RATIO.name.to_string(), val)]) {
@@ -1653,7 +1653,7 @@ pub fn tool_set_flaps(ctx: &ToolContext, args: &Map<String, Value>) -> String {
         Err(e) => return format!("error: {}", e),
     };
     let Some(bridge) = ctx.bridge.as_ref() else {
-        return "error: no X-Plane bridge available (running in simple backend?)".to_string();
+        return "error: aircraft systems bridge unavailable".to_string();
     };
     if !VALID_FLAP_SETTINGS.contains(&degrees) {
         return format!(
@@ -1793,7 +1793,7 @@ pub fn build_taxi_legs_with_pullout(
 pub fn tool_engage_line_up(ctx: &ToolContext, args: &Map<String, Value>) -> String {
     let bridge = match ctx.bridge.as_ref() {
         Some(b) => b.clone(),
-        None => return "error: no X-Plane bridge available; engage_line_up needs the georef".to_string(),
+        None => return "error: aircraft systems bridge unavailable; engage_line_up needs the georef".to_string(),
     };
     let airport = match arg_str(args, "airport_ident") {
         Ok(s) => s.to_string(),
@@ -2012,7 +2012,7 @@ pub fn tool_engage_taxi(ctx: &ToolContext, args: &Map<String, Value>) -> String 
     let bridge = match ctx.bridge.as_ref() {
         Some(b) => b.clone(),
         None => {
-            return "error: no X-Plane bridge available; engage_taxi needs the georef".to_string();
+            return "error: aircraft systems bridge unavailable; engage_taxi needs the georef".to_string();
         }
     };
     let released_brake_ratio = match release_parking_brake_if_set(ctx, &bridge) {
@@ -2323,7 +2323,7 @@ pub fn tool_engage_park(ctx: &ToolContext, args: &Map<String, Value>) -> String 
     let bridge = match ctx.bridge.as_ref() {
         Some(b) => b.clone(),
         None => {
-            return "error: no X-Plane bridge available; engage_park needs the georef".to_string();
+            return "error: aircraft systems bridge unavailable; engage_park needs the georef".to_string();
         }
     };
     let released_brake_ratio = match release_parking_brake_if_set(ctx, &bridge) {
@@ -2694,7 +2694,7 @@ fn resolve_start_latlon(
                 .bridge
                 .as_ref()
                 .ok_or_else(|| anyhow!(
-                    "aircraft position unavailable; pass start_lat and start_lon or connect to X-Plane"
+                    "aircraft position unavailable; pass start_lat and start_lon, or check the aircraft systems bridge"
                 ))?;
             let a = bridge
                 .get_dataref_value(LATITUDE_DEG.name)
@@ -3216,7 +3216,7 @@ pub fn tool_schemas(include_mission_complete: bool) -> Vec<ToolDef> {
         ),
         schema(
             "engage_line_up",
-            "Cross the hold-short onto the runway, turn to runway heading, and stop with the nose aligned for takeoff — the 'line up and wait' clearance in ATC phraseology. Displaces any active three-axis profile. Preconditions: aircraft at or near the hold-short for this runway (errors out if more than ~300 ft from the entry point); requires a live X-Plane bridge (needs the georef to convert the runway threshold lat/lon into runway-frame feet). Completes when the aircraft is stopped aligned on the centerline — a state-change heartbeat fires 'completed: line_up'. Next: engage_takeoff. If ATC already issued the takeoff clearance ('cleared for takeoff runway X'), call engage_takeoff immediately on the completed heartbeat without waiting for more operator prompts; do not call engage_takeoff while active_profiles still lists line_up.",
+            "Cross the hold-short onto the runway, turn to runway heading, and stop with the nose aligned for takeoff — the 'line up and wait' clearance in ATC phraseology. Displaces any active three-axis profile. Preconditions: aircraft at or near the hold-short for this runway (errors out if more than ~300 ft from the entry point). Completes when the aircraft is stopped aligned on the centerline — a state-change heartbeat fires 'completed: line_up'. Next: engage_takeoff. If ATC already issued the takeoff clearance ('cleared for takeoff runway X'), call engage_takeoff immediately on the completed heartbeat without waiting for more operator prompts; do not call engage_takeoff while active_profiles still lists line_up.",
             json!({
                 "airport_ident": {
                     "type": "string",
@@ -3232,18 +3232,18 @@ pub fn tool_schemas(include_mission_complete: bool) -> Vec<ToolDef> {
                 },
                 "start_lat": {
                     "type": ["number", "null"],
-                    "description": "Starting latitude. If null, the current aircraft position from X-Plane is used."
+                    "description": "Starting latitude. If null, the current aircraft position is used."
                 },
                 "start_lon": {
                     "type": ["number", "null"],
-                    "description": "Starting longitude. If null, the current aircraft position from X-Plane is used."
+                    "description": "Starting longitude. If null, the current aircraft position is used."
                 }
             }),
             &["airport_ident", "runway_ident", "intersection", "start_lat", "start_lon"],
         ),
         schema(
             "engage_taxi",
-            "Engage the ground-taxi autopilot to a runway hold-short. OUTBOUND ONLY — for taxiing from a parking spot or ramp to the hold-short before takeoff. To taxi to a parking spot after landing, use engage_park, NOT this tool with the runway you just landed on (that route does not exist by design — you don't taxi back onto the runway you rolled out of). Plans the route (same logic as plan_taxi_route), then takes control: nose-wheel steering tracks the leg centerline, ground speed targets ~15 kt on straights / ~5 kt through sharp turns / 0 at the hold-short, where the aircraft stops with the parking brake applied. Displaces any active three-axis profile. Auto-releases the parking brake if set — no need to call set_parking_brake(False) first. Preconditions: aircraft on the ground; live X-Plane bridge required (needs the georef to convert planned lat/lon waypoints into runway-frame feet). For intersection departures, pass the intersection taxiway so the planner routes to that specific hold-short; otherwise routes to the full-length threshold. Completes on arrival at the hold-short — a state-change heartbeat fires 'completed: taxi'. Next: engage_line_up. Preview a route before committing with plan_taxi_route.",
+            "Engage the ground-taxi autopilot to a runway hold-short. OUTBOUND ONLY — for taxiing from a parking spot or ramp to the hold-short before takeoff. To taxi to a parking spot after landing, use engage_park, NOT this tool with the runway you just landed on (that route does not exist by design — you don't taxi back onto the runway you rolled out of). Plans the route (same logic as plan_taxi_route), then takes control: nose-wheel steering tracks the leg centerline, ground speed targets ~15 kt on straights / ~5 kt through sharp turns / 0 at the hold-short, where the aircraft stops with the parking brake applied. Displaces any active three-axis profile. Auto-releases the parking brake if set — no need to call set_parking_brake(False) first. Preconditions: aircraft on the ground. For intersection departures, pass the intersection taxiway so the planner routes to that specific hold-short; otherwise routes to the full-length threshold. Completes on arrival at the hold-short — a state-change heartbeat fires 'completed: taxi'. Next: engage_line_up. Preview a route before committing with plan_taxi_route.",
             json!({
                 "airport_ident": {
                     "type": "string",
@@ -3264,11 +3264,11 @@ pub fn tool_schemas(include_mission_complete: bool) -> Vec<ToolDef> {
                 },
                 "start_lat": {
                     "type": ["number", "null"],
-                    "description": "Starting latitude. If null, the current aircraft position from X-Plane is used."
+                    "description": "Starting latitude. If null, the current aircraft position is used."
                 },
                 "start_lon": {
                     "type": ["number", "null"],
-                    "description": "Starting longitude. If null, the current aircraft position from X-Plane is used."
+                    "description": "Starting longitude. If null, the current aircraft position is used."
                 }
             }),
             &["airport_ident", "destination_runway", "via_taxiways", "intersection", "start_lat", "start_lon"],
@@ -3292,18 +3292,18 @@ pub fn tool_schemas(include_mission_complete: bool) -> Vec<ToolDef> {
                 },
                 "start_lat": {
                     "type": ["number", "null"],
-                    "description": "Starting latitude. If null, the current aircraft position from X-Plane is used."
+                    "description": "Starting latitude. If null, the current aircraft position is used."
                 },
                 "start_lon": {
                     "type": ["number", "null"],
-                    "description": "Starting longitude. If null, the current aircraft position from X-Plane is used."
+                    "description": "Starting longitude. If null, the current aircraft position is used."
                 }
             }),
             &["airport_ident", "destination_runway", "via_taxiways", "start_lat", "start_lon"],
         ),
         schema(
             "engage_park",
-            "Taxi to a parking spot and stop with the nose aligned to the spot's painted heading. INBOUND counterpart to engage_taxi — this is the tool for getting from a post-landing rollout position (or any ground position) to a parking spot. Do not call engage_taxi with the runway you just landed on as a workaround for parking; that route doesn't exist by design. Plans a taxi route to the taxi-network node nearest the 1300 parking spot, appends a short lead-in leg to the spot's exact lat/lon, and drives to a final pose at the spot's heading. Displaces any active three-axis profile. Auto-releases the parking brake if set. Preconditions: parking spot must exist in apt.dat (case-insensitive match); live X-Plane bridge required (needs the georef to convert the parking lat/lon into runway-frame feet). Completes by stopping at the spot aligned to the painted heading with parking brake set. Note: can also be called during rollout — will displace pattern_fly via axis-ownership conflict and turn off the runway onto the chosen taxiway, useful when ATC gave you a known gate at landing. Find candidates with sql_query against parking_spots (filter by airport_ident; match `categories` against aircraft class, e.g. LIKE '%props%' for a single-engine piston, or operation_type='general_aviation' for a GA ramp).",
+            "Taxi to a parking spot and stop with the nose aligned to the spot's painted heading. INBOUND counterpart to engage_taxi — this is the tool for getting from a post-landing rollout position (or any ground position) to a parking spot. Do not call engage_taxi with the runway you just landed on as a workaround for parking; that route doesn't exist by design. Plans a taxi route to the taxi-network node nearest the 1300 parking spot, appends a short lead-in leg to the spot's exact lat/lon, and drives to a final pose at the spot's heading. Displaces any active three-axis profile. Auto-releases the parking brake if set. Preconditions: parking spot must exist in apt.dat (case-insensitive match). Completes by stopping at the spot aligned to the painted heading with parking brake set. Note: can also be called during rollout — will displace pattern_fly via axis-ownership conflict and turn off the runway onto the chosen taxiway, useful when ATC gave you a known gate at landing. Find candidates with sql_query against parking_spots (filter by airport_ident; match `categories` against aircraft class, e.g. LIKE '%props%' for a single-engine piston, or operation_type='general_aviation' for a GA ramp).",
             json!({
                 "airport_ident": {
                     "type": "string",
@@ -3320,11 +3320,11 @@ pub fn tool_schemas(include_mission_complete: bool) -> Vec<ToolDef> {
                 },
                 "start_lat": {
                     "type": ["number", "null"],
-                    "description": "Starting latitude. If null, the current aircraft position from X-Plane is used."
+                    "description": "Starting latitude. If null, the current aircraft position is used."
                 },
                 "start_lon": {
                     "type": ["number", "null"],
-                    "description": "Starting longitude. If null, the current aircraft position from X-Plane is used."
+                    "description": "Starting longitude. If null, the current aircraft position is used."
                 }
             }),
             &["airport_ident", "parking_name", "via_taxiways", "start_lat", "start_lon"],
@@ -3348,11 +3348,11 @@ pub fn tool_schemas(include_mission_complete: bool) -> Vec<ToolDef> {
                 },
                 "start_lat": {
                     "type": ["number", "null"],
-                    "description": "Starting latitude. If null, the current aircraft position from X-Plane is used."
+                    "description": "Starting latitude. If null, the current aircraft position is used."
                 },
                 "start_lon": {
                     "type": ["number", "null"],
-                    "description": "Starting longitude. If null, the current aircraft position from X-Plane is used."
+                    "description": "Starting longitude. If null, the current aircraft position is used."
                 }
             }),
             &["airport_ident", "parking_name", "via_taxiways", "start_lat", "start_lon"],
@@ -3463,7 +3463,7 @@ pub fn tool_schemas(include_mission_complete: bool) -> Vec<ToolDef> {
 //   * ST_Distance_Sphere-only-accepts-POINT warning + crosstrack /
 //     along-track example — the LLM tried to pass a LINESTRING and fail.
 const SQL_QUERY_DESCRIPTION: &str = "Run a read-only SQL query against the runway/airport/comms/taxi \
-database (derived from X-Plane's apt.dat). Authoritative source for runway and airport facts — \
+database. Authoritative source for runway and airport facts — \
 never guess a runway identifier, airport code, course, length, elevation, or ATC frequency; \
 query for it. DuckDB with the spatial extension; results are tab-separated with a header row, \
 truncated to 50 rows. Completes immediately.

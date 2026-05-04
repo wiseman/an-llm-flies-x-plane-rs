@@ -22,6 +22,10 @@ use crate::llm::backend::{
 };
 use crate::llm::tools::{dispatch_tool, tool_schemas, ToolContext};
 
+// system_prompt.md is pinned as message 0 and is the prompt-cache anchor for
+// every turn — its bytes must stay stable mid-session. Per-session data (tail
+// number, starting airport, operator prefs) goes in rotating history, not in
+// the prompt file.
 pub const SYSTEM_PROMPT: &str = include_str!("system_prompt.md");
 pub const SYSTEM_PROMPT_REALISTIC_OVERLAY: &str = include_str!("system_prompt_realistic_overlay.md");
 pub const SYSTEM_PROMPT_REALISTIC: &str = concat!(
