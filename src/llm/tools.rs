@@ -2320,6 +2320,9 @@ pub fn tool_plan_park_route(ctx: &ToolContext, args: &Map<String, Value>) -> Str
 }
 
 pub fn tool_engage_park(ctx: &ToolContext, args: &Map<String, Value>) -> String {
+    if ctx.pilot.lock().has_profile("pattern_fly") {
+        return "error: pattern_fly is still controlling landing rollout/runway exit; wait until it reaches the active-zone boundary, stops, and releases before calling engage_park".to_string();
+    }
     let bridge = match ctx.bridge.as_ref() {
         Some(b) => b.clone(),
         None => {
@@ -3320,7 +3323,7 @@ pub fn tool_schemas(include_mission_complete: bool) -> Vec<ToolDef> {
         ),
         schema(
             "engage_park",
-            "Taxi to a parking spot and stop with the nose aligned to the spot's painted heading. INBOUND counterpart to engage_taxi — this is the tool for getting from a post-landing rollout position (or any ground position) to a parking spot. Do not call engage_taxi with the runway you just landed on as a workaround for parking; that route doesn't exist by design. Plans a taxi route to the taxi-network node nearest the 1300 parking spot, appends a short lead-in leg to the spot's exact lat/lon, and drives to a final pose at the spot's heading. Displaces any active three-axis profile. Auto-releases the parking brake if set. Preconditions: parking spot must exist in apt.dat (case-insensitive match). Completes by stopping at the spot aligned to the painted heading with parking brake set. Note: can also be called during rollout — will displace pattern_fly via axis-ownership conflict and turn off the runway onto the chosen taxiway, useful when ATC gave you a known gate at landing. Find candidates with sql_query against parking_spots (filter by airport_ident; match `categories` against aircraft class, e.g. LIKE '%props%' for a single-engine piston, or operation_type='general_aviation' for a GA ramp).",
+            "Taxi to a parking spot and stop with the nose aligned to the spot's painted heading. INBOUND counterpart to engage_taxi — this is the tool for getting from a completed post-landing runway exit (or any other ground position) to parking. Do not call engage_taxi with the runway you just landed on as a workaround for parking; that route doesn't exist by design. Plans a taxi route to the taxi-network node nearest the 1300 parking spot, appends a short lead-in leg to the spot's exact lat/lon, and drives to a final pose at the spot's heading. Auto-releases the parking brake if set. Preconditions: parking spot must exist in apt.dat and pattern_fly must have finished the runway exit, stopped, and released; calling during rollout is rejected so parking guidance cannot cut across the runway environment. Completes by stopping at the spot aligned to the painted heading with parking brake set. Find candidates with sql_query against parking_spots (filter by airport_ident; match `categories` against aircraft class, e.g. LIKE '%props%' for a single-engine piston, or operation_type='general_aviation' for a GA ramp).",
             json!({
                 "airport_ident": {
                     "type": "string",
@@ -3376,7 +3379,7 @@ pub fn tool_schemas(include_mission_complete: bool) -> Vec<ToolDef> {
         ),
         schema(
             "choose_runway_exit",
-            "Record a preferred runway-exit taxiway for the post-landing rollout. The rollout controller slows to turnoff speed by the exit's stationing and, once clear of the hold-short line, pattern_fly auto-releases — the aircraft stops clear of the runway with parking brake set, ready for engage_park. Pass null to clear any prior preference. Preconditions: pattern_fly should be active; call on final or any time before touchdown. Completes immediately — the rollout logic uses the preference on the next landing. Fallback: if the chosen exit is un-makable (aircraft still fast at that stationing), the rollout falls back to the next available exit and logs it.",
+            "Record a preferred runway-exit taxiway for the post-landing rollout. The rollout controller slows on centerline, follows the exit's actual apt.dat taxi-network geometry, and stops at the first node beyond the runway active zone before pattern_fly releases. Pass null to clear any prior preference. Preconditions: pattern_fly should be active; call on final or any time before touchdown. Completes immediately — the rollout logic uses the preference on the next landing. If the selected exit is missed, the aircraft remains on centerline and stops at the runway end instead of cutting back toward it.",
             json!({
                 "taxiway_name": {
                     "type": ["string", "null"],

@@ -1684,11 +1684,32 @@ fn plan_park_route_unknown_spot_errors() {
 }
 
 #[test]
-fn engage_park_swaps_in_taxi_profile_and_clears_pattern() {
+fn engage_park_installs_taxi_profile_after_runway_exit() {
     let dir = TempDir::new().unwrap();
     build_park_fixture_parquet(dir.path());
     let (ctx, _bridge) = make_ctx_with_parquet(dir.path());
-    // Engage pattern_fly first so we can verify engage_park displaces it.
+    let r = dispatch(
+            "engage_park",
+            json!({
+                "airport_ident": "KTEST",
+                "parking_name": "Gate A4",
+                "via_taxiways": [],
+                "start_lat": 37.000500,
+                "start_lon": -122.002000,
+            }),
+        &ctx);
+    assert!(!r.starts_with("error"), "got: {}", r);
+    assert!(r.contains("engaged park KTEST"));
+    assert!(r.contains("Gate A4"));
+    assert!(r.contains("heading 90"));
+    assert!(ctx.pilot.lock().has_profile("taxi"));
+}
+
+#[test]
+fn engage_park_rejects_while_pattern_controls_runway_exit() {
+    let dir = TempDir::new().unwrap();
+    build_park_fixture_parquet(dir.path());
+    let (ctx, _bridge) = make_ctx_with_parquet(dir.path());
     let p = PatternFlyProfile::new(
         load_default_config_bundle(),
         xplane_pilot::guidance::runway_geometry::RunwayFrame::new(
@@ -1716,13 +1737,12 @@ fn engage_park_swaps_in_taxi_profile_and_clears_pattern() {
                 "start_lon": -122.002000,
             }),
         &ctx);
-    assert!(!r.starts_with("error"), "got: {}", r);
-    assert!(r.contains("engaged park KTEST"));
-    assert!(r.contains("Gate A4"));
-    assert!(r.contains("heading 90"));
+    assert!(r.starts_with("error"), "got: {}", r);
+    assert!(r.contains("pattern_fly"));
+    assert!(r.contains("wait until"));
     let names = ctx.pilot.lock().list_profile_names();
-    assert!(names.contains(&"taxi".to_string()), "profiles = {:?}", names);
-    assert!(!names.contains(&"pattern_fly".to_string()));
+    assert!(!names.contains(&"taxi".to_string()), "profiles = {:?}", names);
+    assert!(names.contains(&"pattern_fly".to_string()));
 }
 
 #[test]

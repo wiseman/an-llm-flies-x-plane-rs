@@ -757,9 +757,13 @@ pub struct PatternFlyProfile {
     /// The rollout logic aims the brake profile to reach turnoff speed by
     /// the time the aircraft reaches this taxiway's stationing; when the
     /// wheels are past the hold-short line the profile auto-hands off to
-    /// idle and stops the aircraft clear of the runway. `None` = take the
-    /// first available exit.
+    /// idle and stops the aircraft clear of the runway. `None` = remain
+    /// on the runway centerline and stop.
     pub preferred_exit: Option<RunwayExitPlan>,
+    exit_committed: bool,
+    exit_leg_idx: usize,
+    exit_path_complete: bool,
+    exit_missed: bool,
 }
 
 impl PatternFlyProfile {
@@ -796,16 +800,23 @@ impl PatternFlyProfile {
             runway_frame,
             handoff_request: None,
             preferred_exit: None,
+            exit_committed: false,
+            exit_leg_idx: 0,
+            exit_path_complete: false,
+            exit_missed: false,
         }
     }
 
     pub fn go_around(&mut self) { self.force_go_around_trigger = true; }
 
     /// Record (or clear) the preferred runway-exit taxiway for the
-    /// post-landing rollout. `None` = let the rollout pick the first
-    /// available exit.
+    /// post-landing rollout. `None` keeps the aircraft on centerline.
     pub fn set_preferred_exit(&mut self, exit: Option<RunwayExitPlan>) {
         self.preferred_exit = exit;
+        self.exit_committed = false;
+        self.exit_leg_idx = 0;
+        self.exit_path_complete = false;
+        self.exit_missed = false;
     }
     pub fn execute_touch_and_go(&mut self) { self.touch_and_go_trigger = true; }
 
@@ -892,49 +903,125 @@ impl PatternFlyProfile {
         alt_err < 100.0 && state.vs_fpm.abs() < 200.0
     }
 
-    fn rollout_guidance(&self, state: &AircraftState, phase: FlightPhase) -> GuidanceTargets {
-        const TURN_LEAD_FT: f64 = 250.0;
-        const TURN_RUNOUT_FT: f64 = 100.0;
-        const CLEAR_OFFSET_FT: f64 = 200.0;
+    fn runway_exit_leg(&self) -> Option<StraightLeg> {
+        let exit = self.preferred_exit.as_ref()?;
+        let start = *exit.path_runway_ft.get(self.exit_leg_idx)?;
+        let end = *exit.path_runway_ft.get(self.exit_leg_idx + 1)?;
+        Some(StraightLeg {
+            start_ft: self.runway_frame.to_world_frame(start),
+            end_ft: self.runway_frame.to_world_frame(end),
+        })
+    }
+
+    fn update_runway_exit_progress(&mut self, state: &AircraftState) {
+        const INTERSECTION_CAPTURE_FT: f64 = 20.0;
+        const MISSED_EXIT_FT: f64 = 60.0;
+        const LEG_CAPTURE_FT: f64 = 8.0;
+
+        let Some(exit) = self.preferred_exit.as_ref() else { return };
+        let Some(runway_x) = state.runway_x_ft else { return };
+        if exit.path_runway_ft.len() < 2 {
+            self.exit_missed = true;
+            return;
+        }
+
+        if !self.exit_committed && !self.exit_missed {
+            if runway_x > exit.stationing_ft + MISSED_EXIT_FT {
+                self.exit_missed = true;
+                return;
+            }
+            if runway_x >= exit.stationing_ft - INTERSECTION_CAPTURE_FT
+                && state.gs_kt <= self.config.post_landing.turnoff_speed_kt + 5.0
+            {
+                self.exit_committed = true;
+                self.exit_leg_idx = 0;
+            }
+        }
+        if !self.exit_committed || self.exit_path_complete {
+            return;
+        }
+
+        while let Some(leg) = self.runway_exit_leg() {
+            let to_end = leg.end_ft - leg.start_ft;
+            let leg_len = to_end.length().max(1.0);
+            let along = (state.position_ft - leg.start_ft).dot(to_end * (1.0 / leg_len));
+            let reached = state.position_ft.distance_to(leg.end_ft) <= LEG_CAPTURE_FT;
+            if !reached && along <= leg_len {
+                break;
+            }
+            self.exit_leg_idx += 1;
+            let leg_count = exit.path_runway_ft.len() - 1;
+            if self.exit_leg_idx >= leg_count {
+                self.exit_path_complete = true;
+                break;
+            }
+        }
+    }
+
+    fn rollout_guidance(&self, state: &AircraftState, _phase: FlightPhase) -> GuidanceTargets {
+        const SLOWDOWN_LEAD_FT: f64 = 300.0;
+        const FINAL_STOP_RAMP_FT: f64 = 60.0;
         const EXIT_SPEED_KT: f64 = 5.0;
 
         if let Some(exit) = &self.preferred_exit {
             let runway_x = state.runway_x_ft.unwrap_or(f64::NEG_INFINITY);
-            let turn_start_x = exit.stationing_ft - TURN_LEAD_FT;
-            let committed = phase == FlightPhase::RunwayExit
-                || (runway_x >= turn_start_x
-                    && state.gs_kt <= self.config.post_landing.turnoff_speed_kt + 5.0);
-            if committed {
-                let side = exit
-                    .path_runway_ft
-                    .last()
-                    .map(|point| if point.y < 0.0 { -1.0 } else { 1.0 })
-                    .unwrap_or(1.0);
-                let path = StraightLeg {
-                    start_ft: self.runway_frame.to_world_frame(Vec2::new(turn_start_x, 0.0)),
-                    end_ft: self.runway_frame.to_world_frame(Vec2::new(
-                        exit.stationing_ft + TURN_RUNOUT_FT,
-                        side * CLEAR_OFFSET_FT,
-                    )),
+            if self.exit_committed {
+                let path = self.runway_exit_leg().or_else(|| {
+                    let points = &exit.path_runway_ft;
+                    let start = *points.get(points.len().checked_sub(2)?)?;
+                    let end = *points.last()?;
+                    Some(StraightLeg {
+                        start_ft: self.runway_frame.to_world_frame(start),
+                        end_ft: self.runway_frame.to_world_frame(end),
+                    })
+                });
+                let target_speed = if self.exit_path_complete {
+                    0.0
+                } else if self.exit_leg_idx + 2 >= exit.path_runway_ft.len() {
+                    let distance = exit
+                        .path_runway_ft
+                        .last()
+                        .map(|point| {
+                            state
+                                .position_ft
+                                .distance_to(self.runway_frame.to_world_frame(*point))
+                        })
+                        .unwrap_or(0.0);
+                    (distance / FINAL_STOP_RAMP_FT * EXIT_SPEED_KT).clamp(0.0, EXIT_SPEED_KT)
+                } else {
+                    EXIT_SPEED_KT
                 };
                 return GuidanceTargets {
                     lateral_mode: LateralMode::TaxiFollow,
                     vertical_mode: VerticalMode::Taxi,
-                    target_path: Some(path),
-                    target_speed_kt: Some(EXIT_SPEED_KT),
+                    target_path: path,
+                    target_speed_kt: Some(target_speed),
                     target_pitch_deg: Some(0.0),
                     throttle_limit: Some((0.0, 1.0)),
                     ..Default::default()
                 };
             }
 
+            let distance_to_exit = exit.stationing_ft - runway_x;
+            let target_speed = if self.exit_missed {
+                let distance_to_end = self.runway_frame.runway.length_ft - runway_x;
+                if distance_to_end <= SLOWDOWN_LEAD_FT {
+                    0.0
+                } else {
+                    self.config.post_landing.turnoff_speed_kt
+                }
+            } else if distance_to_exit <= SLOWDOWN_LEAD_FT {
+                EXIT_SPEED_KT
+            } else {
+                self.config.post_landing.turnoff_speed_kt
+            };
             return GuidanceTargets {
                 lateral_mode: LateralMode::RolloutCenterline,
                 vertical_mode: VerticalMode::Taxi,
                 target_bank_deg: Some(0.0),
                 target_heading_deg: Some(self.runway_frame.runway.course_deg),
                 target_pitch_deg: Some(0.0),
-                target_speed_kt: Some(self.config.post_landing.turnoff_speed_kt),
+                target_speed_kt: Some(target_speed),
                 throttle_limit: Some((0.0, 1.0)),
                 ..Default::default()
             };
@@ -1319,6 +1406,10 @@ impl GuidanceProfile for PatternFlyProfile {
             }
         }
 
+        if matches!(self.phase, FlightPhase::Rollout | FlightPhase::RunwayExit) {
+            self.update_runway_exit_progress(state);
+        }
+
         self.route_manager.advance_if_needed(state.position_ft);
         let safety = self.safety_monitor.evaluate(state, self.phase);
         let previous_phase = self.phase;
@@ -1335,6 +1426,21 @@ impl GuidanceProfile for PatternFlyProfile {
             stay_in_pattern: true,
             touch_and_go: self.touch_and_go_trigger,
         });
+        // A selected exit carries authoritative active-zone geometry.
+        // Once committed, graph progress—not an arbitrary lateral offset—
+        // owns RunwayExit/TaxiClear sequencing. This prevents handoff in
+        // the middle of a multi-edge connector.
+        if self.preferred_exit.is_some()
+            && matches!(previous_phase, FlightPhase::Rollout | FlightPhase::RunwayExit)
+            && self.exit_committed
+            && !self.exit_missed
+        {
+            self.phase = if self.exit_path_complete && state.gs_kt <= 1.0 {
+                FlightPhase::TaxiClear
+            } else {
+                FlightPhase::RunwayExit
+            };
+        }
         // Consume one-shot triggers when their corresponding transition
         // has been taken (or is no longer applicable because the phase
         // advanced anyway).
@@ -1516,12 +1622,20 @@ impl GuidanceProfile for PatternFlyProfile {
             }),
             FlightPhase::Rollout => Some(TransitionHint {
                 next_phase: FlightPhase::RunwayExit,
-                condition_text: "off centerline (>75 ft) or stopped past end".to_string(),
+                condition_text: if let Some(exit) = &self.preferred_exit {
+                    format!("reach {} intersection at {:.0} ft", exit.taxiway_name, exit.stationing_ft)
+                } else {
+                    "off centerline (>75 ft) or stopped past end".to_string()
+                },
                 eta_s: None,
             }),
             FlightPhase::RunwayExit => Some(TransitionHint {
                 next_phase: FlightPhase::TaxiClear,
-                condition_text: "stopped, off runway".to_string(),
+                condition_text: if let Some(exit) = &self.preferred_exit {
+                    format!("follow {} to active-zone boundary and stop", exit.taxiway_name)
+                } else {
+                    "stopped, off runway".to_string()
+                },
                 eta_s: None,
             }),
             FlightPhase::GoAround => Some(TransitionHint {

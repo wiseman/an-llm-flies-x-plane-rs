@@ -70,16 +70,25 @@ fn selected_exit_drives_rollout_clear_of_runway() {
     let mut profile = PatternFlyProfile::new(config.clone(), frame.clone());
     profile.phase = FlightPhase::Rollout;
     profile.set_preferred_exit(Some(RunwayExitPlan {
-        taxiway_name: "A5".to_string(),
+        taxiway_name: "E".to_string(),
         stationing_ft: 3000.0,
-        path_runway_ft: vec![Vec2::new(3000.0, 0.0), Vec2::new(3100.0, 200.0)],
+        path_runway_ft: vec![
+            Vec2::new(3000.0, 0.0),
+            Vec2::new(2950.0, 100.0),
+            Vec2::new(2920.0, 140.0),
+        ],
     }));
     let mut pilot = PilotCore::new(config);
     pilot.engage_profile(Box::new(profile));
 
+    let mut first_runway_departure_x = None;
     for _ in 0..1000 {
         let (_, commands) = pilot.update(&raw, 0.2);
         model.step(&mut raw, &commands, 0.2);
+        let position = frame.to_runway_frame(raw.position_ft);
+        if first_runway_departure_x.is_none() && position.y.abs() >= 30.0 {
+            first_runway_departure_x = Some(position.x);
+        }
         if pilot.phase() == FlightPhase::TaxiClear {
             break;
         }
@@ -93,6 +102,13 @@ fn selected_exit_drives_rollout_clear_of_runway() {
         raw.ias_kt,
         raw.heading_deg
     );
-    assert!(runway_position.y.abs() > 150.0);
+    assert!(
+        first_runway_departure_x.is_some_and(|x| x >= 2940.0),
+        "left runway before the graph intersection: {first_runway_departure_x:?}"
+    );
+    assert!(
+        runway_position.distance_to(Vec2::new(2920.0, 140.0)) < 25.0,
+        "did not stop at active-zone boundary: {runway_position:?}"
+    );
     assert!(!pilot.has_profile("pattern_fly"));
 }

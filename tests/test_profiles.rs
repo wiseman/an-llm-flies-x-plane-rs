@@ -518,13 +518,13 @@ fn flap_schedule_per_phase_follows_c172_sop() {
 }
 
 #[test]
-fn selected_runway_exit_turns_off_centerline_at_taxi_speed() {
+fn selected_runway_exit_slows_without_leaving_centerline_early() {
     let (cfg, pilot) = make_pilot();
     let mut profile = PatternFlyProfile::new(cfg, pilot.runway_frame.clone());
     profile.set_preferred_exit(Some(RunwayExitPlan {
         taxiway_name: "A5".to_string(),
         stationing_ft: 3000.0,
-        path_runway_ft: vec![Vec2::new(3000.0, 0.0), Vec2::new(3100.0, 200.0)],
+        path_runway_ft: vec![Vec2::new(3000.0, 0.0), Vec2::new(2950.0, 100.0)],
     }));
     let state = AircraftState {
         runway_x_ft: Some(2800.0),
@@ -535,12 +535,85 @@ fn selected_runway_exit_turns_off_centerline_at_taxi_speed() {
         ..AircraftState::synthetic_default()
     };
     let guidance = profile.guidance_for_phase(&state, FlightPhase::Rollout);
-    assert_eq!(guidance.lateral_mode, LateralMode::TaxiFollow);
+    assert_eq!(guidance.lateral_mode, LateralMode::RolloutCenterline);
     assert_eq!(guidance.vertical_mode, VerticalMode::Taxi);
     assert_eq!(guidance.target_speed_kt, Some(5.0));
-    let path = guidance.target_path.expect("exit path");
+    assert!(guidance.target_path.is_none());
+}
+
+#[test]
+fn selected_runway_exit_commits_to_exact_graph_leg_at_intersection() {
+    let (cfg, pilot) = make_pilot();
+    let mut profile = PatternFlyProfile::new(cfg, pilot.runway_frame.clone());
+    profile.phase = FlightPhase::Rollout;
+    profile.set_preferred_exit(Some(RunwayExitPlan {
+        taxiway_name: "E".to_string(),
+        stationing_ft: 3000.0,
+        path_runway_ft: vec![
+            Vec2::new(3000.0, 0.0),
+            Vec2::new(2950.0, -100.0),
+            Vec2::new(2920.0, -140.0),
+        ],
+    }));
+    let state = AircraftState {
+        runway_x_ft: Some(2990.0),
+        runway_y_ft: Some(0.0),
+        position_ft: pilot.runway_frame.to_world_frame(Vec2::new(2990.0, 0.0)),
+        gs_kt: 5.0,
+        on_ground: true,
+        ..AircraftState::synthetic_default()
+    };
+
+    let tick = profile.contribute(&state, 0.2);
+    assert_eq!(profile.phase, FlightPhase::RunwayExit);
+    assert_eq!(tick.contribution.lateral_mode, Some(LateralMode::TaxiFollow));
+    let path = tick.contribution.target_path.expect("actual exit graph leg");
+    let start = pilot.runway_frame.to_runway_frame(path.start_ft);
     let end = pilot.runway_frame.to_runway_frame(path.end_ft);
-    assert!(end.y > 150.0, "exit endpoint should be clear: {end:?}");
+    assert_abs_diff_eq!(start.x, 3000.0, epsilon = 1e-6);
+    assert_abs_diff_eq!(start.y, 0.0, epsilon = 1e-6);
+    assert_abs_diff_eq!(end.x, 2950.0, epsilon = 1e-6);
+    assert_abs_diff_eq!(end.y, -100.0, epsilon = 1e-6);
+}
+
+#[test]
+fn missed_runway_exit_never_commands_a_cutback() {
+    let (cfg, pilot) = make_pilot();
+    let runway_length = pilot.runway_frame.runway.length_ft;
+    let turnoff_speed = cfg.post_landing.turnoff_speed_kt;
+    let mut profile = PatternFlyProfile::new(cfg, pilot.runway_frame.clone());
+    profile.phase = FlightPhase::Rollout;
+    profile.set_preferred_exit(Some(RunwayExitPlan {
+        taxiway_name: "B".to_string(),
+        stationing_ft: 3000.0,
+        path_runway_ft: vec![Vec2::new(3000.0, 0.0), Vec2::new(2950.0, 100.0)],
+    }));
+    let missed = AircraftState {
+        runway_x_ft: Some(3070.0),
+        runway_y_ft: Some(0.0),
+        position_ft: pilot.runway_frame.to_world_frame(Vec2::new(3070.0, 0.0)),
+        gs_kt: 15.0,
+        on_ground: true,
+        ..AircraftState::synthetic_default()
+    };
+
+    let tick = profile.contribute(&missed, 0.2);
+    assert_eq!(profile.phase, FlightPhase::Rollout);
+    assert_eq!(tick.contribution.lateral_mode, Some(LateralMode::RolloutCenterline));
+    assert!(tick.contribution.target_path.is_none());
+    assert_eq!(tick.contribution.target_speed_kt, Some(turnoff_speed));
+
+    let near_end = AircraftState {
+        runway_x_ft: Some(runway_length - 100.0),
+        runway_y_ft: Some(0.0),
+        position_ft: pilot
+            .runway_frame
+            .to_world_frame(Vec2::new(runway_length - 100.0, 0.0)),
+        ..missed
+    };
+    let tick = profile.contribute(&near_end, 0.2);
+    assert_eq!(tick.contribution.lateral_mode, Some(LateralMode::RolloutCenterline));
+    assert_eq!(tick.contribution.target_speed_kt, Some(0.0));
 }
 
 #[test]
