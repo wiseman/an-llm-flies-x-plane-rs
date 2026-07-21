@@ -573,7 +573,7 @@ impl PilotCore {
             )
         } else if guidance.vertical_mode == VerticalMode::FlareTrack {
             let pitch_cmd = self.flare_controller.target_pitch_deg(
-                state.alt_agl_ft,
+                state.landing_agl_ft(),
                 state.vs_fpm,
                 guidance.target_speed_kt.unwrap_or(state.ias_kt) - state.ias_kt,
             );

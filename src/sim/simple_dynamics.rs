@@ -11,6 +11,11 @@ use crate::types::{
 pub struct DynamicsState {
     pub position_ft: Vec2,
     pub altitude_ft: f64,
+    /// Geometric height above the terrain directly below the aircraft
+    /// (X-Plane `y_agl`), when the backend can measure it. `None` on the
+    /// simple backend, whose terrain is flat at field elevation — the
+    /// state estimator falls back to `MSL - field_elevation` there.
+    pub agl_ft: Option<f64>,
     pub heading_deg: f64,
     pub roll_deg: f64,
     pub pitch_deg: f64,
@@ -66,6 +71,7 @@ impl SimpleAircraftModel {
         DynamicsState {
             position_ft,
             altitude_ft: field_elevation_ft,
+            agl_ft: None,
             heading_deg,
             roll_deg: 0.0,
             pitch_deg: 0.0,

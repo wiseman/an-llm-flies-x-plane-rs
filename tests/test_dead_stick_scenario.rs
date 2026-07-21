@@ -73,6 +73,7 @@ fn run_dead_stick_scenario(
     let mut raw_state = DynamicsState {
         position_ft: world_pos,
         altitude_ft: config.airport.field_elevation_ft + altitude_agl_ft,
+        agl_ft: None,
         heading_deg,
         roll_deg: 0.0,
         pitch_deg,

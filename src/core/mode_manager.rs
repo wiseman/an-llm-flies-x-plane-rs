@@ -231,13 +231,13 @@ impl ModeManager {
                 }
                 match phase {
                     FlightPhase::Final => {
-                        if state.alt_agl_ft <= self.config.flare.roundout_height_ft {
+                        if state.landing_agl_ft() <= self.config.flare.roundout_height_ft {
                             return FlightPhase::Roundout;
                         }
                         phase
                     }
                     FlightPhase::Roundout => {
-                        if state.alt_agl_ft <= self.config.flare.flare_start_ft {
+                        if state.landing_agl_ft() <= self.config.flare.flare_start_ft {
                             return FlightPhase::Flare;
                         }
                         phase

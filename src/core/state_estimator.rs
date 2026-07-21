@@ -32,6 +32,7 @@ pub fn estimate_aircraft_state(
         position_ft: raw.position_ft,
         alt_msl_ft: raw.altitude_ft,
         alt_agl_ft: (raw.altitude_ft - config.airport.field_elevation_ft).max(0.0),
+        alt_radio_agl_ft: raw.agl_ft.map(|v| v.max(0.0)),
         pitch_deg: raw.pitch_deg,
         roll_deg: raw.roll_deg,
         heading_deg: raw.heading_deg,

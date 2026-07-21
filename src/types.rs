@@ -451,6 +451,15 @@ pub struct AircraftState {
     pub position_ft: Vec2,
     pub alt_msl_ft: f64,
     pub alt_agl_ft: f64,
+    /// Geometric height above the terrain directly below (a radar
+    /// altimeter), vs `alt_agl_ft` which is height above *field
+    /// elevation* (baro minus a database constant). The two disagree
+    /// wherever the sim's terrain mesh doesn't sit exactly at the
+    /// apt.dat airport elevation. Landing-critical logic (roundout /
+    /// flare triggers and pitch laws) must prefer this when present;
+    /// pattern altitudes stay field-referenced on `alt_agl_ft` so legs
+    /// don't chase terrain undulations. `None` on the simple backend.
+    pub alt_radio_agl_ft: Option<f64>,
     pub pitch_deg: f64,
     pub roll_deg: f64,
     pub heading_deg: f64,
@@ -487,6 +496,7 @@ impl AircraftState {
             position_ft: Vec2::ZERO,
             alt_msl_ft: 1500.0,
             alt_agl_ft: 1000.0,
+            alt_radio_agl_ft: None,
             pitch_deg: 0.0,
             roll_deg: 0.0,
             heading_deg: 0.0,
@@ -512,6 +522,16 @@ impl AircraftState {
             distance_to_touchdown_ft: Some(2000.0),
             stall_margin: 1.5,
         }
+    }
+
+    /// Height above the pavement for landing-critical decisions
+    /// (roundout/flare triggers and pitch laws): the radar-altimeter
+    /// value when the backend provides one, else the field-referenced
+    /// AGL. Over terrain that drops away short of the threshold this
+    /// reads high on very short final, which only delays the flare
+    /// until pavement is actually under the wheels — the safe direction.
+    pub fn landing_agl_ft(&self) -> f64 {
+        self.alt_radio_agl_ft.unwrap_or(self.alt_agl_ft)
     }
 }
 

@@ -128,6 +128,7 @@ fn rotate_state(config: &xplane_pilot::config::ConfigBundle, on_ground: bool, tr
         position_ft: Vec2::ZERO,
         alt_msl_ft: config.airport.field_elevation_ft + if on_ground { 0.0 } else { 20.0 },
         alt_agl_ft: if on_ground { 0.0 } else { 20.0 },
+        alt_radio_agl_ft: None,
         pitch_deg: if on_ground { 3.0 } else { 8.0 },
         roll_deg: 0.0,
         heading_deg: track,
@@ -521,6 +522,7 @@ fn altitude_hold_end_to_end_climb_through_pilot() {
     let raw = xplane_pilot::sim::simple_dynamics::DynamicsState {
         position_ft: Vec2::ZERO,
         altitude_ft: 1387.0,
+        agl_ft: None,
         heading_deg: 0.0,
         roll_deg: 0.0,
         pitch_deg: 0.0,

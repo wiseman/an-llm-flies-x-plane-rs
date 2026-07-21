@@ -570,6 +570,7 @@ impl XPlaneWebBridge {
         Ok(DynamicsState {
             position_ft,
             altitude_ft: altitude_m * M_TO_FT,
+            agl_ft: Some(y_agl_m * M_TO_FT),
             heading_deg: cache[HEADING_DEG.name],
             roll_deg: cache[ROLL_DEG.name],
             pitch_deg: cache[PITCH_DEG.name],

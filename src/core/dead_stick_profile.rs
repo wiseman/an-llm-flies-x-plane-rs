@@ -385,7 +385,7 @@ impl DeadStickLandingProfile {
                     bank_limit.min(8.0),
                 );
                 let pitch_cmd = 1.5
-                    + ((self.config.flare.roundout_height_ft - state.alt_agl_ft).max(0.0)) * 0.08;
+                    + ((self.config.flare.roundout_height_ft - state.landing_agl_ft()).max(0.0)) * 0.08;
                 GuidanceTargets {
                     lateral_mode: LateralMode::PathFollow,
                     vertical_mode: VerticalMode::PitchHold,
@@ -647,7 +647,7 @@ impl GuidanceProfile for DeadStickLandingProfile {
             }),
             FlightPhase::Final => {
                 let target_agl = self.config.flare.roundout_height_ft;
-                let descent_remaining_ft = (state.alt_agl_ft - target_agl).max(0.0);
+                let descent_remaining_ft = (state.landing_agl_ft() - target_agl).max(0.0);
                 let eta = if state.vs_fpm < -10.0 {
                     let descent_fps = (-state.vs_fpm) / 60.0;
                     if descent_fps > 0.5 && descent_remaining_ft > 0.0 {
@@ -662,7 +662,7 @@ impl GuidanceProfile for DeadStickLandingProfile {
                     next_phase: FlightPhase::Roundout,
                     condition_text: format!(
                         "AGL ≤ {:.0} ft (now {:.0})",
-                        target_agl, state.alt_agl_ft
+                        target_agl, state.landing_agl_ft()
                     ),
                     eta_s: eta,
                 })

@@ -12,6 +12,7 @@ fn make_state(position_ft: Vec2, track_deg: f64, gs_kt: f64) -> AircraftState {
         position_ft,
         alt_msl_ft: 3000.0,
         alt_agl_ft: 2500.0,
+        alt_radio_agl_ft: None,
         pitch_deg: 0.0,
         roll_deg: 0.0,
         heading_deg: track_deg,

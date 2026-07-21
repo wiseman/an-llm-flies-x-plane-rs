@@ -116,6 +116,46 @@ fn pattern_sequence_advances_one_phase_at_a_time() {
     );
 }
 
+// The roundout/flare triggers must run off the geometric (mesh) AGL when
+// the backend provides one — the field-referenced baro AGL is wrong by
+// however far the terrain mesh sits from the apt.dat airport elevation.
+#[test]
+fn roundout_and_flare_trigger_on_radio_agl_not_field_agl() {
+    let (cfg, mm, pattern, rm, safe) = fixtures();
+    // Field-referenced AGL says we're at flare height, but the radar
+    // altimeter says 40 ft — mesh sits below the database elevation.
+    // Must stay on Final rather than round out in mid-air.
+    let high_state = state_with(|s| {
+        s.alt_agl_ft = cfg.flare.roundout_height_ft - 1.0;
+        s.alt_radio_agl_ft = Some(40.0);
+        s.runway_x_ft = Some(-300.0);
+    });
+    assert_eq!(
+        update(&mm, FlightPhase::Final, &high_state, &rm, &pattern, &safe, false, false, false, false),
+        FlightPhase::Final
+    );
+    // Opposite sign: baro AGL still reads 30 ft but the wheels are
+    // nearly on the pavement. Must round out now, not below ground.
+    let low_state = state_with(|s| {
+        s.alt_agl_ft = 30.0;
+        s.alt_radio_agl_ft = Some(cfg.flare.roundout_height_ft - 1.0);
+        s.runway_x_ft = Some(-300.0);
+    });
+    assert_eq!(
+        update(&mm, FlightPhase::Final, &low_state, &rm, &pattern, &safe, false, false, false, false),
+        FlightPhase::Roundout
+    );
+    let flare_state = state_with(|s| {
+        s.alt_agl_ft = 25.0;
+        s.alt_radio_agl_ft = Some(cfg.flare.flare_start_ft - 1.0);
+        s.runway_x_ft = Some(50.0);
+    });
+    assert_eq!(
+        update(&mm, FlightPhase::Roundout, &flare_state, &rm, &pattern, &safe, false, false, false, false),
+        FlightPhase::Flare
+    );
+}
+
 #[test]
 fn slow_downwind_can_turn_base_soon_after_abeam() {
     let (_, mm, pattern, rm, safe) = fixtures();

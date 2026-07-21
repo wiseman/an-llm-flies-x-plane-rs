@@ -16,6 +16,7 @@ fn make_state(heading_deg: f64, ias_kt: f64, on_ground: bool) -> AircraftState {
         position_ft: Vec2::ZERO,
         alt_msl_ft: 500.0,
         alt_agl_ft: 0.0,
+        alt_radio_agl_ft: None,
         pitch_deg: 0.0,
         roll_deg: 0.0,
         heading_deg,

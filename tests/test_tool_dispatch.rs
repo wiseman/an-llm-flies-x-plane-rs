@@ -688,6 +688,7 @@ fn seed_snapshot(ctx: &ToolContext, flap_index: i32, on_ground: bool) {
         position_ft: Vec2::ZERO,
         alt_msl_ft: 314.0,
         alt_agl_ft: 0.0,
+        alt_radio_agl_ft: None,
         pitch_deg: 0.0,
         roll_deg: 0.0,
         heading_deg: 0.0,
