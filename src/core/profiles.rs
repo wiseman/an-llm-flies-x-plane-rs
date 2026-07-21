@@ -1429,7 +1429,7 @@ impl GuidanceProfile for PatternFlyProfile {
             }),
             FlightPhase::Rotate => Some(TransitionHint {
                 next_phase: FlightPhase::InitialClimb,
-                condition_text: "wheels off, vs > 250 fpm".to_string(),
+                condition_text: "wheels off and AGL ≥ 20 ft".to_string(),
                 eta_s: None,
             }),
             FlightPhase::InitialClimb => {

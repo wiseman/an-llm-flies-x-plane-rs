@@ -242,8 +242,8 @@ fn takeoff_profile_initial_climb_uses_l1_and_banks_toward_centerline() {
     let vy = cfg.performance.vy_kt;
     let state = AircraftState {
         position_ft,
-        alt_msl_ft: cfg.airport.field_elevation_ft + 400.0,
-        alt_agl_ft: 400.0,
+        alt_msl_ft: cfg.airport.field_elevation_ft + 350.0,
+        alt_agl_ft: 350.0,
         heading_deg: course,
         track_deg: course,
         ias_kt: vy,

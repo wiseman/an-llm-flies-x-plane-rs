@@ -117,7 +117,7 @@ impl ModeManager {
                 phase
             }
             FlightPhase::Rotate => {
-                if !state.on_ground && state.alt_agl_ft >= 20.0 && state.vs_fpm > 100.0 {
+                if !state.on_ground && state.alt_agl_ft >= 20.0 {
                     return FlightPhase::InitialClimb;
                 }
                 phase
@@ -126,14 +126,13 @@ impl ModeManager {
                 if stay_in_pattern {
                     let crosswind_turn_agl_ft =
                         (self.config.pattern.altitude_agl_ft - 300.0).max(400.0);
-                    let auto_ready =
-                        state.alt_agl_ft >= crosswind_turn_agl_ft && state.vs_fpm > 250.0;
+                    let auto_ready = state.alt_agl_ft >= crosswind_turn_agl_ft;
                     if triggers.turn_crosswind || (clearances.turn_crosswind && auto_ready) {
                         return FlightPhase::Crosswind;
                     }
                     return phase;
                 }
-                if state.alt_agl_ft >= 400.0 && state.vs_fpm > 250.0 {
+                if state.alt_agl_ft >= 400.0 {
                     return FlightPhase::EnrouteClimb;
                 }
                 phase
