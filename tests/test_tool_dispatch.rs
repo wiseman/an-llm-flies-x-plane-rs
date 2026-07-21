@@ -1728,13 +1728,24 @@ fn engage_park_swaps_in_taxi_profile_and_clears_pattern() {
 #[test]
 fn choose_runway_exit_records_preference_on_pattern_profile() {
     let dir = TempDir::new().unwrap();
-    build_fake_parquet(dir.path(), &[]);
+    let extra = vec![
+        "1 0 0 0 KEXIT KEXIT Test Exit Airport\n\
+         100 22.86 1 0 0.25 0 2 0 \
+         09 37.000100 -121.997500 0.00 0 0 0 0 0 \
+         27 37.000100 -121.987500 0.00 0 0 0 0 0\n\
+         1201 37.000200 -121.996500 both 1\n\
+         1201 37.000100 -121.996500 both 2\n\
+         1202 1 2 twoway taxiway_E A5\n\
+         1204 arrival 09\n"
+            .to_string(),
+    ];
+    build_fake_parquet(dir.path(), &extra);
     let (ctx, _bridge) = make_ctx_with_parquet(dir.path());
     dispatch(
         "engage_pattern_fly",
         json!({
-            "airport_ident": "KSEA",
-            "runway_ident": "16L",
+            "airport_ident": "KEXIT",
+            "runway_ident": "09",
             "side": "left",
             "start_phase": "pattern_entry",
         }),

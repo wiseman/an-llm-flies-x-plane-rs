@@ -7,8 +7,8 @@ use xplane_pilot::config::load_default_config_bundle;
 use xplane_pilot::core::mission_manager::PilotCore;
 use xplane_pilot::core::profiles::{
     build_rotate_guidance, build_takeoff_roll_guidance, AltitudeHoldProfile, ExtendMode,
-    GuidanceProfile, HeadingHoldProfile, PatternFlyProfile, PatternLeg, SpeedHoldProfile,
-    TakeoffProfile, TaxiProfile,
+    GuidanceProfile, HeadingHoldProfile, PatternFlyProfile, PatternLeg, RunwayExitPlan,
+    SpeedHoldProfile, TakeoffProfile, TaxiProfile,
 };
 use xplane_pilot::guidance::pattern_manager::glidepath_target_altitude_ft_default;
 use xplane_pilot::sim::simple_dynamics::SimpleAircraftModel;
@@ -512,6 +512,49 @@ fn flap_schedule_per_phase_follows_c172_sop() {
         let g = profile.guidance_for_phase(&state, phase);
         assert_eq!(g.flaps_cmd, Some(expected), "phase {:?}", phase);
     }
+}
+
+#[test]
+fn selected_runway_exit_turns_off_centerline_at_taxi_speed() {
+    let (cfg, pilot) = make_pilot();
+    let mut profile = PatternFlyProfile::new(cfg, pilot.runway_frame.clone());
+    profile.set_preferred_exit(Some(RunwayExitPlan {
+        taxiway_name: "A5".to_string(),
+        stationing_ft: 3000.0,
+        side_sign: 1.0,
+    }));
+    let state = AircraftState {
+        runway_x_ft: Some(2800.0),
+        runway_y_ft: Some(0.0),
+        position_ft: pilot.runway_frame.to_world_frame(Vec2::new(2800.0, 0.0)),
+        gs_kt: 15.0,
+        on_ground: true,
+        ..AircraftState::synthetic_default()
+    };
+    let guidance = profile.guidance_for_phase(&state, FlightPhase::Rollout);
+    assert_eq!(guidance.lateral_mode, LateralMode::TaxiFollow);
+    assert_eq!(guidance.vertical_mode, VerticalMode::Taxi);
+    assert_eq!(guidance.target_speed_kt, Some(5.0));
+    let path = guidance.target_path.expect("exit path");
+    let end = pilot.runway_frame.to_runway_frame(path.end_ft);
+    assert!(end.y > 150.0, "exit endpoint should be clear: {end:?}");
+}
+
+#[test]
+fn stopped_rollout_does_not_release_control_on_the_runway() {
+    let (cfg, pilot) = make_pilot();
+    let mut profile = PatternFlyProfile::new(cfg, pilot.runway_frame.clone());
+    profile.phase = FlightPhase::Rollout;
+    let state = AircraftState {
+        runway_x_ft: Some(3000.0),
+        runway_y_ft: Some(0.0),
+        gs_kt: 0.0,
+        on_ground: true,
+        ..AircraftState::synthetic_default()
+    };
+    let tick = profile.contribute(&state, 0.2);
+    assert!(tick.hand_off.is_none());
+    assert_eq!(profile.phase, FlightPhase::Rollout);
 }
 
 #[test]

@@ -437,16 +437,11 @@ pub fn build_rotate_guidance(
 pub(crate) fn post_landing_handoff(
     phase: FlightPhase,
     previous_phase: FlightPhase,
-    gs_kt: f64,
+    _gs_kt: f64,
 ) -> Option<Vec<Box<dyn GuidanceProfile>>> {
-    let post_landing = matches!(
-        phase,
-        FlightPhase::Rollout | FlightPhase::RunwayExit | FlightPhase::TaxiClear
-    );
     let first_tick_taxi_clear =
         phase == FlightPhase::TaxiClear && previous_phase != FlightPhase::TaxiClear;
-    let stopped_post_landing = post_landing && gs_kt < 0.5;
-    if first_tick_taxi_clear || stopped_post_landing {
+    if first_tick_taxi_clear {
         Some(idle_profile_trio(0.0))
     } else {
         None
@@ -740,6 +735,15 @@ pub struct PatternLegExtensions {
     pub downwind_ft: f64,
 }
 
+/// Resolved geometry for an autonomous runway exit.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RunwayExitPlan {
+    pub taxiway_name: String,
+    pub stationing_ft: f64,
+    /// -1 = left of runway course, +1 = right.
+    pub side_sign: f64,
+}
+
 pub struct PatternFlyProfile {
     pub config: ConfigBundle,
     pub runway_frame: RunwayFrame,
@@ -764,7 +768,7 @@ pub struct PatternFlyProfile {
     /// wheels are past the hold-short line the profile auto-hands off to
     /// idle and stops the aircraft clear of the runway. `None` = take the
     /// first available exit.
-    pub preferred_exit: Option<String>,
+    pub preferred_exit: Option<RunwayExitPlan>,
 }
 
 impl PatternFlyProfile {
@@ -809,8 +813,8 @@ impl PatternFlyProfile {
     /// Record (or clear) the preferred runway-exit taxiway for the
     /// post-landing rollout. `None` = let the rollout pick the first
     /// available exit.
-    pub fn set_preferred_exit(&mut self, taxiway: Option<String>) {
-        self.preferred_exit = taxiway;
+    pub fn set_preferred_exit(&mut self, exit: Option<RunwayExitPlan>) {
+        self.preferred_exit = exit;
     }
     pub fn execute_touch_and_go(&mut self) { self.touch_and_go_trigger = true; }
 
@@ -897,6 +901,62 @@ impl PatternFlyProfile {
         alt_err < 100.0 && state.vs_fpm.abs() < 200.0
     }
 
+    fn rollout_guidance(&self, state: &AircraftState, phase: FlightPhase) -> GuidanceTargets {
+        const TURN_LEAD_FT: f64 = 250.0;
+        const TURN_RUNOUT_FT: f64 = 100.0;
+        const CLEAR_OFFSET_FT: f64 = 200.0;
+        const EXIT_SPEED_KT: f64 = 5.0;
+
+        if let Some(exit) = &self.preferred_exit {
+            let runway_x = state.runway_x_ft.unwrap_or(f64::NEG_INFINITY);
+            let turn_start_x = exit.stationing_ft - TURN_LEAD_FT;
+            let committed = phase == FlightPhase::RunwayExit
+                || (runway_x >= turn_start_x
+                    && state.gs_kt <= self.config.post_landing.turnoff_speed_kt + 5.0);
+            if committed {
+                let side = if exit.side_sign < 0.0 { -1.0 } else { 1.0 };
+                let path = StraightLeg {
+                    start_ft: self.runway_frame.to_world_frame(Vec2::new(turn_start_x, 0.0)),
+                    end_ft: self.runway_frame.to_world_frame(Vec2::new(
+                        exit.stationing_ft + TURN_RUNOUT_FT,
+                        side * CLEAR_OFFSET_FT,
+                    )),
+                };
+                return GuidanceTargets {
+                    lateral_mode: LateralMode::TaxiFollow,
+                    vertical_mode: VerticalMode::Taxi,
+                    target_path: Some(path),
+                    target_speed_kt: Some(EXIT_SPEED_KT),
+                    target_pitch_deg: Some(0.0),
+                    throttle_limit: Some((0.0, 1.0)),
+                    ..Default::default()
+                };
+            }
+
+            return GuidanceTargets {
+                lateral_mode: LateralMode::RolloutCenterline,
+                vertical_mode: VerticalMode::Taxi,
+                target_bank_deg: Some(0.0),
+                target_heading_deg: Some(self.runway_frame.runway.course_deg),
+                target_pitch_deg: Some(0.0),
+                target_speed_kt: Some(self.config.post_landing.turnoff_speed_kt),
+                throttle_limit: Some((0.0, 1.0)),
+                ..Default::default()
+            };
+        }
+
+        GuidanceTargets {
+            lateral_mode: LateralMode::RolloutCenterline,
+            vertical_mode: VerticalMode::PitchHold,
+            target_bank_deg: Some(0.0),
+            target_heading_deg: Some(self.runway_frame.runway.course_deg),
+            target_pitch_deg: Some(0.0),
+            throttle_limit: Some((0.0, 0.0)),
+            brakes: 0.75,
+            ..Default::default()
+        }
+    }
+
     /// Build guidance for the current phase.
     pub fn guidance_for_phase(&mut self, state: &AircraftState, phase: FlightPhase) -> GuidanceTargets {
         let bank_limit = self.safety_monitor.bank_limit_deg(phase);
@@ -916,52 +976,7 @@ impl PatternFlyProfile {
             FlightPhase::Roundout => self.roundout_guidance(state, bank_limit),
             FlightPhase::Flare => self.flare_guidance(state, bank_limit),
             FlightPhase::Rollout | FlightPhase::RunwayExit => {
-                // Post-landing brake behavior:
-                // - If the LLM has named a preferred exit via
-                //   `choose_runway_exit`, modulate brakes so the
-                //   aircraft decelerates to `turnoff_speed_kt` and holds
-                //   it. "Does not stop until it clears the runway."
-                // - Near the departure end of the runway (last 500 ft)
-                //   apply full brakes regardless — the aircraft is not
-                //   going to find an exit at this point, so stop on
-                //   the runway rather than rolling off the end.
-                // - If we're below turnoff target but still rolling on
-                //   centerline, keep light braking so the aircraft
-                //   comes to a full stop. Without this, aircraft that
-                //   missed the preferred exit coast indefinitely at
-                //   1–5 kt with the pilot-LLM waiting for control.
-                // - Otherwise keep the legacy hard-brake so the
-                //   deterministic simple-backend scenarios (no LLM in
-                //   the loop) still converge to TaxiClear at 5 kt.
-                let brakes = if self.preferred_exit.is_some() {
-                    let target = self.config.post_landing.turnoff_speed_kt;
-                    let length_ft = self.runway_frame.runway.length_ft;
-                    let near_end = state
-                        .runway_x_ft
-                        .map(|x| x > length_ft - 500.0)
-                        .unwrap_or(false);
-                    if (near_end && state.gs_kt > 1.0) || state.gs_kt > target + 2.0 {
-                        0.75
-                    } else if state.gs_kt > target {
-                        0.35
-                    } else if state.gs_kt > 1.0 {
-                        0.25
-                    } else {
-                        0.0
-                    }
-                } else {
-                    0.75
-                };
-                GuidanceTargets {
-                    lateral_mode: LateralMode::RolloutCenterline,
-                    vertical_mode: VerticalMode::PitchHold,
-                    target_bank_deg: Some(0.0),
-                    target_heading_deg: Some(self.runway_frame.runway.course_deg),
-                    target_pitch_deg: Some(0.0),
-                    throttle_limit: Some((0.0, 0.0)),
-                    brakes,
-                    ..Default::default()
-                }
+                self.rollout_guidance(state, phase)
             }
             FlightPhase::TaxiClear => GuidanceTargets {
                 lateral_mode: LateralMode::RolloutCenterline,

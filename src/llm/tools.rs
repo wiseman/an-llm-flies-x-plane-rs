@@ -25,7 +25,7 @@ use crate::core::mission_manager::{
 };
 use crate::core::profiles::{
     AltitudeHoldProfile, ExtendMode, HeadingHoldProfile, PatternClearanceGate, PatternFlyProfile,
-    PatternLeg, SpeedHoldProfile, TakeoffProfile, TaxiProfile,
+    PatternLeg, RunwayExitPlan, SpeedHoldProfile, TakeoffProfile, TaxiProfile,
 };
 use crate::data::airspace_query::{self, AircraftSnapshot, AirspaceSource};
 use crate::data::parquet::{
@@ -2475,36 +2475,41 @@ pub fn tool_choose_runway_exit(ctx: &ToolContext, args: &Map<String, Value>) -> 
         return "error: pattern_fly profile is not active; call engage_pattern_fly first".to_string();
     }
 
-    // Validate the name against the real exit list for the active
-    // runway. Without this, list_runway_exits could return ["A", "12/30"]
-    // and the LLM would happily call choose_runway_exit("E") — the
-    // profile would silently accept the bogus name and the rollout
-    // controller would never find the exit. Errors from the exit lookup
-    // (e.g. runway not present in apt.dat cache) fall through — the
-    // preference is best-effort in that case.
-    if let Some(name) = &taxiway {
+    // Resolve the selected taxi edge into stationing and runway side now;
+    // PatternFlyProfile needs both to fly the exit autonomously.
+    let exit_plan = if let Some(name) = &taxiway {
         let (airport, runway) = {
             let cfg = ctx.config.lock();
             (cfg.airport.airport.clone(), cfg.airport.runway.id.clone())
         };
-        if let (Some(airport), Some(runway)) = (airport, runway) {
-            if let Ok(exits) = runway_exits_for(ctx, &airport, &runway) {
-                if !exits.is_empty() && !exits.iter().any(|(n, _)| n == name) {
-                    let valid: Vec<String> = exits.iter().map(|(n, _)| n.clone()).collect();
-                    return format!(
-                        "error: unknown exit {:?} at {} runway {}; valid: {:?}",
-                        name, airport, runway, valid
-                    );
-                }
-            }
-        }
-    }
+        let (Some(airport), Some(runway)) = (airport, runway) else {
+            return "error: active pattern has no airport/runway identity".to_string();
+        };
+        let detail = match runway_exits_detail(ctx, &airport, &runway) {
+            Ok(v) => v,
+            Err(e) => return format!("error: cannot resolve runway exit geometry: {e}"),
+        };
+        let Some((_, stationing_ft)) = detail.exits.iter().find(|(n, _)| n == name) else {
+            let valid: Vec<String> = detail.exits.iter().map(|(n, _)| n.clone()).collect();
+            return format!(
+                "error: unknown exit {:?} at {} runway {}; valid: {:?}",
+                name, airport, runway, valid
+            );
+        };
+        Some(RunwayExitPlan {
+            taxiway_name: name.clone(),
+            stationing_ft: *stationing_ft,
+            side_sign: detail.exit_sides.get(name).copied().unwrap_or(1.0),
+        })
+    } else {
+        None
+    };
 
     let display = taxiway
         .as_deref()
         .map(|t| format!("preferred runway exit set to {:?}", t))
         .unwrap_or_else(|| "preferred runway exit cleared".to_string());
-    match with_pattern_profile(ctx, |p| p.set_preferred_exit(taxiway)) {
+    match with_pattern_profile(ctx, |p| p.set_preferred_exit(exit_plan)) {
         Some(_) => display,
         None => "error: pattern_fly profile is not active; call engage_pattern_fly first".to_string(),
     }
@@ -2514,15 +2519,6 @@ pub fn tool_choose_runway_exit(ctx: &ToolContext, args: &Map<String, Value>) -> 
 /// Returns (name, stationing_ft) pairs sorted by stationing, along with
 /// the runway's overall length. Errors as a String so either caller can
 /// surface it verbatim.
-fn runway_exits_for(
-    ctx: &ToolContext,
-    airport: &str,
-    runway: &str,
-) -> std::result::Result<Vec<(String, f64)>, String> {
-    let (_length_ft, exits) = runway_exits_with_length(ctx, airport, runway)?;
-    Ok(exits)
-}
-
 /// Geometry + exits packet returned by the shared runway-exit
 /// helper. The caller can project an arbitrary lat/lon onto the runway
 /// centerline (via `geodetic_offset_ft(.., georef).dot(forward)`) to
@@ -2532,14 +2528,7 @@ struct RunwayExitInfo {
     georef: GeoReference,
     forward: Vec2,
     exits: Vec<(String, f64)>,
-}
-
-fn runway_exits_with_length(
-    ctx: &ToolContext,
-    airport: &str,
-    runway: &str,
-) -> std::result::Result<(f64, Vec<(String, f64)>), String> {
-    runway_exits_detail(ctx, airport, runway).map(|d| (d.length_ft, d.exits))
+    exit_sides: HashMap<String, f64>,
 }
 
 fn runway_exits_detail(
@@ -2584,12 +2573,13 @@ fn runway_exits_detail(
         threshold_lon_deg: thr_lon,
     };
     let forward = heading_to_vector(course, 1.0);
+    let right = heading_to_vector(course + 90.0, 1.0);
 
     let graph = match taxi_route::load_graph(conn, airport) {
         Ok(g) => g,
         Err(e) => return Err(e.to_string()),
     };
-    let mut filtered: Vec<(String, f64)> = Vec::new();
+    let mut filtered: Vec<(String, f64, f64)> = Vec::new();
     for e in &graph.edges {
         if !taxi_route::edge_conflicts_with_runway(e, runway) {
             continue;
@@ -2607,16 +2597,33 @@ fn runway_exits_detail(
         if stationing > length_ft + 500.0 {
             continue;
         }
-        filtered.push((e.name.clone(), stationing));
+        let lateral1 = p1.dot(right);
+        let lateral2 = p2.dot(right);
+        let off_runway_lateral = if lateral1.abs() >= lateral2.abs() {
+            lateral1
+        } else {
+            lateral2
+        };
+        let side_sign = if off_runway_lateral < 0.0 { -1.0 } else { 1.0 };
+        filtered.push((e.name.clone(), stationing, side_sign));
     }
     filtered.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.partial_cmp(&b.1).unwrap()));
     filtered.dedup_by(|a, b| a.0 == b.0);
     filtered.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+    let exit_sides = filtered
+        .iter()
+        .map(|(name, _, side)| (name.clone(), *side))
+        .collect();
+    let exits = filtered
+        .into_iter()
+        .map(|(name, stationing, _)| (name, stationing))
+        .collect();
     Ok(RunwayExitInfo {
         length_ft,
         georef,
         forward,
-        exits: filtered,
+        exits,
+        exit_sides,
     })
 }
 
