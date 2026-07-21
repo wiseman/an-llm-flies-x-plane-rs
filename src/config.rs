@@ -270,6 +270,13 @@ fn load_config_bundle_from(
 ) -> Result<ConfigBundle> {
     let aircraft: RawAircraft =
         serde_yaml_ng::from_str(aircraft_text).context("parsing aircraft yaml")?;
+    if aircraft.flare.roundout_height_ft <= aircraft.flare.flare_start_ft {
+        return Err(anyhow!(
+            "roundout_height_ft ({}) must be greater than flare_start_ft ({})",
+            aircraft.flare.roundout_height_ft,
+            aircraft.flare.flare_start_ft
+        ));
+    }
     let airport: RawAirport =
         serde_yaml_ng::from_str(airport_text).context("parsing airport yaml")?;
     let controllers: ControllerConfig =
@@ -362,6 +369,19 @@ mod tests {
         assert_eq!(cfg.airport.airport.as_deref(), Some("KTEST"));
         assert_eq!(cfg.airport.runway.id.as_deref(), Some("36"));
         assert_eq!(cfg.airport.runway.traffic_side, TrafficSide::Left);
+    }
+
+    #[test]
+    fn rejects_collapsed_roundout_band() {
+        let invalid = AIRCRAFT_YAML.replace("roundout_height_ft: 20", "roundout_height_ft: 10");
+        let err = load_config_bundle_from(
+            &invalid,
+            AIRPORT_YAML,
+            CONTROLLER_YAML,
+            SAFETY_YAML,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("must be greater"));
     }
 
     #[test]

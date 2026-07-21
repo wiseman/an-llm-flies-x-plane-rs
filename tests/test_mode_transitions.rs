@@ -116,6 +116,19 @@ fn pattern_sequence_advances_one_phase_at_a_time() {
     );
 }
 
+#[test]
+fn roundout_persists_between_roundout_and_flare_heights() {
+    let (cfg, mm, pattern, rm, safe) = fixtures();
+    let state = state_with(|s| {
+        s.alt_agl_ft = (cfg.flare.roundout_height_ft + cfg.flare.flare_start_ft) * 0.5;
+        s.runway_x_ft = Some(0.0);
+    });
+    assert_eq!(
+        update(&mm, FlightPhase::Roundout, &state, &rm, &pattern, &safe, false, false, false, false),
+        FlightPhase::Roundout
+    );
+}
+
 // The roundout/flare triggers must run off the geometric (mesh) AGL when
 // the backend provides one — the field-referenced baro AGL is wrong by
 // however far the terrain mesh sits from the apt.dat airport elevation.
