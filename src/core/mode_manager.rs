@@ -148,7 +148,7 @@ impl ModeManager {
                 let heading_error_deg =
                     wrap_degrees_180(state.track_deg - crosswind_course_deg).abs();
                 let heading_captured = heading_error_deg <= 15.0;
-                let at_offset = y.abs() >= downwind_offset_ft * 0.75;
+                let at_offset = side_sign * y >= downwind_offset_ft * 0.75;
                 let auto_ready = heading_captured && at_offset;
                 if triggers.turn_downwind || (clearances.turn_downwind && auto_ready) {
                     return FlightPhase::Downwind;
