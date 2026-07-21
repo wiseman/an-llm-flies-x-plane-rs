@@ -196,6 +196,9 @@ pub struct PilotCore {
     /// falling back to `Preflight` and confusing both the LLM and the
     /// scenario tests that assert on `final_phase`.
     last_known_phase: Option<FlightPhase>,
+    last_lateral_mode: Option<LateralMode>,
+    last_vertical_mode: Option<VerticalMode>,
+    last_tecs_phase: Option<FlightPhase>,
     /// LLM-declared mission goal — what the pilot is trying to do.
     pub mission_goal: Option<MissionGoal>,
     /// LLM-declared active ATC clearance.
@@ -224,6 +227,9 @@ impl PilotCore {
             active_profiles: idle,
             latest_snapshot: None,
             last_known_phase: None,
+            last_lateral_mode: None,
+            last_vertical_mode: None,
+            last_tecs_phase: None,
             mission_goal: None,
             active_clearance: None,
             config,
@@ -478,6 +484,25 @@ impl PilotCore {
     }
 
     fn commands_from_guidance(&mut self, state: &AircraftState, guidance: &GuidanceTargets) -> ActuatorCommands {
+        if self.last_lateral_mode != Some(guidance.lateral_mode) {
+            self.bank_controller.reset();
+            if guidance.lateral_mode == LateralMode::RolloutCenterline {
+                self.rollout_controller.reset();
+            }
+            self.last_lateral_mode = Some(guidance.lateral_mode);
+        }
+        if self.last_vertical_mode != Some(guidance.vertical_mode) {
+            self.pitch_controller.reset();
+            if guidance.vertical_mode == VerticalMode::PitchForAirspeed {
+                self.pitch_for_airspeed.reset();
+            }
+            if !matches!(guidance.vertical_mode, VerticalMode::Tecs | VerticalMode::GlidepathTrack)
+            {
+                self.last_tecs_phase = None;
+            }
+            self.last_vertical_mode = Some(guidance.vertical_mode);
+        }
+
         // `taxi_pivot_brake` is produced by the nose-wheel controller when
         // the rudder is saturated at low ground speed — differential
         // braking layered on top of the symmetric `brakes` field.
@@ -561,6 +586,10 @@ impl PilotCore {
                 .tecs_phase_override
                 .or_else(|| self.current_phase())
                 .unwrap_or(FlightPhase::Cruise);
+            if self.last_tecs_phase != Some(tecs_phase) {
+                self.tecs.reset();
+                self.last_tecs_phase = Some(tecs_phase);
+            }
             self.tecs.update(
                 tecs_phase,
                 guidance.target_altitude_ft.unwrap_or(state.alt_msl_ft),
@@ -698,5 +727,51 @@ mod tests {
             ClearanceSource::from_str("clearance"),
             ClearanceSource::Other("clearance".to_string()),
         );
+    }
+
+    #[test]
+    fn controller_integrators_reset_on_mode_entry() {
+        let mut pilot = PilotCore::new(load_default_config_bundle());
+        let state = AircraftState::synthetic_default();
+
+        for _ in 0..20 {
+            pilot.rollout_controller.update(0.0, 10.0, 0.0, 30.0, 0.2);
+        }
+        assert!(pilot.rollout_controller.integrator().abs() > 1.0);
+        pilot.last_lateral_mode = Some(LateralMode::PathFollow);
+        let rollout = GuidanceTargets {
+            lateral_mode: LateralMode::RolloutCenterline,
+            vertical_mode: VerticalMode::PitchHold,
+            target_pitch_deg: Some(0.0),
+            throttle_limit: Some((0.0, 0.0)),
+            ..Default::default()
+        };
+        pilot.commands_from_guidance(&state, &rollout);
+        assert_eq!(pilot.rollout_controller.integrator(), 0.0);
+
+        pilot.pitch_controller.pid.integrator = 10.0;
+        pilot.last_vertical_mode = Some(VerticalMode::Tecs);
+        let pitch_hold = GuidanceTargets {
+            vertical_mode: VerticalMode::PitchHold,
+            target_pitch_deg: Some(0.0),
+            throttle_limit: Some((0.0, 0.0)),
+            ..Default::default()
+        };
+        pilot.commands_from_guidance(&state, &pitch_hold);
+        assert_eq!(pilot.pitch_controller.pid.integrator, 0.0);
+
+        pilot.tecs.integrator = 80.0;
+        pilot.last_vertical_mode = Some(VerticalMode::Tecs);
+        pilot.last_tecs_phase = Some(FlightPhase::Base);
+        let final_tecs = GuidanceTargets {
+            vertical_mode: VerticalMode::Tecs,
+            target_altitude_ft: Some(state.alt_msl_ft),
+            target_speed_kt: Some(state.ias_kt),
+            throttle_limit: Some((0.0, 1.0)),
+            tecs_phase_override: Some(FlightPhase::Final),
+            ..Default::default()
+        };
+        pilot.commands_from_guidance(&state, &final_tecs);
+        assert_eq!(pilot.tecs.integrator, 0.0);
     }
 }

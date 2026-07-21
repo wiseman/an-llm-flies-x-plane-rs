@@ -22,4 +22,8 @@ impl PitchController {
         let error = target_pitch_deg - pitch_deg;
         self.pid.update(error, pitch_rate_deg_s, dt)
     }
+
+    pub fn reset(&mut self) {
+        self.pid.reset();
+    }
 }
