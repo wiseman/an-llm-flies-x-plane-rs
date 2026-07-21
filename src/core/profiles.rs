@@ -728,9 +728,11 @@ pub struct PatternLegExtensions {
 #[derive(Debug, Clone, PartialEq)]
 pub struct RunwayExitPlan {
     pub taxiway_name: String,
+    /// Along-runway station of the graph node on the runway centerline.
     pub stationing_ft: f64,
-    /// -1 = left of runway course, +1 = right.
-    pub side_sign: f64,
+    /// Ordered runway-frame taxi-network points, beginning on the runway
+    /// centerline and ending at the first node outside the active zone.
+    pub path_runway_ft: Vec<Vec2>,
 }
 
 pub struct PatternFlyProfile {
@@ -903,7 +905,11 @@ impl PatternFlyProfile {
                 || (runway_x >= turn_start_x
                     && state.gs_kt <= self.config.post_landing.turnoff_speed_kt + 5.0);
             if committed {
-                let side = if exit.side_sign < 0.0 { -1.0 } else { 1.0 };
+                let side = exit
+                    .path_runway_ft
+                    .last()
+                    .map(|point| if point.y < 0.0 { -1.0 } else { 1.0 })
+                    .unwrap_or(1.0);
                 let path = StraightLeg {
                     start_ft: self.runway_frame.to_world_frame(Vec2::new(turn_start_x, 0.0)),
                     end_ft: self.runway_frame.to_world_frame(Vec2::new(

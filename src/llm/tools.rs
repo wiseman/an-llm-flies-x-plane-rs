@@ -2489,8 +2489,8 @@ pub fn tool_choose_runway_exit(ctx: &ToolContext, args: &Map<String, Value>) -> 
             Ok(v) => v,
             Err(e) => return format!("error: cannot resolve runway exit geometry: {e}"),
         };
-        let Some((_, stationing_ft)) = detail.exits.iter().find(|(n, _)| n == name) else {
-            let valid: Vec<String> = detail.exits.iter().map(|(n, _)| n.clone()).collect();
+        let Some(exit) = detail.exits.iter().find(|exit| exit.name == *name) else {
+            let valid: Vec<String> = detail.exits.iter().map(|exit| exit.name.clone()).collect();
             return format!(
                 "error: unknown exit {:?} at {} runway {}; valid: {:?}",
                 name, airport, runway, valid
@@ -2498,8 +2498,8 @@ pub fn tool_choose_runway_exit(ctx: &ToolContext, args: &Map<String, Value>) -> 
         };
         Some(RunwayExitPlan {
             taxiway_name: name.clone(),
-            stationing_ft: *stationing_ft,
-            side_sign: detail.exit_sides.get(name).copied().unwrap_or(1.0),
+            stationing_ft: exit.stationing_ft,
+            path_runway_ft: exit.path_runway_ft.clone(),
         })
     } else {
         None
@@ -2523,12 +2523,18 @@ pub fn tool_choose_runway_exit(ctx: &ToolContext, args: &Map<String, Value>) -> 
 /// helper. The caller can project an arbitrary lat/lon onto the runway
 /// centerline (via `geodetic_offset_ft(.., georef).dot(forward)`) to
 /// compare positions against the exit stationings.
+#[derive(Debug, Clone)]
+struct RunwayExitCandidate {
+    name: String,
+    stationing_ft: f64,
+    path_runway_ft: Vec<Vec2>,
+}
+
 struct RunwayExitInfo {
     length_ft: f64,
     georef: GeoReference,
     forward: Vec2,
-    exits: Vec<(String, f64)>,
-    exit_sides: HashMap<String, f64>,
+    exits: Vec<RunwayExitCandidate>,
 }
 
 fn runway_exits_detail(
@@ -2579,51 +2585,53 @@ fn runway_exits_detail(
         Ok(g) => g,
         Err(e) => return Err(e.to_string()),
     };
-    let mut filtered: Vec<(String, f64, f64)> = Vec::new();
-    for e in &graph.edges {
-        if !taxi_route::edge_conflicts_with_runway(e, runway) {
-            continue;
-        }
-        if e.name.is_empty() {
-            continue;
-        }
-        let Some(n1) = graph.nodes.get(&e.from_node) else { continue };
-        let Some(n2) = graph.nodes.get(&e.to_node) else { continue };
-        let p1 = geodetic_offset_ft(n1.latitude_deg, n1.longitude_deg, georef);
-        let p2 = geodetic_offset_ft(n2.latitude_deg, n2.longitude_deg, georef);
-        let s1 = p1.x * forward.x + p1.y * forward.y;
-        let s2 = p2.x * forward.x + p2.y * forward.y;
-        let stationing = s1.min(s2).max(0.0);
-        if stationing > length_ft + 500.0 {
-            continue;
-        }
-        let lateral1 = p1.dot(right);
-        let lateral2 = p2.dot(right);
-        let off_runway_lateral = if lateral1.abs() >= lateral2.abs() {
-            lateral1
-        } else {
-            lateral2
-        };
-        let side_sign = if off_runway_lateral < 0.0 { -1.0 } else { 1.0 };
-        filtered.push((e.name.clone(), stationing, side_sign));
-    }
-    filtered.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.partial_cmp(&b.1).unwrap()));
-    filtered.dedup_by(|a, b| a.0 == b.0);
-    filtered.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
-    let exit_sides = filtered
+    let mut names: Vec<String> = graph
+        .edges
         .iter()
-        .map(|(name, _, side)| (name.clone(), *side))
+        .filter(|edge| {
+            edge.category != "runway"
+                && !edge.name.is_empty()
+                && taxi_route::edge_conflicts_with_runway(edge, runway)
+        })
+        .map(|edge| edge.name.clone())
         .collect();
-    let exits = filtered
-        .into_iter()
-        .map(|(name, stationing, _)| (name, stationing))
-        .collect();
+    names.sort();
+    names.dedup();
+
+    let mut exits = Vec::new();
+    for name in names {
+        let Ok(path) = taxi_route::resolve_runway_exit_path(conn, &graph, airport, runway, &name)
+        else {
+            continue;
+        };
+        let path_runway_ft: Vec<Vec2> = path
+            .nodes
+            .iter()
+            .map(|node| {
+                let offset = geodetic_offset_ft(node.latitude_deg, node.longitude_deg, georef);
+                Vec2::new(offset.dot(forward), offset.dot(right))
+            })
+            .collect();
+        let Some(first) = path_runway_ft.first() else { continue };
+        if first.x < 0.0 || first.x > length_ft + 500.0 {
+            continue;
+        }
+        exits.push(RunwayExitCandidate {
+            name,
+            stationing_ft: first.x,
+            path_runway_ft,
+        });
+    }
+    exits.sort_by(|a, b| {
+        a.stationing_ft
+            .partial_cmp(&b.stationing_ft)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     Ok(RunwayExitInfo {
         length_ft,
         georef,
         forward,
         exits,
-        exit_sides,
     })
 }
 
@@ -2669,7 +2677,9 @@ pub fn tool_list_runway_exits(ctx: &ToolContext, args: &Map<String, Value>) -> S
             cur
         ));
     }
-    for (name, st) in &detail.exits {
+    for exit in &detail.exits {
+        let name = &exit.name;
+        let st = exit.stationing_ft;
         match current_st {
             Some(cur) => {
                 let delta = st - cur;

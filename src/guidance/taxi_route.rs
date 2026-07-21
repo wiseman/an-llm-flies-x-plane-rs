@@ -2,7 +2,7 @@
 //! for the Dijkstra-over-stages routing contract.
 
 use std::cmp::Ordering;
-use std::collections::{BinaryHeap, HashMap, HashSet};
+use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
 
 use anyhow::{anyhow, bail, Context, Result};
 use duckdb::Connection;
@@ -66,6 +66,16 @@ pub struct TaxiPlan {
     /// is the raw `"departure:01L,01R"` / `"ils:28L"` token from
     /// apt.dat's 1204 row, attached to the leg that triggered it.
     pub runway_crossings: Vec<String>,
+}
+
+/// Ordered taxi-network nodes that carry an aircraft from a runway
+/// centerline onto the selected exit and beyond the runway active zone.
+/// The first node is on the runway; the last node is connected to a
+/// non-conflicting taxi edge and is therefore the safe handoff point.
+#[derive(Debug, Clone)]
+pub struct RunwayExitPath {
+    pub taxiway_name: String,
+    pub nodes: Vec<TaxiNode>,
 }
 
 #[derive(Debug)]
@@ -286,6 +296,176 @@ pub struct RunwayIntersection {
     pub hold_short_node: i64,
     pub hold_short_lat: f64,
     pub hold_short_lon: f64,
+}
+
+/// Resolve the actual apt.dat centerline path for a landing-runway exit.
+///
+/// A single named exit may contain several consecutive 1202 edges inside
+/// the runway active zone. In particular, angled exits often run *backward*
+/// in runway stationing as they leave the centerline. Treating the smallest
+/// endpoint station as the intersection invents a shortcut across unpaved
+/// ground. This resolver instead starts at the component node closest to
+/// the runway centerline and follows the named, runway-conflicting edges to
+/// the first node that connects to the ordinary (non-conflicting) taxi
+/// network.
+pub fn resolve_runway_exit_path(
+    conn: &Connection,
+    graph: &TaxiGraph,
+    airport_ident: &str,
+    runway_ident: &str,
+    taxiway: &str,
+) -> Result<RunwayExitPath> {
+    let forms = runway_query_forms(runway_ident);
+    let (le_lat, le_lon, he_lat, he_lon): (f64, f64, f64, f64) = conn
+        .query_row(
+            "SELECT le_latitude_deg, le_longitude_deg, \
+                    he_latitude_deg, he_longitude_deg \
+             FROM runways \
+             WHERE airport_ident = ? \
+               AND (le_ident = ? OR le_ident = ? OR he_ident = ? OR he_ident = ?) \
+               AND closed = 0 \
+             LIMIT 1",
+            [
+                airport_ident,
+                forms[0].as_str(),
+                forms[1].as_str(),
+                forms[0].as_str(),
+                forms[1].as_str(),
+            ],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .with_context(|| {
+            format!(
+                "runway {:?} not found at airport {}",
+                runway_ident, airport_ident
+            )
+        })?;
+
+    resolve_runway_exit_path_in_graph(
+        graph,
+        runway_ident,
+        taxiway,
+        (le_lat, le_lon),
+        (he_lat, he_lon),
+    )
+}
+
+fn resolve_runway_exit_path_in_graph(
+    graph: &TaxiGraph,
+    runway_ident: &str,
+    taxiway: &str,
+    runway_start: (f64, f64),
+    runway_end: (f64, f64),
+) -> Result<RunwayExitPath> {
+    let candidate_edges: HashSet<usize> = graph
+        .edges
+        .iter()
+        .enumerate()
+        .filter(|(_, edge)| {
+            edge.category != "runway"
+                && edge.name.eq_ignore_ascii_case(taxiway)
+                && edge_conflicts_with_runway(edge, runway_ident)
+        })
+        .map(|(idx, _)| idx)
+        .collect();
+    if candidate_edges.is_empty() {
+        bail!(
+            "no edge named {:?} crosses runway {:?} at {}",
+            taxiway,
+            runway_ident,
+            graph.airport_ident
+        );
+    }
+
+    let candidate_nodes: HashSet<i64> = candidate_edges
+        .iter()
+        .flat_map(|idx| {
+            let edge = &graph.edges[*idx];
+            [edge.from_node, edge.to_node]
+        })
+        .collect();
+    let runway_node = candidate_nodes
+        .iter()
+        .filter_map(|node_id| graph.nodes.get(node_id))
+        .min_by(|a, b| {
+            let da = point_to_segment_m(
+                a.latitude_deg,
+                a.longitude_deg,
+                runway_start.0,
+                runway_start.1,
+                runway_end.0,
+                runway_end.1,
+            );
+            let db = point_to_segment_m(
+                b.latitude_deg,
+                b.longitude_deg,
+                runway_start.0,
+                runway_start.1,
+                runway_end.0,
+                runway_end.1,
+            );
+            da.partial_cmp(&db).unwrap_or(Ordering::Equal)
+        })
+        .ok_or_else(|| anyhow!("runway exit {:?} has no graph nodes", taxiway))?
+        .node_id;
+
+    let is_clear_node = |node_id: i64| {
+        node_id != runway_node
+            && graph.edges.iter().any(|edge| {
+                (edge.from_node == node_id || edge.to_node == node_id)
+                    && !edge_conflicts_with_runway(edge, runway_ident)
+            })
+    };
+
+    let mut queue = VecDeque::from([runway_node]);
+    let mut visited = HashSet::from([runway_node]);
+    let mut parent: HashMap<i64, i64> = HashMap::new();
+    let mut clear_node = None;
+    while let Some(node) = queue.pop_front() {
+        if is_clear_node(node) {
+            clear_node = Some(node);
+            break;
+        }
+        for (next, edge_idx) in graph.adj.get(&node).into_iter().flatten() {
+            if !candidate_edges.contains(edge_idx) || !visited.insert(*next) {
+                continue;
+            }
+            parent.insert(*next, node);
+            queue.push_back(*next);
+        }
+    }
+    let clear_node = clear_node.ok_or_else(|| {
+        anyhow!(
+            "runway exit {:?} at {} does not reach a non-active taxi edge",
+            taxiway,
+            graph.airport_ident
+        )
+    })?;
+
+    let mut node_ids = vec![clear_node];
+    let mut cursor = clear_node;
+    while cursor != runway_node {
+        cursor = *parent.get(&cursor).ok_or_else(|| {
+            anyhow!("runway exit {:?} path reconstruction failed", taxiway)
+        })?;
+        node_ids.push(cursor);
+    }
+    node_ids.reverse();
+    let nodes = node_ids
+        .into_iter()
+        .map(|id| {
+            graph
+                .nodes
+                .get(&id)
+                .cloned()
+                .ok_or_else(|| anyhow!("runway exit {:?} node {} is missing", taxiway, id))
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    Ok(RunwayExitPath {
+        taxiway_name: taxiway.to_string(),
+        nodes,
+    })
 }
 
 /// Find the edge named `taxiway` that crosses the active zone of
@@ -1110,6 +1290,57 @@ mod tests {
             edges,
             adj,
         }
+    }
+
+    #[test]
+    fn runway_exit_path_starts_on_centerline_and_preserves_reversed_geometry() {
+        // Eastbound runway. Exit E reaches the centerline at N66, then
+        // angles backward through N31 and N32 before joining taxiway A.
+        // Choosing the minimum station would incorrectly call N32 the
+        // runway intersection.
+        let mk = |id, lat, lon| TaxiNode {
+            node_id: id,
+            latitude_deg: lat,
+            longitude_deg: lon,
+            usage: "both".to_string(),
+        };
+        let mut nodes = HashMap::new();
+        nodes.insert(29, mk(29, 37.0005, -122.0003));
+        nodes.insert(32, mk(32, 37.0004, -122.0002));
+        nodes.insert(31, mk(31, 37.0003, -122.0001));
+        nodes.insert(66, mk(66, 37.0000, -122.0000));
+        nodes.insert(67, mk(67, 37.0000, -121.9990));
+        let active = "departure:09,27;arrival:09,27";
+        let edges = vec![
+            mk_taxiway_edge(31, 66, "E", active),
+            mk_taxiway_edge(32, 31, "E", active),
+            mk_taxiway_edge(29, 32, "A", ""),
+            mk_runway_edge(66, 67, "09/27", active),
+        ];
+        let mut adj: HashMap<i64, Vec<(i64, usize)>> = HashMap::new();
+        for (idx, edge) in edges.iter().enumerate() {
+            adj.entry(edge.from_node).or_default().push((edge.to_node, idx));
+            adj.entry(edge.to_node).or_default().push((edge.from_node, idx));
+        }
+        let graph = TaxiGraph {
+            airport_ident: "KTEST".into(),
+            nodes,
+            edges,
+            adj,
+        };
+
+        let exit = resolve_runway_exit_path_in_graph(
+            &graph,
+            "09",
+            "E",
+            (37.0, -122.01),
+            (37.0, -121.99),
+        )
+        .unwrap();
+
+        assert_eq!(exit.nodes.iter().map(|n| n.node_id).collect::<Vec<_>>(), [66, 31, 32]);
+        assert!(exit.nodes[1].longitude_deg < exit.nodes[0].longitude_deg);
+        assert!(exit.nodes[2].longitude_deg < exit.nodes[1].longitude_deg);
     }
 
     #[test]

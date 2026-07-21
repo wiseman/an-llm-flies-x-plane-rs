@@ -524,7 +524,7 @@ fn selected_runway_exit_turns_off_centerline_at_taxi_speed() {
     profile.set_preferred_exit(Some(RunwayExitPlan {
         taxiway_name: "A5".to_string(),
         stationing_ft: 3000.0,
-        side_sign: 1.0,
+        path_runway_ft: vec![Vec2::new(3000.0, 0.0), Vec2::new(3100.0, 200.0)],
     }));
     let state = AircraftState {
         runway_x_ft: Some(2800.0),

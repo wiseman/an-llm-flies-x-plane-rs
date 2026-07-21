@@ -72,7 +72,7 @@ fn selected_exit_drives_rollout_clear_of_runway() {
     profile.set_preferred_exit(Some(RunwayExitPlan {
         taxiway_name: "A5".to_string(),
         stationing_ft: 3000.0,
-        side_sign: 1.0,
+        path_runway_ft: vec![Vec2::new(3000.0, 0.0), Vec2::new(3100.0, 200.0)],
     }));
     let mut pilot = PilotCore::new(config);
     pilot.engage_profile(Box::new(profile));

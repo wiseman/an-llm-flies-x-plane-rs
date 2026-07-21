@@ -1735,8 +1735,10 @@ fn choose_runway_exit_records_preference_on_pattern_profile() {
          27 37.000100 -121.987500 0.00 0 0 0 0 0\n\
          1201 37.000200 -121.996500 both 1\n\
          1201 37.000100 -121.996500 both 2\n\
+         1201 37.000300 -121.996500 both 3\n\
          1202 1 2 twoway taxiway_E A5\n\
-         1204 arrival 09\n"
+         1204 arrival 09\n\
+         1202 1 3 twoway taxiway_E A\n"
             .to_string(),
     ];
     build_fake_parquet(dir.path(), &extra);
@@ -1771,12 +1773,16 @@ fn choose_runway_exit_rejects_unknown_exit_with_valid_list() {
          1201 45.001 -122.0005 both 100 gate1\n\
          1201 45.0005 -122.0005 both 101 gateA5\n\
          1201 45.00025 -122.0005 both 102 gateA7\n\
+         1201 45.0012 -122.0005 both 103 leadA5\n\
+         1201 45.0007 -122.0007 both 104 leadA7\n\
          1202 100 101 twoway taxi A5\n\
          1204 departure 09,27\n\
          1204 arrival 09,27\n\
          1202 101 102 twoway taxi A7\n\
          1204 departure 09,27\n\
          1204 arrival 09,27\n\
+         1202 100 103 twoway taxi A\n\
+         1202 101 104 twoway taxi A\n\
          1300 45.0005 -122.0007 90.0 gate jets|turboprops Gate 1\n"
             .to_string(),
     ];
@@ -1823,10 +1829,14 @@ fn list_runway_exits_enumerates_annotated_taxiways() {
          1201 37.000100 -121.996500 both 2\n\
          1201 37.000200 -121.994500 both 3\n\
          1201 37.000100 -121.994500 both 4\n\
+         1201 37.000300 -121.996500 both 5\n\
+         1201 37.000300 -121.994500 both 6\n\
          1202 1 2 twoway taxiway_E A5\n\
          1204 departure 09\n\
+         1202 1 5 twoway taxiway_E A\n\
          1202 3 4 twoway taxiway_E A7\n\
-         1204 departure 09\n"
+         1204 departure 09\n\
+         1202 3 6 twoway taxiway_E A\n"
             .to_string(),
     ];
     build_fake_parquet(dir.path(), &extra);
