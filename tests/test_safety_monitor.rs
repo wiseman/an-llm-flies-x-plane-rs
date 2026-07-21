@@ -2,7 +2,7 @@ mod common;
 use common::state_with;
 
 use xplane_pilot::config::load_default_config_bundle;
-use xplane_pilot::core::safety_monitor::SafetyMonitor;
+use xplane_pilot::core::safety_monitor::{CteBand, SafetyMonitor};
 use xplane_pilot::types::FlightPhase;
 
 fn monitor() -> SafetyMonitor {
@@ -89,4 +89,32 @@ fn on_ground_short_circuits_all_checks() {
     let status = mon.evaluate(&state, FlightPhase::Final);
     assert!(!status.request_go_around);
     assert!(status.reason.is_none());
+}
+
+#[test]
+fn landing_checks_use_radio_agl_when_available() {
+    let mon = monitor();
+    let state = state_with(|s| {
+        s.alt_agl_ft = 500.0;
+        s.alt_radio_agl_ft = Some(40.0);
+        s.centerline_error_ft = Some(100.0);
+        s.stall_margin = 2.0;
+    });
+    let status = mon.evaluate(&state, FlightPhase::Final);
+    assert!(status.request_go_around);
+    assert!(status.reason.unwrap().contains("agl=40ft"));
+    assert_eq!(mon.risk_summary(&state, FlightPhase::Final).cte_band, CteBand::Trigger);
+}
+
+#[test]
+fn high_radio_agl_suppresses_premature_field_agl_check() {
+    let mon = monitor();
+    let state = state_with(|s| {
+        s.alt_agl_ft = 40.0;
+        s.alt_radio_agl_ft = Some(500.0);
+        s.centerline_error_ft = Some(400.0);
+        s.stall_margin = 2.0;
+    });
+    assert!(!mon.evaluate(&state, FlightPhase::Final).request_go_around);
+    assert_eq!(mon.risk_summary(&state, FlightPhase::Final).cte_band, CteBand::Safe);
 }

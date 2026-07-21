@@ -66,34 +66,35 @@ impl SafetyMonitor {
         if state.on_ground {
             return SafetyStatus { request_go_around: false, reason: None, bank_limit_deg };
         }
-        if phase == FlightPhase::Final && state.alt_agl_ft < 200.0 {
+        let landing_agl_ft = state.landing_agl_ft();
+        if phase == FlightPhase::Final && landing_agl_ft < 200.0 {
             let cle = state.centerline_error_ft.unwrap_or(0.0).abs();
-            let max_cle = (state.alt_agl_ft * 2.0).max(30.0);
+            let max_cle = (landing_agl_ft * 2.0).max(30.0);
             if cle > max_cle {
                 let reason = format!(
                     "unstable_lateral cle={:.0}ft agl={:.0}ft limit={:.0}ft",
-                    cle, state.alt_agl_ft, max_cle
+                    cle, landing_agl_ft, max_cle
                 );
                 return SafetyStatus { request_go_around: true, reason: Some(reason), bank_limit_deg };
             }
         }
         if (phase == FlightPhase::Final || phase == FlightPhase::Roundout)
-            && state.alt_agl_ft < 200.0
+            && landing_agl_ft < 200.0
             && state.vs_fpm < -self.config.limits.unstable_sink_rate_fpm
         {
             let reason = format!(
                 "unstable_vertical vs={:.0}fpm agl={:.0}ft",
-                state.vs_fpm, state.alt_agl_ft
+                state.vs_fpm, landing_agl_ft
             );
             return SafetyStatus { request_go_around: true, reason: Some(reason), bank_limit_deg };
         }
         if phase == FlightPhase::Final
-            && state.alt_agl_ft < 50.0
+            && landing_agl_ft < 50.0
             && state.stall_margin < (self.config.limits.min_stall_margin - 0.1).max(1.1)
         {
             let reason = format!(
                 "low_energy stall_margin={:.2} ias={:.0}kt agl={:.0}ft",
-                state.stall_margin, state.ias_kt, state.alt_agl_ft
+                state.stall_margin, state.ias_kt, landing_agl_ft
             );
             return SafetyStatus { request_go_around: true, reason: Some(reason), bank_limit_deg };
         }
@@ -147,6 +148,7 @@ pub fn risk_summary_for(
     state: &AircraftState,
     phase: FlightPhase,
 ) -> RiskSummary {
+    let landing_agl_ft = state.landing_agl_ft();
     let bank_limit = bank_limit_deg_for(config, phase);
     let bank_util = if bank_limit > 0.0 {
         state.roll_deg.abs() / bank_limit
@@ -161,8 +163,8 @@ pub fn risk_summary_for(
     };
     let cte_band = if phase == FlightPhase::Final && !state.on_ground {
         let cle = state.centerline_error_ft.unwrap_or(0.0).abs();
-        let max_cle = (state.alt_agl_ft * 2.0).max(30.0);
-        if state.alt_agl_ft >= 200.0 {
+        let max_cle = (landing_agl_ft * 2.0).max(30.0);
+        if landing_agl_ft >= 200.0 {
             CteBand::Safe
         } else if cle > max_cle {
             CteBand::Trigger
