@@ -379,39 +379,30 @@ fn downwind_holds_pattern_altitude_regardless_of_position() {
 }
 
 #[test]
-fn base_holds_pattern_altitude_outside_descent_gate() {
-    // Extend the downwind far enough that the whole base leg sits more
-    // than 1.2 nm from the threshold. The aircraft should stay at
-    // pattern altitude for every point along that base leg.
+fn extended_base_descent_varies_continuously_with_leg_progress() {
     let (cfg, pilot) = make_pilot();
     let mut profile = PatternFlyProfile::new(cfg.clone(), pilot.runway_frame.clone());
     profile.extend_leg(PatternLeg::Downwind, 6000.0, ExtendMode::Set).unwrap();
     let pattern_alt = cfg.pattern_altitude_msl_ft();
-    // base_turn_x is now -(3500 + 6000) = -9500 ft. Anywhere along the
-    // base leg (y varies from -3500 to 0) is well outside 1.2 nm
-    // (7291 ft) from the threshold.
-    for &y in &[-3500.0, -1500.0, 0.0] {
+    let base_turn_x = profile.pattern.base_turn_x_ft;
+    let downwind_y = profile.pattern.downwind_y_ft;
+    let mut targets = Vec::new();
+    for y in [downwind_y, downwind_y * 0.5, 0.0] {
         let state = AircraftState {
-            runway_x_ft: Some(-9500.0),
+            runway_x_ft: Some(base_turn_x),
             runway_y_ft: Some(y),
             alt_msl_ft: pattern_alt,
             ..AircraftState::synthetic_default()
         };
         let g = profile.guidance_for_phase(&state, FlightPhase::Base);
-        assert_abs_diff_eq!(
-            g.target_altitude_ft.unwrap(),
-            pattern_alt,
-            epsilon = 1e-6
-        );
+        targets.push(g.target_altitude_ft.unwrap());
     }
+    assert_abs_diff_eq!(targets[0], pattern_alt, epsilon = 1e-6);
+    assert!(targets[0] > targets[1] && targets[1] > targets[2]);
 }
 
 #[test]
-fn base_descends_inside_descent_gate() {
-    // Normal (un-extended) pattern puts the whole base leg inside
-    // 1.2 nm of the threshold, so base should blend from pattern
-    // altitude at the turn down to the 3° glidepath altitude at the
-    // base-to-final point.
+fn base_descends_smoothly_to_final_glidepath() {
     let (cfg, pilot) = make_pilot();
     let mut profile = PatternFlyProfile::new(cfg.clone(), pilot.runway_frame.clone());
     let pattern_alt = cfg.pattern_altitude_msl_ft();
@@ -449,13 +440,9 @@ fn base_descends_inside_descent_gate() {
 }
 
 #[test]
-fn final_holds_pattern_altitude_outside_descent_gate() {
-    // Extended pattern puts the early part of final beyond 1.2 nm. The
-    // aircraft should hold pattern altitude until it's close enough for
-    // the 3° glidepath to take over.
+fn final_glidepath_capture_limits_commanded_altitude_error() {
     let (cfg, pilot) = make_pilot();
     let mut profile = PatternFlyProfile::new(cfg.clone(), pilot.runway_frame.clone());
-    profile.extend_leg(PatternLeg::Downwind, 6000.0, ExtendMode::Set).unwrap();
     let pattern_alt = cfg.pattern_altitude_msl_ft();
     let far_out = AircraftState {
         runway_x_ft: Some(-9500.0),
@@ -464,33 +451,49 @@ fn final_holds_pattern_altitude_outside_descent_gate() {
         ..AircraftState::synthetic_default()
     };
     let g_far = profile.guidance_for_phase(&far_out, FlightPhase::Final);
-    assert_abs_diff_eq!(
-        g_far.target_altitude_ft.unwrap(),
-        pattern_alt,
-        epsilon = 1e-6
-    );
-    assert_eq!(g_far.vertical_mode, VerticalMode::Tecs);
-    assert!(g_far.glidepath.is_none());
-    // Well inside the gate: should track the glidepath.
-    let near_in = AircraftState {
-        runway_x_ft: Some(-3000.0),
-        runway_y_ft: Some(0.0),
-        alt_msl_ft: pattern_alt,
-        ..AircraftState::synthetic_default()
-    };
-    let g_near = profile.guidance_for_phase(&near_in, FlightPhase::Final);
-    assert_eq!(g_near.vertical_mode, VerticalMode::GlidepathTrack);
-    assert!(g_near.glidepath.is_some());
+    assert_abs_diff_eq!(g_far.target_altitude_ft.unwrap(), pattern_alt - 25.0, epsilon = 1e-6);
+    assert_eq!(g_far.vertical_mode, VerticalMode::GlidepathTrack);
+    assert!(g_far.glidepath.is_some());
+
     let expected = glidepath_target_altitude_ft_default(
         &pilot.runway_frame,
         -3000.0,
         cfg.airport.field_elevation_ft,
     );
+    let near_in = AircraftState {
+        runway_x_ft: Some(-3000.0),
+        runway_y_ft: Some(0.0),
+        alt_msl_ft: expected,
+        ..AircraftState::synthetic_default()
+    };
+    let g_near = profile.guidance_for_phase(&near_in, FlightPhase::Final);
     assert_abs_diff_eq!(
         g_near.target_altitude_ft.unwrap(),
         expected,
         epsilon = 1.0
     );
+}
+
+#[test]
+fn final_target_is_continuous_across_old_descent_gate() {
+    let (cfg, pilot) = make_pilot();
+    let mut profile = PatternFlyProfile::new(cfg.clone(), pilot.runway_frame.clone());
+    let pattern_alt = cfg.pattern_altitude_msl_ft();
+    let target = |profile: &mut PatternFlyProfile, x| {
+        let state = AircraftState {
+            runway_x_ft: Some(x),
+            runway_y_ft: Some(0.0),
+            alt_msl_ft: pattern_alt,
+            ..AircraftState::synthetic_default()
+        };
+        profile
+            .guidance_for_phase(&state, FlightPhase::Final)
+            .target_altitude_ft
+            .unwrap()
+    };
+    let outside = target(&mut profile, -7292.0);
+    let inside = target(&mut profile, -7290.0);
+    assert!((outside - inside).abs() < 1.0);
 }
 
 #[test]
