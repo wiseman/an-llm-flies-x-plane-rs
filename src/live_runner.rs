@@ -118,7 +118,6 @@ pub struct HeartbeatPump {
     pub pilot: Arc<parking_lot::Mutex<PilotCore>>,
     pub bus: Option<SimBus>,
     pub bridge: Option<Arc<dyn crate::llm::tools::ToolBridge>>,
-    pub airspace: Option<crate::data::airspace_query::AirspaceSource>,
     pub input_queue: Sender<IncomingMessage>,
     pub heartbeat_interval_s: f64,
     pub poll_interval_s: f64,
@@ -140,7 +139,6 @@ impl HeartbeatPump {
             pilot,
             bus,
             bridge: None,
-            airspace: None,
             input_queue,
             heartbeat_interval_s,
             poll_interval_s: 0.5,
@@ -172,14 +170,6 @@ impl HeartbeatPump {
 
     pub fn with_bridge(mut self, bridge: Arc<dyn crate::llm::tools::ToolBridge>) -> Self {
         self.bridge = Some(bridge);
-        self
-    }
-
-    pub fn with_airspace(
-        mut self,
-        src: crate::data::airspace_query::AirspaceSource,
-    ) -> Self {
-        self.airspace = Some(src);
         self
     }
 
@@ -270,13 +260,9 @@ impl HeartbeatPump {
                     }
                 }
                 st.last_heartbeat_s = now;
-                let status = crate::llm::tools::build_status_payload(
-                    Some(&snapshot),
-                    self.bridge.as_deref(),
-                    self.airspace.as_ref(),
-                );
-                let text = format!("{} | status={}", reason, serde_json::to_string(&status).unwrap());
-                let _ = self.input_queue.send(IncomingMessage::heartbeat(text));
+                // The status rides along at delivery (`coalesce_queued`),
+                // so it's fresh however long the heartbeat waited.
+                let _ = self.input_queue.send(IncomingMessage::heartbeat(reason));
             }
             st.last_seen_phase = current_phase;
             st.last_seen_profiles = Some(current_profiles);
@@ -299,21 +285,7 @@ impl HeartbeatPump {
             .max(st.last_llm_end_s);
         if now - last_input >= self.heartbeat_interval_s && now >= st.idle_suppress_until_s {
             st.last_heartbeat_s = now;
-            // Periodic check-in now threads the bridge through so the
-            // airspace section stays populated on the "nothing happened
-            // in heartbeat_interval" path — that's exactly when the LLM
-            // most benefits from proactive airspace awareness on a long
-            // stable leg.
-            let status = crate::llm::tools::build_status_payload(
-                Some(&snapshot),
-                self.bridge.as_deref(),
-                self.airspace.as_ref(),
-            );
-            let text = format!(
-                "periodic check-in | status={}",
-                serde_json::to_string(&status).unwrap()
-            );
-            let _ = self.input_queue.send(IncomingMessage::heartbeat(text));
+            let _ = self.input_queue.send(IncomingMessage::heartbeat("periodic check-in"));
         }
     }
 }
@@ -404,11 +376,9 @@ use parking_lot::Mutex as PLMutex;
 use crate::bus::FileLog;
 use crate::core::dead_stick_profile::DeadStickLandingProfile;
 use crate::core::profiles::PatternFlyProfile;
-use crate::llm::anthropic::AnthropicBackend;
-use crate::llm::backend::{LlmBackend, LlmProvider, ReasoningEffort};
-use crate::llm::conversation::{run_conversation_loop, PilotMode};
-use crate::llm::gemini::GeminiBackend;
-use crate::llm::openai::OpenAiBackend;
+use crate::llm::backend::{LlmProvider, ReasoningEffort};
+use crate::llm::brain::{PilotBrain, WorkerArgs};
+use crate::llm::conversation::PilotMode;
 use crate::llm::tools::{ToolBridge, ToolContext};
 use crate::sim::xplane_bridge::{probe_bootstrap_sample, GeoReference, XPlaneWebBridge};
 use crate::tui::{format_snapshot_display, run_tui};
@@ -563,23 +533,7 @@ pub fn run_live_xplane(base_config: ConfigBundle, runtime: LiveRunConfig) -> Res
         .llm_reasoning_effort
         .as_deref()
         .and_then(|s| s.parse::<ReasoningEffort>().ok());
-    let llm_client: Arc<dyn LlmBackend> = match runtime.llm_provider {
-        LlmProvider::OpenAi => {
-            let mut c = OpenAiBackend::new(runtime.llm_model.clone());
-            c.transcript_path = transcript_path.clone();
-            Arc::new(c)
-        }
-        LlmProvider::Anthropic => {
-            let mut c = AnthropicBackend::new(runtime.llm_model.clone());
-            c.transcript_path = transcript_path.clone();
-            Arc::new(c)
-        }
-        LlmProvider::Gemini => {
-            let mut c = GeminiBackend::new(runtime.llm_model.clone());
-            c.transcript_path = transcript_path.clone();
-            Arc::new(c)
-        }
-    };
+    let brain = PilotBrain::build(runtime.llm_provider, &runtime.llm_model, transcript_path.as_ref());
     bus.push_log_kind(
         LogKind::System,
         format!(
@@ -592,28 +546,22 @@ pub fn run_live_xplane(base_config: ConfigBundle, runtime: LiveRunConfig) -> Res
             }
         ),
     );
-    let cache_stats = llm_client.cache_stats_arc();
+    let cache_stats = brain.cache_stats();
     // One DuckDB connection slot, shared between the LLM's tool handlers
     // (via ToolContext.runway_conn) and the heartbeat airspace query. Both
     // serialize on the mutex — DuckDB connections aren't safe for
     // concurrent use across threads.
     let shared_duck_conn: Arc<Mutex<Option<duckdb::Connection>>> = Arc::new(Mutex::new(None));
-    let airspace_source = runtime.apt_dat_cache_dir.as_ref().and_then(|dir| {
-        if dir.join(crate::data::parquet::AIRSPACES_FILE).exists() {
-            Some(crate::data::airspace_query::AirspaceSource {
-                conn: shared_duck_conn.clone(),
-                cache_dir: dir.clone(),
-            })
-        } else {
-            None
-        }
-    });
-    if airspace_source.is_some() {
+    if runtime
+        .apt_dat_cache_dir
+        .as_ref()
+        .is_some_and(|dir| dir.join(crate::data::parquet::AIRSPACES_FILE).exists())
+    {
         bus.push_log_kind(LogKind::System, "airspace awareness enabled");
     }
     let heartbeat_pump = if runtime.heartbeat_enabled {
         let clock: Arc<dyn Clock> = Arc::new(RealClock);
-        let mut pump_builder = HeartbeatPump::new(
+        let pump_builder = HeartbeatPump::new(
             pilot_arc.clone(),
             Some(bus.clone()),
             input_tx.clone(),
@@ -621,9 +569,6 @@ pub fn run_live_xplane(base_config: ConfigBundle, runtime: LiveRunConfig) -> Res
             clock,
         )
         .with_bridge(bridge.clone() as Arc<dyn ToolBridge>);
-        if let Some(src) = &airspace_source {
-            pump_builder = pump_builder.with_airspace(src.clone());
-        }
         let pump = Arc::new(pump_builder);
         bus.push_log_kind(
             LogKind::System,
@@ -649,33 +594,20 @@ pub fn run_live_xplane(base_config: ConfigBundle, runtime: LiveRunConfig) -> Res
         mission_complete_tx: None,
         turn_counter: None,
         tool_counters: None,
+        taxi_graphs: Default::default(),
     });
 
     let llm_stop = Arc::new(AtomicBool::new(false));
-    let llm_thread = {
-        let client = llm_client.clone();
-        let ctx = tool_ctx.clone();
-        let rx = input_rx.clone();
-        let stop = llm_stop.clone();
-        let bus_clone = bus.clone();
-        let initial_mode = runtime.pilot_mode;
-        let effort = reasoning_effort;
-        thread::Builder::new()
-            .name("llm-worker".into())
-            .spawn(move || {
-                run_conversation_loop(
-                    &*client,
-                    &ctx,
-                    &rx,
-                    stop,
-                    60,
-                    120,
-                    initial_mode,
-                    effort,
-                    Some(&bus_clone),
-                );
-            })?
-    };
+    let llm_thread = brain.spawn_worker(WorkerArgs {
+        tool_context: tool_ctx.clone(),
+        input_queue: input_rx.clone(),
+        stop: llm_stop.clone(),
+        per_request_timeout_s: 60,
+        total_wall_budget_s: 120,
+        pilot_mode: runtime.pilot_mode,
+        reasoning_effort,
+        bus: bus.clone(),
+    })?;
 
     let track_recorder: Option<Arc<PLMutex<crate::track::TrackRecorder>>> =
         match &runtime.track_paths {
@@ -961,7 +893,7 @@ fn engage_startup_profile(
             let rf = pilot.lock().runway_frame.clone();
             pilot
                 .lock()
-                .engage_profile(Box::new(PatternFlyProfile::new(config.clone(), rf)));
+                .engage_profile(Box::new(PatternFlyProfile::new(config.clone(), rf)))?;
             Ok(())
         }
         "dead_stick" | "dead_stick_landing" => {
@@ -976,7 +908,7 @@ fn engage_startup_profile(
                     config.clone(),
                     rf,
                     &state,
-                )));
+                )))?;
             Ok(())
         }
         other => Err(anyhow::anyhow!(

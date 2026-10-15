@@ -22,5 +22,44 @@ flare:
   roundout_height_ft: 20
   flare_start_ft: 10
   max_flare_pitch_deg: 9
+dead_stick:
+  # Glide ratio still needed to the aim point (distance / height). C172:
+  # clean ~9:1 (POH; ~7.5:1 in the offline sim), full flap ~6.6:1.
+  flap_glide_ratio_steps: [[7.5, 0], [6.8, 10], [6.0, 20]]
+  base_turn_glide_ratio: 6.0
+  min_final_ft: 1800
+  max_downwind_extension_ft: 4000
+phase_gates:
+  rotate_agl_ft: 20
+  enroute_climb_agl_ft: 400
+  climb_gate_max_sink_fpm: -300
 post_landing:
   turnoff_speed_kt: 15
+  exit_speed_kt: 5
+  exit_creep_speed_kt: 2
+  slowdown_lead_ft: 300
+  final_stop_ramp_ft: 60
+  intersection_capture_ft: 20
+  missed_exit_ft: 60
+  leg_capture_ft: 8
+  stopped_gs_kt: 1.0
+  rollout_brake: 0.75
+  runway_clear_margin_ft: 20
+  hold_line_offset_ft: 125
+  min_rollout_past_touchdown_ft: 800
+  go_around_min_runway_remaining_ft: 1500
+# Offline simple-simulator wheel physics (kt/s accelerations).
+ground_handling:
+  wheelbase_ft: 5.2
+  max_nosewheel_deg: 10
+  max_lateral_accel_g: 0.4
+  nose_wheel_responsiveness: 3.0
+  rolling_friction_kt_s: 0.5
+  rolling_drag_per_kt: 0.02
+  breakaway_kt_s: 2.0
+  static_friction_kt: 0.1
+  brake_decel_kt_s: 10.0
+  differential_brake_yaw_accel: 50.0
+  yaw_damping: 2.5
+  aero_rudder_yaw_accel: 16.0
+  rudder_reference_kt: 60.0

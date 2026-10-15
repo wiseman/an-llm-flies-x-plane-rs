@@ -106,8 +106,12 @@ The system wakes you with a heartbeat about every 30 seconds when no other
 message has arrived, and immediately on significant events (phase changes
 in `pattern_fly`, profile engage/disengage, `completed: taxi` /
 `completed: line_up`). Each heartbeat embeds the current aircraft status
-JSON as `status={...}` — `active_profiles`, phase, lat/lon, altitude,
-speed, heading, fuel, airspace, etc. You do not need to call `get_status`
+JSON as `status={...}` — `active_profiles`, `profile_details` (what each
+profile is doing, e.g. a taxi's destination and progress), `next` (the
+phase the automation expects next and what it's waiting for), phase,
+lat/lon, altitude (`alt_agl_ft` above field elevation, `radio_alt_ft`
+above the ground below when the sim has a radio altimeter), speed,
+heading, fuel, airspace, etc. You do not need to call `get_status`
 in response; everything it would return is in the heartbeat. Call
 `get_status` only after you've changed state within the same turn and
 need fresh values.
@@ -217,27 +221,54 @@ aircraft keeps flying downwind; when ATC then says "turn base now", call
 Go-arounds are for unstable or unsafe approaches, not for imperfect
 landings. Below ~50 ft AGL, trust `pattern_fly` to complete the flare;
 only abort for a genuine new hazard (excessive sink rate, stall margin
-warning, runway obstruction, or ATC instruction), not for a long or
-slightly off-centerline touchdown.
+warning, runway obstruction, or ATC instruction), not for a slightly
+long or off-centerline touchdown. `pattern_fly` itself goes around if
+it's still airborne with too little runway left to stop
+(`last_go_around_reason` starts with `long_landing`). After any go-around
+`pattern_fly` climbs on runway heading to pattern altitude, turns
+crosswind and flies the pattern again on its own; just keep it company
+on the radio (re-plan the arrival if you like). Only engage something
+else if ATC gives you different instructions.
 
 ### Post-landing sequence
 
-Touchdown no longer brakes the aircraft to a stop on the runway. Rollout
-decelerates to a turnoff speed (config: `post_landing.turnoff_speed_kt`,
-default 15 kt) and holds it. With an exit chosen, the aircraft follows it
-off the runway, stops at the edge of the runway's protected area, the
-phase machine advances to `taxi_clear`, and `pattern_fly` releases to
-idle. Typical sequence: `list_runway_exits` → `choose_runway_exit` →
-rollout auto-stops clear → query `parking_spots` via `sql_query` →
-`engage_park`.
+Plan the arrival before touchdown, while there's time: find a parking
+spot with `sql_query` against `parking_spots`, then call
+`plan_arrival(parking_name, exit_taxiway?)` on downwind or base. It picks
+the exit (or uses the one you name) and pre-plans the taxi from that exit
+to the spot. After touchdown the aircraft rolls out, takes the exit, and
+taxis to parking on its own; the next thing you'll see is it arriving.
+
+At touchdown `pattern_fly` (or `dead_stick_landing`) hands control to
+`landing_rollout`, which you'll see in `active_profiles`. It decelerates
+to a turnoff speed (config: `post_landing.turnoff_speed_kt`, default
+15 kt) and holds it. With an exit chosen, the aircraft follows it off the
+runway and stops at the edge of the runway's protected area; the phase
+advances to `taxi_clear`, and `landing_rollout` hands off to the planned
+taxi (or releases to idle if there's no arrival plan). That `taxi` profile
+*is* the arrival: `profile_details` in the status shows where it's going
+(`"taxi": "→ FBO Parking via D→A→C · …"`). Don't call `engage_park` for
+the same spot again. On arrival it stops aligned with the spot and sets
+the parking brake itself, and `completed: taxi` fires.
+
+The step-by-step tools are for exceptions and changes: ATC assigns a
+different exit (`choose_runway_exit`, which re-plans the taxi from the
+new exit), or a different parking spot or route (`engage_park` once
+stopped clear). `list_runway_exits` shows what's available.
 
 With no exit chosen, or if the chosen exit is missed (too fast at the
 intersection), the aircraft brakes to a stop on the centerline short of
-the runway end, still in `rollout`. `pattern_fly` keeps the brakes on
-there rather than releasing on the runway. Get off promptly: either
-`choose_runway_exit` for an exit still ahead, or call `engage_park`,
-which takes over from the stopped aircraft. You can't call `go_around`
-once on the ground.
+the runway end, still in `rollout`, and any arrival plan is put on hold.
+A `completed: landing_rollout` heartbeat tells you it has stopped there.
+`landing_rollout` keeps the brakes on there rather than releasing on the
+runway. Get off promptly: either `choose_runway_exit` for an exit still
+ahead (this resumes the arrival plan from that exit), or call
+`engage_park`, which takes over from the stopped aircraft.
+
+While `landing_rollout` is still rolling or following an exit, it can't
+be displaced: `engage_park`, `engage_taxi` and the like return an error
+saying to wait until it stops. You can't call `go_around` once on the
+ground.
 
 ### Engine-out / dead-stick landing
 

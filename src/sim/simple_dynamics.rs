@@ -2,8 +2,9 @@
 
 use crate::config::ConfigBundle;
 use crate::guidance::runway_geometry::RunwayFrame;
+use crate::sim::ground_physics::{step_ground, GroundStep};
 use crate::types::{
-    clamp, heading_to_vector, wrap_degrees_180, wrap_degrees_360, ActuatorCommands, Vec2, G_FT_S2,
+    clamp, heading_to_vector, wrap_degrees_360, ActuatorCommands, Vec2, G_FT_S2,
     KT_TO_FPS,
 };
 
@@ -30,6 +31,8 @@ pub struct DynamicsState {
     pub vertical_speed_ft_s: f64,
     pub flap_index: i32,
     pub gear_down: bool,
+    /// Parking brake ratio (0 released, 1 set).
+    pub parking_brake: f64,
 }
 
 pub struct SimpleAircraftModel {
@@ -86,6 +89,7 @@ impl SimpleAircraftModel {
             vertical_speed_ft_s: 0.0,
             flap_index: 0,
             gear_down: true,
+            parking_brake: 0.0,
         }
     }
 
@@ -119,14 +123,17 @@ impl SimpleAircraftModel {
         // engine-off glide. The parasitic-throttle scale preserves the
         // original powered-flight equilibrium; induced is added on top
         // and tuned (with the flap multipliers) against X-Plane
-        // settled-glide measurements:
-        //     IAS 68 flap  0  → drag 2.35 kt/s  (L/D 9.0)
-        //     IAS 61 flap  0  → drag 2.38 kt/s  (L/D 9.2)
-        //     IAS 68 flap 30  → drag 3.41 kt/s  (L/D 6.0)
-        //     IAS 61 flap 30  → drag 3.21 kt/s  (L/D 6.6)
+        // settled-glide L/D measurements. In a settled glide the glide
+        // term balances drag, so drag = g·sin(atan(1/(L/D))) in kt/s:
+        //     IAS 68 flap  0  → L/D 9.0 → drag 2.10 kt/s (model 2.09)
+        //     IAS 61 flap  0  → L/D 9.2 → drag 2.06 kt/s (model 2.00)
+        //     IAS 68 flap 30  → L/D 6.0 → drag 3.13 kt/s (model 3.05)
+        //     IAS 61 flap 30  → L/D 6.6 → drag 2.85 kt/s (model 2.86)
+        // (Earlier constants were 10% higher because descents were also
+        // scaled by `climb_efficiency`, which flattened the glide back.)
         const PARA_DRAG_K: f64 = 0.085;
-        const PARA_DRAG_IDLE_FRACTION: f64 = 0.3;
-        const INDUCED_DRAG_K: f64 = 42.0;
+        const PARA_DRAG_IDLE_FRACTION: f64 = 0.267;
+        const INDUCED_DRAG_K: f64 = 37.4;
         const INDUCED_IAS_FLOOR: f64 = 40.0;
         let para_throttle_scale = PARA_DRAG_IDLE_FRACTION
             + (1.0 - PARA_DRAG_IDLE_FRACTION) * state.throttle_pos.clamp(0.0, 1.0);
@@ -137,12 +144,17 @@ impl SimpleAircraftModel {
             _ => 1.62,
         };
         let parasitic_drag = PARA_DRAG_K * state.ias_kt * para_throttle_scale * flap_drag_factor;
-        let induced_drag = INDUCED_DRAG_K / state.ias_kt.max(INDUCED_IAS_FLOOR);
+        // Induced drag comes from lift; on the wheels there's next to none
+        // (and the ground model supplies its own rolling friction).
+        let induced_drag = if state.on_ground {
+            0.0
+        } else {
+            INDUCED_DRAG_K / state.ias_kt.max(INDUCED_IAS_FLOOR)
+        };
         let drag = parasitic_drag
             + induced_drag
             + 0.025 * state.roll_deg.abs()
             + 0.1 * state.pitch_deg.max(0.0);
-        let brake = commands.brakes * 24.0;
         // Gravity-along-flight-path component: descending converts PE→KE
         // (aircraft accelerates), climbing converts KE→PE (decelerates).
         // Without this term, throttle-pinned-to-zero glide is impossible —
@@ -157,51 +169,31 @@ impl SimpleAircraftModel {
         } else {
             0.0
         };
-        state.ias_kt = (state.ias_kt + (thrust - drag - brake + glide_accel_kt_s) * dt).max(0.0);
+        if let Some(ratio) = commands.parking_brake {
+            state.parking_brake = clamp(ratio, 0.0, 1.0);
+        }
+        let mut yaw_rate_deg_s = state.r_rad_s.to_degrees();
+        if state.on_ground {
+            let wheels = step_ground(
+                &self.config.ground_handling,
+                &GroundStep {
+                    speed_kt: state.ias_kt,
+                    yaw_rate_deg_s: state.r_rad_s.to_degrees(),
+                    thrust_kt_s: thrust,
+                    aero_drag_kt_s: drag,
+                    parking_brake: state.parking_brake,
+                },
+                commands,
+                dt,
+            );
+            state.ias_kt = wheels.speed_kt;
+            yaw_rate_deg_s = wheels.yaw_rate_deg_s;
+        } else {
+            state.ias_kt = (state.ias_kt + (thrust - drag + glide_accel_kt_s) * dt).max(0.0);
+        }
         let airspeed_ft_s = (state.ias_kt * KT_TO_FPS).max(1.0);
 
-        let mut yaw_rate_deg_s;
         if state.on_ground {
-            yaw_rate_deg_s = state.r_rad_s.to_degrees();
-            // Runway crown / rudder-centering bias only applies when
-            // the wheels are actually on the reference runway — on the
-            // ramp this would fight rudder input during taxi.
-            let on_runway = {
-                let rf_pt = self.runway_frame.to_runway_frame(state.position_ft);
-                let length = self.runway_frame.runway.length_ft;
-                rf_pt.x >= -50.0 && rf_pt.x <= length + 50.0 && rf_pt.y.abs() <= 75.0
-            };
-            let runway_restoring = if on_runway {
-                0.8 * wrap_degrees_180(
-                    self.runway_frame.runway.course_deg - state.heading_deg,
-                )
-            } else {
-                0.0
-            };
-            // Differential braking: positive pivot_brake = more right
-            // brake = nose swings right, matching the live bridge's
-            // sign convention. Tapered so the effect dominates at taxi
-            // speed and fades as aero forces take over.
-            let pivot = clamp(commands.pivot_brake, -1.0, 1.0);
-            let pivot_speed_factor =
-                (1.0 - (state.ias_kt / 40.0).clamp(0.0, 1.0)).max(0.25);
-            let pivot_yaw_accel = 48.0 * pivot * pivot_speed_factor;
-            // Nose-wheel steering: rudder pedals are mechanically
-            // linked to the nose wheel on the ground; fades above
-            // ~60 kt as the nose wheel unloads on rotation.
-            let nose_wheel_gain = {
-                let speed_factor = (1.0 - (state.ias_kt / 60.0).clamp(0.0, 1.0)).max(0.0);
-                120.0 * speed_factor
-            };
-            let forcing = (16.0 + nose_wheel_gain) * commands.rudder
-                + runway_restoring
-                + pivot_yaw_accel;
-            // Exact-exponential damping step — stable for any dt,
-            // unlike explicit Euler (k*dt>2 sign-flips each tick).
-            let k = 12.0_f64;
-            let decay = (-k * dt).exp();
-            let steady_state = forcing / k;
-            yaw_rate_deg_s = yaw_rate_deg_s * decay + steady_state * (1.0 - decay);
             state.vertical_speed_ft_s = 0.0;
             state.altitude_ft = self.config.airport.field_elevation_ft;
             if state.ias_kt >= self.config.performance.vr_kt
@@ -223,8 +215,21 @@ impl SimpleAircraftModel {
                 1.2,
             );
             let flight_path_deg = state.pitch_deg - 2.0;
-            state.vertical_speed_ft_s = airspeed_ft_s * flight_path_deg.to_radians().sin() * climb_efficiency
-                - (0.25f64 - state.throttle_pos).max(0.0) * 12.0;
+            // Low airspeed limits how much a nose-up attitude can climb;
+            // it doesn't make a nose-down attitude descend more slowly.
+            // Descents use the full flight-path geometry, consistent with
+            // the speed equation's glide term above.
+            let path_efficiency = if flight_path_deg > 0.0 { climb_efficiency } else { 1.0 };
+            // Below Vref the wing can't hold the aircraft up at any
+            // attitude, so it sinks; this is what eventually puts it on the
+            // runway in the flare. (An earlier idle-throttle sink term
+            // double-counted the idle drag the glide calibration above
+            // already includes, making power-off glides ~25% too steep
+            // against X-Plane.)
+            let vref = self.config.performance.vref_kt;
+            let lift_deficit = ((vref - state.ias_kt) / vref).max(0.0);
+            state.vertical_speed_ft_s = airspeed_ft_s * flight_path_deg.to_radians().sin() * path_efficiency
+                - lift_deficit * 15.0;
             state.altitude_ft += state.vertical_speed_ft_s * dt;
             if state.altitude_ft <= self.config.airport.field_elevation_ft {
                 state.altitude_ft = self.config.airport.field_elevation_ft;
@@ -283,6 +288,7 @@ mod tests {
             gear_down: Some(true),
             brakes: 0.0,
             pivot_brake: 0.0,
+            parking_brake: None,
         }
     }
 
@@ -324,10 +330,12 @@ mod tests {
             cfg.airport.field_elevation_ft,
         );
         state.ias_kt = 5.0;
+        state.throttle_pos = 0.15;
         let mut cmd = zero_cmd();
         cmd.rudder = 1.0;
-        cmd.throttle = 0.1;
-        cmd.brakes = 0.2;
+        // Enough power to keep rolling: the nose wheel only turns the
+        // aircraft while it's moving.
+        cmd.throttle = 0.15;
         for _ in 0..25 {
             model.step(&mut state, &cmd, 0.2);
         }
@@ -336,6 +344,24 @@ mod tests {
             "expected strong rudder-driven turn at taxi speed; got heading={}",
             state.heading_deg
         );
+    }
+
+    #[test]
+    fn nose_wheel_cannot_turn_a_stopped_aircraft() {
+        let cfg = load_default_config_bundle();
+        let model = SimpleAircraftModel::new(cfg.clone(), Vec2::ZERO);
+        let mut state = model.initial_state_at(
+            Vec2::new(500.0, 500.0),
+            0.0,
+            cfg.airport.field_elevation_ft,
+        );
+        let mut cmd = zero_cmd();
+        cmd.rudder = 1.0;
+        for _ in 0..25 {
+            model.step(&mut state, &cmd, 0.2);
+        }
+        assert_eq!(state.heading_deg, 0.0);
+        assert_eq!(state.ias_kt, 0.0);
     }
 
     #[test]

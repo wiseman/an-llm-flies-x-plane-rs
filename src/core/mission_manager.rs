@@ -21,6 +21,8 @@ use crate::core::profiles::{
     idle_profile_trio, Axis, AxisSet, GuidanceProfile, IdleLateralProfile, IdleSpeedProfile,
     IdleVerticalProfile, PatternMetadata, ProfileContribution, ProfileTick, TransitionHint,
 };
+use crate::core::landing_rollout::LandingPlanHolder;
+use crate::core::spatial::SpatialSnapshot;
 use crate::core::state_estimator::estimate_aircraft_state;
 use crate::guidance::flare_profile::FlareController;
 use crate::guidance::runway_geometry::RunwayFrame;
@@ -157,6 +159,7 @@ impl StatusSnapshot {
                 gear_down: Some(true),
                 brakes: 0.0,
                 pivot_brake: 0.0,
+                parking_brake: None,
             },
             last_guidance: None,
             go_around_reason: None,
@@ -173,6 +176,62 @@ impl StatusSnapshot {
             vertical_owner_idx: None,
             speed_owner_idx: None,
         }
+    }
+}
+
+/// An engage or disengage refused because a profile it would remove
+/// reported that it can't be preempted right now.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PreemptionRefused {
+    pub profile: &'static str,
+    pub reason: String,
+}
+
+impl std::fmt::Display for PreemptionRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} can't be displaced yet: {}", self.profile, self.reason)
+    }
+}
+
+impl std::error::Error for PreemptionRefused {}
+
+/// A cockpit setting outside the flight controls (parking brake, flap
+/// handle) that tools and profiles both set. The latest request wins: a
+/// tool's, or a profile's whenever its request changes. Each change goes
+/// to the sim once through `ActuatorCommands`, so a change made in the
+/// cockpit isn't overwritten every tick.
+#[derive(Debug, Clone, Default)]
+pub struct CockpitSetting<T> {
+    value: Option<T>,
+    last_profile_request: Option<T>,
+    unsent: bool,
+}
+
+impl<T: Copy + PartialEq> CockpitSetting<T> {
+    /// The setting as last requested, or `None` if nothing has set it yet.
+    pub fn value(&self) -> Option<T> {
+        self.value
+    }
+
+    /// A tool wrote `value` to the sim directly (so it takes effect even
+    /// while the sim is paused): record it without sending it again.
+    pub fn note_written(&mut self, value: T) {
+        self.value = Some(value);
+        self.unsent = false;
+    }
+
+    fn profile_request(&mut self, request: Option<T>) {
+        if request != self.last_profile_request {
+            self.last_profile_request = request;
+            if let Some(v) = request {
+                self.value = Some(v);
+                self.unsent = true;
+            }
+        }
+    }
+
+    fn take_unsent(&mut self) -> Option<T> {
+        std::mem::take(&mut self.unsent).then_some(self.value).flatten()
     }
 }
 
@@ -203,6 +262,8 @@ pub struct PilotCore {
     pub mission_goal: Option<MissionGoal>,
     /// LLM-declared active ATC clearance.
     pub active_clearance: Option<ActiveClearance>,
+    pub parking_brake: CockpitSetting<f64>,
+    pub flaps: CockpitSetting<i32>,
 }
 
 impl PilotCore {
@@ -232,6 +293,8 @@ impl PilotCore {
             last_tecs_phase: None,
             mission_goal: None,
             active_clearance: None,
+            parking_brake: CockpitSetting::default(),
+            flaps: CockpitSetting::default(),
             config,
         }
     }
@@ -257,16 +320,69 @@ impl PilotCore {
     }
 
     /// Engage a profile. Any active profile with an overlapping axis is
-    /// displaced; returns the names of displaced profiles.
-    pub fn engage_profile(&mut self, profile: Box<dyn GuidanceProfile>) -> Vec<String> {
+    /// displaced; returns the names of displaced profiles. Refused, with
+    /// nothing changed, if a profile that would be displaced isn't
+    /// preemptible right now (see `GuidanceProfile::preemption`).
+    pub fn engage_profile(
+        &mut self,
+        profile: Box<dyn GuidanceProfile>,
+    ) -> Result<Vec<String>, PreemptionRefused> {
         self.engage_profiles(vec![profile])
     }
 
     /// Engage several profiles atomically under one logical step. Returns the
     /// set of displaced profile names (excluding any profile that was itself
     /// reinstalled in the same call — "displaced" reflects only real
-    /// removals).
-    pub fn engage_profiles(&mut self, new_profiles: Vec<Box<dyn GuidanceProfile>>) -> Vec<String> {
+    /// removals). All-or-nothing: if any profile that would be displaced
+    /// refuses preemption, nothing is engaged.
+    pub fn engage_profiles(
+        &mut self,
+        new_profiles: Vec<Box<dyn GuidanceProfile>>,
+    ) -> Result<Vec<String>, PreemptionRefused> {
+        let claimed = new_profiles
+            .iter()
+            .fold(AxisSet::NONE, |acc, p| acc.union(p.owns()));
+        self.check_preemptible(|existing| !existing.owns().is_disjoint(claimed))?;
+        Ok(self.install_profiles(new_profiles))
+    }
+
+    /// Engage profiles built against a new reference runway (`config`'s
+    /// airport section). The runway replaces the current one only if the
+    /// engage goes through, so a refused engage leaves the active
+    /// profiles measuring against the runway they were built for.
+    pub fn engage_profiles_with_config(
+        &mut self,
+        config: ConfigBundle,
+        new_profiles: Vec<Box<dyn GuidanceProfile>>,
+    ) -> Result<Vec<String>, PreemptionRefused> {
+        let claimed = new_profiles
+            .iter()
+            .fold(AxisSet::NONE, |acc, p| acc.union(p.owns()));
+        self.check_preemptible(|existing| !existing.owns().is_disjoint(claimed))?;
+        self.runway_frame = RunwayFrame::new(config.airport.runway.clone());
+        self.config = config;
+        Ok(self.install_profiles(new_profiles))
+    }
+
+    /// Ask every active profile matching `affected` whether it may be
+    /// removed; the first refusal wins.
+    fn check_preemptible(
+        &self,
+        affected: impl Fn(&dyn GuidanceProfile) -> bool,
+    ) -> Result<(), PreemptionRefused> {
+        for p in &self.active_profiles {
+            if affected(p.as_ref()) {
+                if let Err(reason) = p.preemption() {
+                    return Err(PreemptionRefused { profile: p.name(), reason });
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Unchecked install, used directly for profile hand-offs: a profile
+    /// replacing itself has consented by definition.
+    fn install_profiles(&mut self, new_profiles: Vec<Box<dyn GuidanceProfile>>) -> Vec<String> {
         let new_names: BTreeSet<&'static str> = new_profiles.iter().map(|p| p.name()).collect();
         let mut all_displaced: BTreeSet<String> = BTreeSet::new();
         for profile in new_profiles {
@@ -287,7 +403,11 @@ impl PilotCore {
         result
     }
 
-    pub fn disengage_profile(&mut self, name: &str) -> Vec<String> {
+    /// Remove every profile named `name`, back-filling orphaned axes with
+    /// idle profiles; returns the names of the idles added. Refused if the
+    /// profile isn't preemptible right now.
+    pub fn disengage_profile(&mut self, name: &str) -> Result<Vec<String>, PreemptionRefused> {
+        self.check_preemptible(|p| p.name() == name)?;
         let mut removed_owns = AxisSet::NONE;
         let mut retained: Vec<Box<dyn GuidanceProfile>> = Vec::with_capacity(self.active_profiles.len());
         for p in std::mem::take(&mut self.active_profiles) {
@@ -299,7 +419,7 @@ impl PilotCore {
         }
         if removed_owns.is_empty() {
             self.active_profiles = retained;
-            return vec![];
+            return Ok(vec![]);
         }
         let covered = retained
             .iter()
@@ -316,16 +436,43 @@ impl PilotCore {
             retained.push(idle);
         }
         self.active_profiles = retained;
-        added
+        Ok(added)
     }
 
-    pub fn find_profile_mut<R>(&mut self, name: &str, f: impl FnOnce(&mut dyn GuidanceProfile) -> R) -> Option<R> {
-        for p in &mut self.active_profiles {
-            if p.name() == name {
-                return Some(f(p.as_mut()));
-            }
+    /// The first active profile whose concrete type is `T`.
+    pub fn profile_mut<T: GuidanceProfile + 'static>(&mut self) -> Option<&mut T> {
+        self.active_profiles
+            .iter_mut()
+            .find_map(|p| (**p).as_any_mut().downcast_mut::<T>())
+    }
+
+    /// The active profile carrying the landing's exit/arrival plan.
+    pub fn landing_plan_mut(&mut self) -> Option<&mut dyn LandingPlanHolder> {
+        self.active_profiles.iter_mut().find_map(|p| p.landing_plan_mut())
+    }
+
+    /// Geometry for the TUI spatial view: the first active profile's
+    /// `spatial_overlay`, with the pilot's reference runway standing in
+    /// when no profile names one. Read-only and built on demand, so the
+    /// control loop never pays for it.
+    pub fn spatial_snapshot(&self) -> SpatialSnapshot {
+        let mut overlay = self
+            .active_profiles
+            .iter()
+            .find_map(|p| p.spatial_overlay())
+            .unwrap_or_default();
+        let runway = overlay
+            .runway
+            .take()
+            .unwrap_or_else(|| self.runway_frame.runway.clone());
+        SpatialSnapshot {
+            runway,
+            field_elevation_ft: self.config.airport.field_elevation_ft,
+            roundout_height_ft: self.config.flare.roundout_height_ft,
+            flare_start_ft: self.config.flare.flare_start_ft,
+            runway_clear_margin_ft: self.config.post_landing.runway_clear_margin_ft,
+            overlay,
         }
-        None
     }
 
     pub fn has_profile(&self, name: &str) -> bool {
@@ -470,6 +617,7 @@ impl PilotCore {
                 targets.gear_down = c.gear_down;
                 if let Some(b) = c.brakes { targets.brakes = b; }
                 if let Some(o) = c.tecs_phase_override { targets.tecs_phase_override = Some(o); }
+                if let Some(p) = c.parking_brake { targets.parking_brake = Some(p); }
             }
             if owns.contains(&Axis::Speed) {
                 if let Some(s) = c.target_speed_kt { targets.target_speed_kt = Some(s); }
@@ -478,7 +626,7 @@ impl PilotCore {
 
         // Apply any hand-offs after all profiles have ticked.
         for batch in handoffs {
-            self.engage_profiles(batch);
+            self.install_profiles(batch);
         }
         (targets, metadata)
     }
@@ -590,9 +738,15 @@ impl PilotCore {
                 self.tecs.reset();
                 self.last_tecs_phase = Some(tecs_phase);
             }
+            let (target_altitude_ft, throttle_limit) = match guidance.glidepath {
+                Some(gp) if guidance.vertical_mode == VerticalMode::GlidepathTrack => {
+                    self.glidepath_targets(state, gp, throttle_limit)
+                }
+                _ => (guidance.target_altitude_ft.unwrap_or(state.alt_msl_ft), throttle_limit),
+            };
             self.tecs.update(
                 tecs_phase,
-                guidance.target_altitude_ft.unwrap_or(state.alt_msl_ft),
+                target_altitude_ft,
                 guidance.target_speed_kt.unwrap_or(state.ias_kt),
                 state.alt_msl_ft,
                 state.vs_fpm,
@@ -619,16 +773,62 @@ impl PilotCore {
 
         let elevator = self.pitch_controller.update(pitch_cmd_deg, state.pitch_deg, state.q_rad_s, state.dt);
 
+        self.parking_brake.profile_request(guidance.parking_brake);
+        self.flaps.profile_request(guidance.flaps_cmd);
+        // X-Plane releases the parking brake while the toe brakes are
+        // pressed, so with it set leave them alone.
+        let parking_brake_set = self.parking_brake.value().is_some_and(|r| r >= 0.5);
+        let (brakes, pivot_brake) = if parking_brake_set {
+            (0.0, 0.0)
+        } else {
+            (taxi_brake_override.unwrap_or(guidance.brakes), taxi_pivot_brake)
+        };
+
         ActuatorCommands {
             aileron: clamp(aileron, -1.0, 1.0),
             elevator: clamp(elevator, -1.0, 1.0),
             rudder: clamp(rudder, -1.0, 1.0),
             throttle: clamp(throttle_cmd, 0.0, 1.0),
-            flaps: guidance.flaps_cmd,
+            flaps: self.flaps.take_unsent(),
             gear_down: Some(true),
-            brakes: taxi_brake_override.unwrap_or(guidance.brakes),
-            pivot_brake: clamp(taxi_pivot_brake, -1.0, 1.0),
+            brakes,
+            pivot_brake: clamp(pivot_brake, -1.0, 1.0),
+            parking_brake: self.parking_brake.take_unsent(),
         }
+    }
+}
+
+/// How far below the aircraft a glidepath capture may command: a
+/// controlled intercept instead of a dive when joining above the path.
+const MAX_GLIDEPATH_CAPTURE_ERROR_FT: f64 = 25.0;
+
+impl PilotCore {
+    /// TECS altitude target and throttle limits for tracking `gp` on the
+    /// reference runway. Joining from above, the target sits at most
+    /// `MAX_GLIDEPATH_CAPTURE_ERROR_FT` below the aircraft; that alone
+    /// only steepens the descent slightly, and with power holding speed
+    /// the aircraft would fly parallel to the path all the way down the
+    /// runway. So power comes off as well (full authority up to 30 ft
+    /// above the path, idle by 70 ft) and TECS has to pitch down to hold
+    /// speed. Below Vref power comes back regardless: never trade
+    /// airspeed for the glidepath.
+    pub fn glidepath_targets(
+        &self,
+        state: &AircraftState,
+        gp: crate::types::Glidepath,
+        throttle_limit: (f64, f64),
+    ) -> (f64, (f64, f64)) {
+        let distance_to_aim_ft = gp.aimpoint_ft_from_threshold - state.runway_x_ft.unwrap_or(-3000.0);
+        let path_alt_ft = self.config.airport.field_elevation_ft
+            + (gp.threshold_crossing_height_ft
+                + distance_to_aim_ft * gp.slope_deg.to_radians().tan())
+            .max(0.0);
+        let target_alt_ft = path_alt_ft.max(state.alt_msl_ft - MAX_GLIDEPATH_CAPTURE_ERROR_FT);
+        let above_path_ft = state.alt_msl_ft - path_alt_ft;
+        let high_ceiling = (1.0 - (above_path_ft - 30.0) / 40.0).clamp(0.0, 1.0);
+        let slow_floor = ((self.config.performance.vref_kt - state.ias_kt) / 5.0).clamp(0.0, 1.0);
+        let max_throttle = throttle_limit.1.min(high_ceiling.max(slow_floor));
+        (target_alt_ft, (throttle_limit.0.min(max_throttle), max_throttle))
     }
 }
 
@@ -653,12 +853,11 @@ fn taxi_leg_errors(
 
 /// Pose-target heading feedback for `LateralMode::TaxiPose`. Returns
 /// `(heading_err_deg, pivoting)`. When the aircraft is outside
-/// `POSE_PIVOT_SWITCH_FT` of the target position, we feed the
+/// `POSE_PIVOT_RADIUS_FT` of the target position, we feed the
 /// aircraft-to-target bearing as the desired heading (steer toward the
 /// point). Inside that radius we switch to the target heading itself
 /// (pivot in place to face the commanded direction); `pivoting` flips
 /// true so the caller can expose it in debug if desired.
-const POSE_PIVOT_SWITCH_FT: f64 = 15.0;
 fn taxi_pose_errors(guidance: &GuidanceTargets, state: &AircraftState) -> (f64, bool) {
     let target_pos = guidance
         .target_waypoint
@@ -668,7 +867,7 @@ fn taxi_pose_errors(guidance: &GuidanceTargets, state: &AircraftState) -> (f64, 
     let target_heading = guidance.target_heading_deg.unwrap_or(state.heading_deg);
     let to_target = target_pos - state.position_ft;
     let d = to_target.length();
-    if d > POSE_PIVOT_SWITCH_FT {
+    if d > crate::core::profiles::POSE_PIVOT_RADIUS_FT {
         let bearing_to_target = crate::types::vector_to_heading(to_target);
         let err = wrap_degrees_180(bearing_to_target - state.heading_deg);
         (err, false)
@@ -682,6 +881,27 @@ fn taxi_pose_errors(guidance: &GuidanceTargets, state: &AircraftState) -> (f64, 
 mod tests {
     use super::*;
     use crate::config::load_default_config_bundle;
+
+    #[test]
+    fn spatial_snapshot_reflects_active_profile() {
+        use crate::core::profiles::TaxiProfile;
+        use crate::types::{StraightLeg, TaxiPose, Vec2};
+        let mut pilot = PilotCore::new(load_default_config_bundle());
+        let idle = pilot.spatial_snapshot();
+        assert_eq!(idle.runway, pilot.runway_frame.runway);
+        assert!(idle.overlay.route.is_empty());
+        let leg = StraightLeg { start_ft: Vec2::ZERO, end_ft: Vec2::new(0.0, 400.0) };
+        let taxi = TaxiProfile::new(vec![leg], vec!["A".to_string()])
+            .with_final_pose(TaxiPose { position_ft: Vec2::new(0.0, 400.0), heading_deg: 0.0 });
+        pilot.engage_profile(Box::new(taxi)).unwrap();
+        let sp = pilot.spatial_snapshot();
+        assert_eq!(sp.overlay.route.len(), 1);
+        assert_eq!(sp.overlay.route[0].label, "A");
+        assert_eq!(sp.overlay.route_active_idx, Some(0));
+        assert!(sp.overlay.target_pose.is_some());
+        assert_eq!(sp.overlay.target_label.as_deref(), Some("HOLD SHORT"));
+        assert_eq!(sp.roundout_height_ft, pilot.config.flare.roundout_height_ft);
+    }
 
     #[test]
     fn set_and_clear_mission_goal() {

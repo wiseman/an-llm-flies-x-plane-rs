@@ -31,7 +31,13 @@ pub fn estimate_aircraft_state(
         dt,
         position_ft: raw.position_ft,
         alt_msl_ft: raw.altitude_ft,
-        alt_agl_ft: (raw.altitude_ft - config.airport.field_elevation_ft).max(0.0),
+        // On the wheels the height above ground is zero, whatever the
+        // field's published elevation says about this patch of pavement.
+        alt_agl_ft: if raw.on_ground {
+            0.0
+        } else {
+            (raw.altitude_ft - config.airport.field_elevation_ft).max(0.0)
+        },
         alt_radio_agl_ft: raw.agl_ft.map(|v| v.max(0.0)),
         pitch_deg: raw.pitch_deg,
         roll_deg: raw.roll_deg,

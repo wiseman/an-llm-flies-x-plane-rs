@@ -88,6 +88,7 @@ fn run_dead_stick_scenario(
         vertical_speed_ft_s: 0.0,
         flap_index: 0,
         gear_down: true,
+        parking_brake: 0.0,
     };
 
     // First update: estimate state so the dead-stick profile sees real
@@ -99,7 +100,7 @@ fn run_dead_stick_scenario(
     // what live_runner does too (the bridge state runs through the
     // estimator before any tool reads it).
     let profile = DeadStickLandingProfile::new(config.clone(), runway_frame.clone(), &estimated);
-    pilot.engage_profile(Box::new(profile));
+    pilot.engage_profile(Box::new(profile)).unwrap();
 
     let mut phases_seen: Vec<FlightPhase> = Vec::new();
     let mut touchdown_runway_x_ft: Option<f64> = None;

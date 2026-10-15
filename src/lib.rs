@@ -11,4 +11,5 @@ pub mod sim;
 pub mod track;
 pub mod transcribe;
 pub mod tui;
+pub mod tui_spatial;
 pub mod types;

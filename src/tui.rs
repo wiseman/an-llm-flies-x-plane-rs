@@ -4,7 +4,9 @@
 //!   - `format_snapshot_display` / `parse_input_source`: pure functions used
 //!     by the headless control loop and the test suite.
 //!   - `run_tui`: a ratatui-based interactive UI with four panes (status,
-//!     log, radio, input) + key bindings for submit / toggle-detail / exit.
+//!     log, radio, input) + key bindings for submit / toggle-detail / exit,
+//!     plus the optional animated spatial view (`tui_spatial`, ctrl-v or
+//!     `/view`).
 //!
 //! The interactive runner polls the shared `SimBus` and `PilotCore.latest_snapshot`
 //! every 100 ms and redraws. Operator/ATC input is parsed via
@@ -250,6 +252,9 @@ use crate::live_runner::HeartbeatPump;
 use crate::llm::backend::{CacheSnapshot, CacheStats};
 use crate::llm::conversation::{IncomingMessage, PilotMode};
 use crate::transcribe::{PttController, PttMode, PttSnapshot};
+use crate::tui_spatial::{
+    parse_view_command, Palette, SpatialWidget, Trail, ViewCommand, ViewMode,
+};
 
 /// Run the interactive AI Pilot Console on the calling thread. Blocks
 /// until the user exits (Ctrl-C / Ctrl-D / Esc); on return, `stop_event`
@@ -319,6 +324,14 @@ pub fn run_tui(
     // Fixed epoch for driving time-based UI animations (the Finalizing
     // shimmer, etc.) without allocating a new Instant each render.
     let tui_epoch = Instant::now();
+    // Spatial "targeting" view (ctrl-v or /view). Off by default; the
+    // trail is recorded regardless so it's populated when toggled on.
+    let mut spatial_on = false;
+    let mut spatial_mode = ViewMode::Auto;
+    let mut spatial_trail = Trail::default();
+    // Animation clock: one tick per redraw while the view is visible.
+    let mut spatial_frame: u64 = 0;
+    let spatial_palette = Palette::from_env();
 
     let outcome = loop {
         let next_tick = Instant::now() + frame_interval;
@@ -372,6 +385,10 @@ pub fn run_tui(
                         }
                         KeyCode::Char('o') => {
                             show_thoughts = !show_thoughts;
+                            continue;
+                        }
+                        KeyCode::Char('v') => {
+                            spatial_on = !spatial_on;
                             continue;
                         }
                         KeyCode::Char('a') => {
@@ -498,7 +515,18 @@ pub fn run_tui(
                         let raw = input_buffer.trim().to_string();
                         if !raw.is_empty() {
                             history_record(&mut history, &raw, INPUT_HISTORY_MAX);
-                            if let Some(rest) = raw.strip_prefix("/mode") {
+                            if let Some(rest) = raw.strip_prefix("/view") {
+                                match parse_view_command(rest) {
+                                    Ok(cmd) => {
+                                        apply_view_command(cmd, &mut spatial_on, &mut spatial_mode);
+                                        bus.push_log_kind(
+                                            LogKind::System,
+                                            describe_view_state(spatial_on, spatial_mode),
+                                        );
+                                    }
+                                    Err(e) => bus.push_log_kind(LogKind::Error, e),
+                                }
+                            } else if let Some(rest) = raw.strip_prefix("/mode") {
                                 let arg = rest.trim();
                                 match PilotMode::parse(arg) {
                                     Some(mode) => {
@@ -608,15 +636,24 @@ pub fn run_tui(
 
         // Snapshot once per frame. Risk is computed under the same lock
         // using a borrow of `config` — no `ConfigBundle` clone.
-        let (snapshot, risk) = {
+        let (snapshot, risk, spatial) = {
             let p = pilot.lock();
             let snap = p.latest_snapshot.clone();
             let risk = snap.as_ref().map(|s| {
                 let phase = s.phase.unwrap_or(FlightPhase::Cruise);
                 risk_summary_for(&p.config, &s.state, phase)
             });
-            (snap, risk)
+            // Built on demand from the active profiles, only while the
+            // view is visible.
+            let spatial = spatial_on.then(|| p.spatial_snapshot());
+            (snap, risk, spatial)
         };
+        if let Some(s) = &snapshot {
+            spatial_trail.push(s.t_sim, s.state.position_ft, s.state.alt_agl_ft);
+        }
+        if spatial_on {
+            spatial_frame = spatial_frame.wrapping_add(1);
+        }
         let log_entries = bus.log_entries();
         let (_, _, radio) = bus.snapshot();
         let radio_lines: Vec<Line> = radio.iter().flat_map(|l| render_radio_line(l)).collect();
@@ -684,21 +721,39 @@ pub fn run_tui(
                 .block(Block::default().borders(Borders::ALL).title(" ENERGY · RISK "));
             f.render_widget(risk_para, body_cols[1]);
 
+            // Spatial view (when on) takes the left half of the dialog
+            // area on wide terminals, or its top on narrow ones; radio +
+            // log keep the rest.
+            let (spatial_area, dialog_area) = split_spatial_area(chunks[4], spatial_on);
+            if let Some(area) = spatial_area {
+                f.render_widget(
+                    SpatialWidget {
+                        snapshot: snapshot.as_ref(),
+                        spatial: spatial.as_ref(),
+                        trail: &spatial_trail,
+                        mode: spatial_mode,
+                        frame: spatial_frame,
+                        palette: spatial_palette,
+                    },
+                    area,
+                );
+            }
+
             // Dialog: radio + LLM action log. Side-by-side on wide
             // terminals; on narrow terminals (< 100 cols) the panes
             // stack vertically with radio at 1/3 the height of log so
             // ATC stays visible without crowding the assistant text.
-            let (radio_area, log_area) = if chunks[4].width < 100 {
+            let (radio_area, log_area) = if dialog_area.width < 100 {
                 let stacked = Layout::default()
                     .direction(Direction::Vertical)
                     .constraints([Constraint::Ratio(1, 4), Constraint::Ratio(3, 4)])
-                    .split(chunks[4]);
+                    .split(dialog_area);
                 (stacked[0], stacked[1])
             } else {
                 let cols = Layout::default()
                     .direction(Direction::Horizontal)
                     .constraints([Constraint::Percentage(45), Constraint::Percentage(55)])
-                    .split(chunks[4]);
+                    .split(dialog_area);
                 (cols[0], cols[1])
             };
 
@@ -873,6 +928,52 @@ pub fn run_tui(
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     terminal.show_cursor()?;
     outcome
+}
+
+/// Split the dialog area for the spatial view. Wide (≥ 120 cols): view on
+/// the left half, radio/log stacked on the right. Narrower: view on top
+/// (55%), radio/log below. Returns `(view_area, dialog_area)`.
+pub(crate) fn split_spatial_area(
+    area: ratatui::layout::Rect,
+    spatial_on: bool,
+) -> (Option<ratatui::layout::Rect>, ratatui::layout::Rect) {
+    if !spatial_on {
+        return (None, area);
+    }
+    let parts = if area.width >= 120 {
+        Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .split(area)
+    } else {
+        Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
+            .split(area)
+    };
+    (Some(parts[0]), parts[1])
+}
+
+pub(crate) fn apply_view_command(cmd: ViewCommand, on: &mut bool, mode: &mut ViewMode) {
+    match cmd {
+        ViewCommand::Toggle => *on = !*on,
+        ViewCommand::On => *on = true,
+        ViewCommand::Off => *on = false,
+        ViewCommand::Mode(m) => {
+            *on = true;
+            *mode = m;
+        }
+    }
+}
+
+fn describe_view_state(on: bool, mode: ViewMode) -> String {
+    match (on, mode) {
+        (false, _) => "spatial view off".to_string(),
+        (true, ViewMode::Auto) => "spatial view on (auto)".to_string(),
+        (true, ViewMode::Pinned(k)) => {
+            format!("spatial view on (pinned: {})", k.label().to_ascii_lowercase())
+        }
+    }
 }
 
 /// Format the active-profile list for the mode line, appending each
@@ -2351,6 +2452,7 @@ fn build_input_title(on_ground: bool, phase: Option<FlightPhase>) -> String {
     hints.push("F5=abort");
     hints.push("ctrl-t=detail");
     hints.push("ctrl-o=thoughts");
+    hints.push("ctrl-v=view");
     hints.push("pgup/pgdn=scroll");
     format!(" INPUT — {} ", hints.join(" · "))
 }
@@ -2371,6 +2473,40 @@ fn canned_directive_for(code: &KeyCode) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn view_command_toggles_and_pins() {
+        use crate::tui_spatial::ViewKind;
+        let (mut on, mut mode) = (false, ViewMode::Auto);
+        apply_view_command(ViewCommand::Toggle, &mut on, &mut mode);
+        assert!(on);
+        apply_view_command(ViewCommand::Toggle, &mut on, &mut mode);
+        assert!(!on);
+        apply_view_command(ViewCommand::Mode(ViewMode::Pinned(ViewKind::Taxi)), &mut on, &mut mode);
+        assert!(on && mode == ViewMode::Pinned(ViewKind::Taxi));
+        apply_view_command(ViewCommand::Off, &mut on, &mut mode);
+        assert!(!on && mode == ViewMode::Pinned(ViewKind::Taxi), "off keeps the pin");
+        assert_eq!(describe_view_state(true, mode), "spatial view on (pinned: taxi)");
+    }
+
+    #[test]
+    fn spatial_split_keeps_dialog_usable() {
+        use ratatui::layout::Rect;
+        let area = Rect::new(0, 0, 160, 30);
+        assert_eq!(split_spatial_area(area, false), (None, area));
+        let (v, d) = split_spatial_area(area, true);
+        let v = v.unwrap();
+        assert_eq!((v.width, d.width, d.height), (80, 80, 30));
+        let narrow = Rect::new(0, 0, 90, 30);
+        let (v, d) = split_spatial_area(narrow, true);
+        assert_eq!(v.unwrap().width, 90);
+        assert!(d.height >= 13);
+    }
+
+    #[test]
+    fn input_title_mentions_view_toggle() {
+        assert!(build_input_title(false, None).contains("ctrl-v=view"));
+    }
 
     #[test]
     fn parse_input_source_defaults_to_operator() {

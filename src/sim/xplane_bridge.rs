@@ -21,14 +21,14 @@ use crate::sim::datarefs::{
     DatarefSpec, ACF_TAILNUM, BOOTSTRAP_DATAREFS, COMMAND_DATAREFS, ELEVATION_M,
     FLAP_HANDLE_DEPLOY_RATIO, FLAP_HANDLE_REQUEST_RATIO, GEAR_HANDLE_DOWN, HEADING_DEG, IAS_KT,
     LATITUDE_DEG, LEFT_BRAKE_RATIO, LOCAL_VX_M_S, LOCAL_VZ_M_S, LONGITUDE_DEG, ON_GROUND_0,
-    OVERRIDE_JOYSTICK_HEADING, OVERRIDE_TOE_BRAKES, PITCH_DEG, P_DEG_S, Q_DEG_S, RESOLVE_ONLY_DATAREFS,
+    OVERRIDE_JOYSTICK_HEADING, OVERRIDE_TOE_BRAKES, PARKING_BRAKE_RATIO, PITCH_DEG, P_DEG_S, Q_DEG_S, RESOLVE_ONLY_DATAREFS,
     RIGHT_BRAKE_RATIO, ROLL_DEG, R_DEG_S, SIM_TIME_S, STATE_DATAREFS, THROTTLE_ALL, VS_FPM,
     YOKE_HEADING_RATIO, YOKE_PITCH_RATIO, YOKE_ROLL_RATIO, Y_AGL_M,
 };
 use crate::sim::simple_dynamics::DynamicsState;
 use crate::types::{clamp, ActuatorCommands, Vec2};
 
-pub const M_TO_FT: f64 = 3.280_839_895_013_123;
+pub use crate::types::M_TO_FT;
 pub const EARTH_RADIUS_FT: f64 = 20_925_524.9;
 pub const DEFAULT_WEB_PORT: u16 = 8086;
 
@@ -332,8 +332,9 @@ pub struct XPlaneWebBridge {
     read_ids: Arc<Mutex<HashMap<String, i64>>>,
     command_ids: Arc<Mutex<HashMap<String, i64>>>,
     cached_values: Arc<Mutex<HashMap<String, f64>>>,
-    last_flap_ratio: Arc<Mutex<f64>>,
     last_gear_down: Arc<Mutex<bool>>,
+    /// Last parking-brake value written on behalf of a profile, so the
+    /// dataref is only written on change and doesn't fight tool writes.
     req_id: Arc<Mutex<i64>>,
     ws: Arc<Mutex<WebSocket<MaybeTlsStream<std::net::TcpStream>>>>,
     tail_number: Option<String>,
@@ -389,7 +390,6 @@ impl XPlaneWebBridge {
             read_ids: Arc::new(Mutex::new(read_ids)),
             command_ids: Arc::new(Mutex::new(command_ids)),
             cached_values: Arc::new(Mutex::new(HashMap::new())),
-            last_flap_ratio: Arc::new(Mutex::new(0.0)),
             last_gear_down: Arc::new(Mutex::new(true)),
             req_id: Arc::new(Mutex::new(0)),
             ws: Arc::new(Mutex::new(ws)),
@@ -561,7 +561,6 @@ impl XPlaneWebBridge {
         let flap_ratio = clamp(cache[FLAP_HANDLE_DEPLOY_RATIO.name], 0.0, 1.0);
         let gear_down = cache[GEAR_HANDLE_DOWN.name] >= 0.5;
         drop(cache);
-        *self.last_flap_ratio.lock().unwrap() = flap_ratio;
         *self.last_gear_down.lock().unwrap() = gear_down;
 
         let position_ft = geodetic_offset_ft(lat_deg, lon_deg, self.georef);
@@ -585,15 +584,15 @@ impl XPlaneWebBridge {
             vertical_speed_ft_s: vh_ind / 60.0,
             flap_index: flap_ratio_to_setting(flap_ratio),
             gear_down,
+            parking_brake: cache.get(PARKING_BRAKE_RATIO.name).copied().unwrap_or(0.0),
         })
     }
 
     pub fn write_commands(&self, commands: &ActuatorCommands) -> Result<()> {
-        let last_flap = *self.last_flap_ratio.lock().unwrap();
-        let flap_ratio = match commands.flaps {
-            Some(f) => flap_setting_to_ratio(f),
-            None => last_flap,
-        };
+        // Flaps and parking brake arrive only when the setting changes
+        // (`CockpitSetting`). Re-sending the flap deployment, which lags
+        // the handle, every tick would freeze the flaps.
+        let flap_request = commands.flaps.map(flap_setting_to_ratio);
         let last_gear = *self.last_gear_down.lock().unwrap();
         let gear_down = commands.gear_down.unwrap_or(last_gear);
         let brake = clamp(commands.brakes, 0.0, 1.0);
@@ -608,22 +607,28 @@ impl XPlaneWebBridge {
         let left_brake = clamp(brake - pivot, 0.0, 1.0);
         let right_brake = clamp(brake + pivot, 0.0, 1.0);
         let cmd_ids = self.command_ids.lock().unwrap();
-        let writes = vec![
+        let mut writes = vec![
             json!({ "id": cmd_ids[YOKE_PITCH_RATIO.name], "value": clamp(commands.elevator, -1.0, 1.0) }),
             json!({ "id": cmd_ids[YOKE_ROLL_RATIO.name], "value": clamp(commands.aileron, -1.0, 1.0) }),
             json!({ "id": cmd_ids[YOKE_HEADING_RATIO.name], "value": clamp(commands.rudder, -1.0, 1.0) }),
             json!({ "id": cmd_ids[THROTTLE_ALL.name], "value": clamp(commands.throttle, 0.0, 1.0) }),
             json!({ "id": cmd_ids[GEAR_HANDLE_DOWN.name], "value": if gear_down { 1.0 } else { 0.0 } }),
-            json!({ "id": cmd_ids[FLAP_HANDLE_REQUEST_RATIO.name], "value": clamp(flap_ratio, 0.0, 1.0) }),
             json!({ "id": cmd_ids[LEFT_BRAKE_RATIO.name], "value": left_brake }),
             json!({ "id": cmd_ids[RIGHT_BRAKE_RATIO.name], "value": right_brake }),
         ];
+        if let Some(ratio) = flap_request {
+            writes.push(json!({ "id": cmd_ids[FLAP_HANDLE_REQUEST_RATIO.name], "value": clamp(ratio, 0.0, 1.0) }));
+        }
         drop(cmd_ids);
         self.send_message(json!({
             "req_id": self.next_req_id(),
             "type": "dataref_set_values",
             "params": { "datarefs": writes }
-        }))
+        }))?;
+        if let Some(ratio) = commands.parking_brake {
+            self.write_dataref_values(&[(PARKING_BRAKE_RATIO.name.to_string(), clamp(ratio, 0.0, 1.0))])?;
+        }
+        Ok(())
     }
 
     pub fn get_dataref_value(&self, name: &str) -> Option<f64> {

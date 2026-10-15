@@ -8,7 +8,8 @@ use xplane_pilot::config::load_default_config_bundle;
 use xplane_pilot::core::mission_manager::{PilotCore, StatusSnapshot};
 use xplane_pilot::core::profiles::HeadingHoldProfile;
 use xplane_pilot::live_runner::{FakeClock, HeartbeatPump};
-use xplane_pilot::llm::conversation::{IncomingMessage, IncomingSource};
+use xplane_pilot::llm::conversation::{coalesce_queued, IncomingMessage, IncomingSource};
+use xplane_pilot::llm::tools::ToolContext;
 use xplane_pilot::types::{AircraftState, FlightPhase, Vec2};
 
 fn make_snapshot(
@@ -341,9 +342,14 @@ fn heartbeat_embeds_status_json() {
     let msgs = drain(&rx);
     assert_eq!(msgs.len(), 1);
     assert_eq!(msgs[0].source, IncomingSource::Heartbeat);
-    assert!(msgs[0].text.contains(" | status="));
-    let payload_start = msgs[0].text.find(" | status=").unwrap() + " | status=".len();
-    let payload: serde_json::Value = serde_json::from_str(&msgs[0].text[payload_start..]).unwrap();
+    // The pump sends the reason; the status is attached at delivery.
+    assert_eq!(msgs[0].text, "periodic check-in");
+    let ctx = ToolContext::new(pilot.clone(), load_default_config_bundle());
+    let (_tx, empty) = crossbeam_channel::unbounded();
+    let delivered = coalesce_queued(msgs[0].clone(), &empty, &ctx);
+    let text = &delivered[0].text;
+    let payload_start = text.find(" | status=").unwrap() + " | status=".len();
+    let payload: serde_json::Value = serde_json::from_str(&text[payload_start..]).unwrap();
     assert_eq!(
         payload["active_profiles"],
         serde_json::json!(["heading_hold", "altitude_hold", "speed_hold"])
@@ -392,7 +398,7 @@ fn integration_heartbeat_sees_profile_change_from_live_pilot_update() {
 
     pilot
         .lock()
-        .engage_profile(Box::new(HeadingHoldProfile::new(270.0, 25.0, None).unwrap()));
+        .engage_profile(Box::new(HeadingHoldProfile::new(270.0, 25.0, None).unwrap())).unwrap();
     pilot.lock().update(&raw, 0.2);
     clock.advance_secs(3.0);
     pump.check_and_emit();

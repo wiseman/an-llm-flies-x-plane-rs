@@ -11,15 +11,17 @@ use anyhow::Result;
 use serde_json::{json, Value};
 use tempfile::TempDir;
 
+mod common;
+
+use common::{kwhp_resolved, make_eval_config};
 use xplane_pilot::config::load_default_config_bundle;
 use xplane_pilot::eval_runner::{
-    run_eval_core, EvalConfig, OutcomeSource, ResolvedStart,
+    run_eval_with_brain, OutcomeSource,
 };
+use xplane_pilot::llm::brain::PilotBrain;
 use xplane_pilot::llm::backend::{
     CacheSnapshot, CacheStats, LlmBackend, LlmRequest, LlmResponse, LlmUsage, Part,
 };
-use xplane_pilot::llm::conversation::{IncomingMessage, PilotMode};
-use xplane_pilot::llm::backend::LlmProvider;
 
 /// Scripted backend — returns pre-built responses in order. Each entry
 /// becomes one `create_response` turn. Usage counts on the scripted
@@ -115,46 +117,6 @@ fn tool_call_with_usage(name: &str, args: Value, id: &str, out_tokens: u64) -> L
     }
 }
 
-fn kwhp_resolved() -> ResolvedStart {
-    // Real KWHP values are close enough for the test — the exact numbers
-    // don't matter, we just need a self-consistent geometry. Runway 12
-    // threshold / heading pulled from apt.dat.
-    ResolvedStart {
-        runway_ident: "12".to_string(),
-        runway_threshold_lat_deg: 34.2583,
-        runway_threshold_lon_deg: -118.4129,
-        runway_course_deg: 121.0,
-        runway_length_ft: 4120.0,
-        runway_displaced_threshold_ft: 0.0,
-        field_elevation_ft: 1003.0,
-        // Parking spot ~400 ft north of the threshold, facing runway-ish.
-        parking_lat_deg: 34.2594,
-        parking_lon_deg: -118.4135,
-        parking_heading_deg: 180.0,
-    }
-}
-
-fn make_eval_config(tmp: &TempDir, stem: &str) -> EvalConfig {
-    EvalConfig {
-        airport: "KWHP".to_string(),
-        parking_spot: "Test Ramp".to_string(),
-        apt_dat_cache_dir: tmp.path().to_path_buf(),
-        llm_provider: LlmProvider::OpenAi,
-        llm_model: "stub-model".to_string(),
-        llm_reasoning_effort: None,
-        startup_messages: vec![IncomingMessage::operator("Eval test startup.")],
-        pilot_mode: PilotMode::Normal,
-        max_turns: 40,
-        max_output_tokens: 0,
-        max_sim_seconds: 120.0,
-        dt: 0.2,
-        heartbeat_interval_s: 30.0,
-        output_dir: tmp.path().to_path_buf(),
-        session_stem: stem.to_string(),
-        verbose: false,
-    }
-}
-
 #[test]
 fn mission_complete_tool_drives_outcome_through_channel() {
     let tmp = TempDir::new().unwrap();
@@ -166,13 +128,13 @@ fn mission_complete_tool_drives_outcome_through_channel() {
     let cfg = make_eval_config(&tmp, "eval-stub-success");
 
     let start = std::time::Instant::now();
-    let result = run_eval_core(
+    let result = run_eval_with_brain(
         load_default_config_bundle(),
         cfg,
         kwhp_resolved(),
-        backend.clone() as Arc<dyn LlmBackend>,
+        PilotBrain::Api(backend.clone() as Arc<dyn LlmBackend>),
     )
-    .expect("run_eval_core should succeed");
+    .expect("eval should succeed");
     let wall = start.elapsed();
 
     assert_eq!(
@@ -224,13 +186,13 @@ fn turn_budget_triggers_timeout_outcome() {
     cfg.max_turns = 3;
     cfg.max_sim_seconds = 10_000.0; // ensure sim timeout doesn't win
 
-    let result = run_eval_core(
+    let result = run_eval_with_brain(
         load_default_config_bundle(),
         cfg,
         kwhp_resolved(),
-        backend as Arc<dyn LlmBackend>,
+        PilotBrain::Api(backend as Arc<dyn LlmBackend>),
     )
-    .expect("run_eval_core should succeed");
+    .expect("eval should succeed");
 
     assert_eq!(
         result.outcome.source,
@@ -267,13 +229,13 @@ fn output_token_budget_triggers_timeout() {
     cfg.max_sim_seconds = 10_000.0;
     cfg.max_output_tokens = 5_000;
 
-    let result = run_eval_core(
+    let result = run_eval_with_brain(
         load_default_config_bundle(),
         cfg,
         kwhp_resolved(),
-        backend.clone() as Arc<dyn LlmBackend>,
+        PilotBrain::Api(backend.clone() as Arc<dyn LlmBackend>),
     )
-    .expect("run_eval_core should succeed");
+    .expect("eval should succeed");
 
     assert_eq!(
         result.outcome.source,
@@ -308,13 +270,13 @@ fn sim_budget_triggers_timeout_when_llm_idle() {
     cfg.max_sim_seconds = 5.0;
     cfg.max_turns = 100;
 
-    let result = run_eval_core(
+    let result = run_eval_with_brain(
         load_default_config_bundle(),
         cfg,
         kwhp_resolved(),
-        backend as Arc<dyn LlmBackend>,
+        PilotBrain::Api(backend as Arc<dyn LlmBackend>),
     )
-    .expect("run_eval_core should succeed");
+    .expect("eval should succeed");
 
     assert_eq!(
         result.outcome.source,
@@ -343,13 +305,13 @@ fn tool_failures_are_counted_in_eval_result() {
     let backend = Arc::new(StubClient::new(script));
     let cfg = make_eval_config(&tmp, "eval-stub-tool-failures");
 
-    let result = run_eval_core(
+    let result = run_eval_with_brain(
         load_default_config_bundle(),
         cfg,
         kwhp_resolved(),
-        backend as Arc<dyn LlmBackend>,
+        PilotBrain::Api(backend as Arc<dyn LlmBackend>),
     )
-    .expect("run_eval_core should succeed");
+    .expect("eval should succeed");
 
     assert_eq!(result.tool_stats.total, 3, "three tools called");
     assert_eq!(result.tool_stats.failed, 1, "one tool failed");

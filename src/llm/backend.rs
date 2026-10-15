@@ -203,6 +203,10 @@ pub enum LlmProvider {
     Anthropic,
     #[value(name = "gemini", aliases = ["google"])]
     Gemini,
+    /// A headless Claude Code process on the operator's Claude
+    /// subscription (no API key); see `llm::claude_code`.
+    #[value(name = "claude-code", aliases = ["cc"])]
+    ClaudeCode,
 }
 
 impl LlmProvider {
@@ -211,6 +215,7 @@ impl LlmProvider {
             LlmProvider::OpenAi => "openai",
             LlmProvider::Anthropic => "anthropic",
             LlmProvider::Gemini => "gemini",
+            LlmProvider::ClaudeCode => "claude-code",
         }
     }
 
@@ -221,6 +226,7 @@ impl LlmProvider {
             LlmProvider::OpenAi => "gpt-5.4-2026-03-05",
             LlmProvider::Anthropic => "claude-sonnet-4-6",
             LlmProvider::Gemini => "gemini-2.5-flash",
+            LlmProvider::ClaudeCode => "opus",
         }
     }
 }
@@ -232,6 +238,7 @@ impl FromStr for LlmProvider {
             "openai" | "oai" => Ok(LlmProvider::OpenAi),
             "anthropic" | "claude" => Ok(LlmProvider::Anthropic),
             "gemini" | "google" => Ok(LlmProvider::Gemini),
+            "claude-code" | "cc" => Ok(LlmProvider::ClaudeCode),
             other => Err(format!("unknown llm provider {:?}", other)),
         }
     }

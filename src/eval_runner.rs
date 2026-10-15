@@ -23,11 +23,9 @@ use crate::config::{AirportConfig, ConfigBundle};
 use crate::core::mission_manager::PilotCore;
 use crate::data::parquet::{AIRPORTS_FILE, COMMS_FILE, PARKING_SPOTS_FILE, RUNWAYS_FILE};
 use crate::live_runner::{Clock, HeartbeatPump, SimClock};
-use crate::llm::anthropic::AnthropicBackend;
-use crate::llm::backend::{LlmBackend, LlmProvider, ReasoningEffort};
-use crate::llm::conversation::{run_conversation_loop, IncomingMessage, PilotMode};
-use crate::llm::gemini::GeminiBackend;
-use crate::llm::openai::OpenAiBackend;
+use crate::llm::backend::{LlmProvider, ReasoningEffort};
+use crate::llm::brain::{PilotBrain, WorkerArgs};
+use crate::llm::conversation::{IncomingMessage, PilotMode};
 use crate::llm::tools::{ToolBridge, ToolContext, ToolCounters, ToolCountersSnapshot};
 use crate::sim::datarefs::{HAS_CRASHED, PARKING_BRAKE_RATIO};
 use crate::sim::simple_bridge::SimpleToolBridge;
@@ -218,6 +216,7 @@ pub struct ResolvedStart {
     pub runway_threshold_lon_deg: f64,
     pub runway_course_deg: f64,
     pub runway_length_ft: f64,
+    pub runway_width_ft: f64,
     pub runway_displaced_threshold_ft: f64,
     pub field_elevation_ft: f64,
     pub parking_lat_deg: f64,
@@ -256,8 +255,10 @@ fn resolve_start(cfg: &EvalConfig) -> Result<ResolvedStart> {
     // own when it calls engage_takeoff / engage_pattern_fly — those
     // tools build their own frame from the LLM-chosen runway, so the
     // initial anchor is just scaffolding for the idle-state pilot.
-    let (runway_ident, rw_lat, rw_lon, rw_hdg, rw_len, rw_disp): (
+    #[allow(clippy::type_complexity)]
+    let (runway_ident, rw_lat, rw_lon, rw_hdg, rw_len, rw_disp, rw_width): (
         String,
+        f64,
         f64,
         f64,
         f64,
@@ -266,7 +267,7 @@ fn resolve_start(cfg: &EvalConfig) -> Result<ResolvedStart> {
     ) = conn
         .query_row(
             "SELECT le_ident, le_latitude_deg, le_longitude_deg, le_heading_degT,
-                    length_ft, le_displaced_threshold_ft
+                    length_ft, le_displaced_threshold_ft, width_ft
              FROM runways
              WHERE airport_ident = ?1
              ORDER BY id
@@ -280,6 +281,7 @@ fn resolve_start(cfg: &EvalConfig) -> Result<ResolvedStart> {
                     row.get::<_, f64>(3)?,
                     row.get::<_, f64>(4)?,
                     row.get::<_, f64>(5)?,
+                    row.get::<_, f64>(6)?,
                 ))
             },
         )
@@ -314,6 +316,7 @@ fn resolve_start(cfg: &EvalConfig) -> Result<ResolvedStart> {
         runway_threshold_lon_deg: rw_lon,
         runway_course_deg: rw_hdg,
         runway_length_ft: rw_len,
+        runway_width_ft: rw_width,
         runway_displaced_threshold_ft: rw_disp,
         field_elevation_ft,
         parking_lat_deg: spot_lat,
@@ -338,6 +341,7 @@ fn build_eval_config_bundle(
         threshold_ft: runway_threshold_ft,
         course_deg: resolved.runway_course_deg,
         length_ft: resolved.runway_length_ft,
+        width_ft: resolved.runway_width_ft,
         displaced_threshold_ft: resolved.runway_displaced_threshold_ft,
         ..base.airport.runway.clone()
     };
@@ -350,30 +354,6 @@ fn build_eval_config_bundle(
     ConfigBundle {
         airport: airport_cfg,
         ..base
-    }
-}
-
-fn build_llm_client(
-    provider: LlmProvider,
-    model: &str,
-    transcript_path: Option<&PathBuf>,
-) -> Arc<dyn LlmBackend> {
-    match provider {
-        LlmProvider::OpenAi => {
-            let mut c = OpenAiBackend::new(model.to_string());
-            c.transcript_path = transcript_path.cloned();
-            Arc::new(c)
-        }
-        LlmProvider::Anthropic => {
-            let mut c = AnthropicBackend::new(model.to_string());
-            c.transcript_path = transcript_path.cloned();
-            Arc::new(c)
-        }
-        LlmProvider::Gemini => {
-            let mut c = GeminiBackend::new(model.to_string());
-            c.transcript_path = transcript_path.cloned();
-            Arc::new(c)
-        }
     }
 }
 
@@ -646,19 +626,19 @@ fn run_control_loop(ctx: ControlLoopCtx) -> (MissionOutcome, f64, f64) {
 pub fn run_eval(base_config: ConfigBundle, cfg: EvalConfig) -> Result<EvalResult> {
     let resolved = resolve_start(&cfg).context("resolving eval start state")?;
     let transcript_path = cfg.output_dir.join(format!("{}.txt", cfg.session_stem));
-    let backend = build_llm_client(cfg.llm_provider, &cfg.llm_model, Some(&transcript_path));
-    run_eval_core(base_config, cfg, resolved, backend)
+    let brain = PilotBrain::build(cfg.llm_provider, &cfg.llm_model, Some(&transcript_path));
+    run_eval_with_brain(base_config, cfg, resolved, brain)
 }
 
-/// Core eval loop with the parquet resolution and backend construction
-/// factored out. Tests use this directly with a stub backend + inline
-/// `ResolvedStart`, avoiding the need to build an apt.dat cache and
-/// provide an API key.
-pub fn run_eval_core(
+/// Core eval loop with the parquet resolution and brain construction
+/// factored out. Tests use this directly with a stub backend (or a fake
+/// Claude Code) and an inline `ResolvedStart`, avoiding the need to build
+/// an apt.dat cache and provide an API key.
+pub fn run_eval_with_brain(
     base_config: ConfigBundle,
     cfg: EvalConfig,
     resolved: ResolvedStart,
-    backend: Arc<dyn LlmBackend>,
+    brain: PilotBrain,
 ) -> Result<EvalResult> {
     // --- startup artefacts ---
     std::fs::create_dir_all(&cfg.output_dir)
@@ -729,11 +709,13 @@ pub fn run_eval_core(
 
     // --- dynamics + bridge ---
     let model = SimpleAircraftModel::new(eval_config.clone(), Vec2::ZERO);
-    let dyn_initial = model.initial_state_at(
+    let mut dyn_initial = model.initial_state_at(
         Vec2::ZERO,
         resolved.parking_heading_deg,
         resolved.field_elevation_ft,
     );
+    // Parked with the parking brake set, like a ramp start in X-Plane.
+    dyn_initial.parking_brake = 1.0;
     let dynamics = Arc::new(PLMutex::new(dyn_initial));
     let bridge = Arc::new(SimpleToolBridge::new(
         dynamics.clone(),
@@ -796,6 +778,7 @@ pub fn run_eval_core(
         mission_complete_tx: Some(outcome_tx.clone()),
         turn_counter: Some(turn_counter.clone()),
         tool_counters: Some(tool_counters.clone()),
+        taxi_graphs: Default::default(),
     });
 
     // Prime `latest_snapshot` so the LLM's first `get_status` returns
@@ -821,35 +804,22 @@ pub fn run_eval_core(
 
     // --- spawn LLM worker ---
     let llm_stop = Arc::new(AtomicBool::new(false));
-    let llm_thread = {
-        let client = backend.clone();
-        let ctx = tool_ctx.clone();
-        let rx = input_rx.clone();
-        let stop = llm_stop.clone();
-        let bus_clone = bus.clone();
-        let pilot_mode = cfg.pilot_mode;
-        thread::Builder::new()
-            .name("llm-worker".into())
-            .spawn(move || {
-                run_conversation_loop(
-                    &*client,
-                    &ctx,
-                    &rx,
-                    stop,
-                    60,
-                    // Budget is measured in wall seconds inside the
-                    // conversation loop. We'd rather bound the eval by
-                    // sim seconds + turn count — so lift this cap to
-                    // effectively-never so wall latency doesn't kill
-                    // the turn early. The control loop still gets the
-                    // last word via the outcome channel + stop flag.
-                    3_600,
-                    pilot_mode,
-                    reasoning_effort,
-                    Some(&bus_clone),
-                );
-            })?
-    };
+    // Budget is measured in wall seconds inside the worker. We'd rather
+    // bound the eval by sim seconds + turn count — so lift this cap to
+    // effectively-never so wall latency doesn't kill the turn early. The
+    // control loop still gets the last word via the outcome channel +
+    // stop flag.
+    let llm_cache_stats = brain.cache_stats();
+    let llm_thread = brain.spawn_worker(WorkerArgs {
+        tool_context: tool_ctx.clone(),
+        input_queue: input_rx.clone(),
+        stop: llm_stop.clone(),
+        per_request_timeout_s: 60,
+        total_wall_budget_s: 3_600,
+        pilot_mode: cfg.pilot_mode,
+        reasoning_effort,
+        bus: bus.clone(),
+    })?;
 
     // --- track recorder ---
     let track_recorder = match TrackRecorder::new(&track_csv_path) {
@@ -873,7 +843,7 @@ pub fn run_eval_core(
     let wall_start = Instant::now();
     let track_wall_start = chrono::Utc::now();
     let control_stop = Arc::new(AtomicBool::new(false));
-    let cache_stats = backend.cache_stats_arc();
+    let cache_stats = llm_cache_stats;
     let ctrl_ctx = ControlLoopCtx {
         dynamics: dynamics.clone(),
         model,

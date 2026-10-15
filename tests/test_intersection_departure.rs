@@ -260,6 +260,7 @@ fn takeoff_profile_debug_line_shows_rolled_and_remaining() {
         length_ft: 3995.0,
         touchdown_zone_ft: 300.0,
         displaced_threshold_ft: 0.0,
+        width_ft: 100.0,
         traffic_side: TrafficSide::Left,
     };
     let runway_frame = RunwayFrame::new(rwy);
@@ -306,6 +307,7 @@ fn takeoff_profile_abort_advisory_fires_past_70pct_below_vr() {
         length_ft: 3995.0,
         touchdown_zone_ft: 300.0,
         displaced_threshold_ft: 0.0,
+        width_ft: 100.0,
         traffic_side: TrafficSide::Left,
     };
     let runway_frame = RunwayFrame::new(rwy);

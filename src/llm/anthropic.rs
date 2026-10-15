@@ -252,7 +252,7 @@ fn thinking_block(effort: ReasoningEffort) -> Value {
 
 // ---------- decoders ----------
 
-fn parse_usage(response: &Value) -> LlmUsage {
+pub(crate) fn parse_usage(response: &Value) -> LlmUsage {
     let Some(usage) = response.get("usage") else {
         return LlmUsage::default();
     };

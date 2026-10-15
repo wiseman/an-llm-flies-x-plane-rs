@@ -1,6 +1,9 @@
 pub mod anthropic;
 pub mod backend;
+pub mod brain;
+pub mod claude_code;
 pub mod conversation;
 pub mod gemini;
+pub mod mcp_server;
 pub mod openai;
 pub mod tools;

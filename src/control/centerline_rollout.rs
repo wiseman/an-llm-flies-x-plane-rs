@@ -24,7 +24,10 @@ impl CenterlineRolloutController {
             centerline_gain: 0.015,
             track_gain: 0.012,
             track_integrator_gain: 0.025,
-            yaw_rate_gain: 0.20,
+            // Tuned against kinematic nose-wheel steering, where small
+            // rudder already yields a strong yaw rate; 0.2 swamped the
+            // track term and chattered tick-to-tick.
+            yaw_rate_gain: 0.05,
             integrator_limit_deg_s: 20.0,
             integrator: 0.0,
         }

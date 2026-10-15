@@ -27,6 +27,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context, Result};
 use clap::Parser;
+use xplane_pilot::llm::tools::{query_runway_end, RunwayEnd};
 
 use xplane_pilot::config::load_default_config_bundle;
 use xplane_pilot::core::dead_stick_profile::DeadStickLandingProfile;
@@ -131,19 +132,19 @@ fn main() -> Result<()> {
         "[setup] resolved {}/{} -> threshold lat={:.6} lon={:.6} course={:.2}°T length={:.0} ft elev={:.0} ft",
         args.airport,
         args.runway,
-        runway_query.threshold_lat,
-        runway_query.threshold_lon,
+        runway_query.threshold_lat_deg,
+        runway_query.threshold_lon_deg,
         runway_query.course_deg,
         runway_query.length_ft,
-        runway_query.field_elev_ft,
+        runway_query.elevation_ft,
     );
 
     let georef = GeoReference {
-        threshold_lat_deg: runway_query.threshold_lat,
-        threshold_lon_deg: runway_query.threshold_lon,
+        threshold_lat_deg: runway_query.threshold_lat_deg,
+        threshold_lon_deg: runway_query.threshold_lon_deg,
     };
     let runway_threshold_ft =
-        geodetic_offset_ft(runway_query.threshold_lat, runway_query.threshold_lon, georef);
+        geodetic_offset_ft(runway_query.threshold_lat_deg, runway_query.threshold_lon_deg, georef);
     let mut config = load_default_config_bundle();
     let runway = Runway {
         id: Some(args.runway.clone()),
@@ -151,11 +152,12 @@ fn main() -> Result<()> {
         course_deg: runway_query.course_deg,
         length_ft: runway_query.length_ft,
         touchdown_zone_ft: 2000.0,
-        displaced_threshold_ft: runway_query.displaced_ft,
+        displaced_threshold_ft: runway_query.displaced_threshold_ft,
+        width_ft: runway_query.width_ft,
         traffic_side,
     };
     config.airport.airport = Some(args.airport.clone());
-    config.airport.field_elevation_ft = runway_query.field_elev_ft;
+    config.airport.field_elevation_ft = runway_query.elevation_ft;
     config.airport.runway = runway.clone();
     let runway_frame = RunwayFrame::new(runway);
 
@@ -165,7 +167,7 @@ fn main() -> Result<()> {
     // runway-frame coordinates say it should.
     let spawn_world_ft = runway_frame.to_world_frame(Vec2::new(args.spawn_x_ft, args.spawn_y_ft));
     let (spawn_lat, spawn_lon) = latlon_from_offset_ft(spawn_world_ft - runway_threshold_ft, georef);
-    let spawn_msl_ft = runway_query.field_elev_ft + args.spawn_alt_agl_ft;
+    let spawn_msl_ft = runway_query.elevation_ft + args.spawn_alt_agl_ft;
     let spawn_heading = (runway_query.course_deg + args.spawn_heading_offset_deg).rem_euclid(360.0);
     println!(
         "[setup] spawning aircraft at lat={:.6} lon={:.6} {:.0} ft MSL ({:.0} AGL), heading {:.1}°, IAS {:.1} kt",
@@ -210,7 +212,7 @@ fn main() -> Result<()> {
     );
 
     let profile = DeadStickLandingProfile::new(config.clone(), runway_frame.clone(), &estimated);
-    pilot.engage_profile(Box::new(profile));
+    pilot.engage_profile(Box::new(profile)).unwrap();
     println!("[setup] dead_stick_landing engaged; entry phase {:?}", pilot.phase());
 
     // Stop on Ctrl-C so we don't leave the sim driving on a half-run.
@@ -365,64 +367,12 @@ fn main() -> Result<()> {
     }
 }
 
-struct RunwayQuery {
-    threshold_lat: f64,
-    threshold_lon: f64,
-    course_deg: f64,
-    length_ft: f64,
-    field_elev_ft: f64,
-    displaced_ft: f64,
-}
-
-fn lookup_runway(
-    runways_path: &std::path::Path,
-    airport: &str,
-    runway_ident: &str,
-) -> Result<RunwayQuery> {
+fn lookup_runway(runways_path: &std::path::Path, airport: &str, runway_ident: &str) -> Result<RunwayEnd> {
     let conn = duckdb::Connection::open_in_memory()?;
-    conn.execute_batch("INSTALL spatial; LOAD spatial;")?;
-    let mut stmt = conn.prepare(&format!(
-        "SELECT le_ident, he_ident, \
-                le_latitude_deg, le_longitude_deg, le_heading_degT, le_elevation_ft, le_displaced_threshold_ft, \
-                he_latitude_deg, he_longitude_deg, he_heading_degT, he_elevation_ft, he_displaced_threshold_ft, \
-                length_ft \
-         FROM read_parquet('{path}') \
-         WHERE airport_ident = ? AND (le_ident = ? OR he_ident = ?) AND closed = 0 \
-         LIMIT 1",
-        path = runways_path.display()
+    conn.execute_batch(&format!(
+        "CREATE VIEW runways AS SELECT * FROM read_parquet('{}')",
+        runways_path.display()
     ))?;
-    let mut rows = stmt.query([airport, runway_ident, runway_ident])?;
-    let row = rows
-        .next()?
-        .ok_or_else(|| anyhow!("runway {} at {} not found in parquet", runway_ident, airport))?;
-    let le_ident: Option<String> = row.get(0)?;
-    let he_ident: Option<String> = row.get(1)?;
-    let le_lat: Option<f64> = row.get(2)?;
-    let le_lon: Option<f64> = row.get(3)?;
-    let le_hdg: Option<f64> = row.get(4)?;
-    let le_elev: Option<f64> = row.get(5)?;
-    let le_disp: Option<f64> = row.get(6)?;
-    let he_lat: Option<f64> = row.get(7)?;
-    let he_lon: Option<f64> = row.get(8)?;
-    let he_hdg: Option<f64> = row.get(9)?;
-    let he_elev: Option<f64> = row.get(10)?;
-    let he_disp: Option<f64> = row.get(11)?;
-    let length_ft: Option<f64> = row.get(12)?;
-
-    let (lat, lon, hdg, elev, disp) = if Some(runway_ident.to_string()) == le_ident {
-        (le_lat, le_lon, le_hdg, le_elev, le_disp)
-    } else if Some(runway_ident.to_string()) == he_ident {
-        (he_lat, he_lon, he_hdg, he_elev, he_disp)
-    } else {
-        return Err(anyhow!("runway lookup mismatch for {}", runway_ident));
-    };
-    Ok(RunwayQuery {
-        threshold_lat: lat.ok_or_else(|| anyhow!("missing threshold lat"))?,
-        threshold_lon: lon.ok_or_else(|| anyhow!("missing threshold lon"))?,
-        course_deg: hdg.ok_or_else(|| anyhow!("missing course"))?,
-        length_ft: length_ft.unwrap_or(5000.0),
-        field_elev_ft: elev.unwrap_or(0.0),
-        displaced_ft: disp.unwrap_or(0.0),
-    })
+    query_runway_end(&conn, airport, runway_ident)
 }
 

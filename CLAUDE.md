@@ -39,11 +39,11 @@ cargo build --release
 
 Core principle: **the flight control loop is deterministic; the LLM never touches actuators**. Flow is top-down:
 
-1. **LLM tool-call loop** (`src/llm/`) — `conversation::run_conversation_loop` consumes an `IncomingMessage` from a `crossbeam-channel` and drives the OpenAI Responses API with `tool_schemas()` from `llm/tools.rs`. Each tool handler mutates `PilotCore` state under `parking_lot::Mutex`. The system prompt lives verbatim in `src/llm/system_prompt.md` and is loaded via `include_str!`.
+1. **LLM tool-call loop** (`src/llm/`) — `conversation::run_conversation_loop` consumes an `IncomingMessage` from a `crossbeam-channel` and drives an API backend (`LlmBackend`: OpenAI, Anthropic, Gemini) with `tool_schemas()` from `llm/tools.rs`. The `claude-code` provider instead runs `claude_code::run_claude_code_loop`: one headless `claude -p` child per session that runs its own agent loop, with our tools served over an in-process MCP server (`llm/mcp_server.rs`). `llm/brain.rs::PilotBrain` picks the worker; both share `conversation::execute_tool_call`, so tool logging and counters are identical. Each tool handler mutates `PilotCore` state under `parking_lot::Mutex`. The system prompt lives verbatim in `src/llm/system_prompt.md` and is loaded via `include_str!`.
 
-2. **Profile composer** (`src/core/mission_manager.rs::PilotCore`) — owns `active_profiles: Vec<Box<dyn GuidanceProfile>>`. Each tick, `update()` calls `contribute()` on every active profile and merges the resulting `ProfileContribution`s by axis ownership (`Axis::Lateral` / `Vertical` / `Speed`). `engage_profile` auto-displaces any existing profile that owns a conflicting axis; `disengage_profile` re-adds idle profiles for orphaned axes. `engage_profiles` runs the whole swap under one logical step so callers like `engage_cruise` don't orphan axes mid-way.
+2. **Profile composer** (`src/core/mission_manager.rs::PilotCore`) — owns `active_profiles: Vec<Box<dyn GuidanceProfile>>`. Each tick, `update()` calls `contribute()` on every active profile and merges the resulting `ProfileContribution`s by axis ownership (`Axis::Lateral` / `Vertical` / `Speed`). `engage_profile` auto-displaces any existing profile that owns a conflicting axis, unless that profile's `preemption()` refuses (then nothing is engaged and a `PreemptionRefused` comes back); `disengage_profile` applies the same check and re-adds idle profiles for orphaned axes. `engage_profiles` runs the whole swap under one logical step so callers like `engage_cruise` don't orphan axes mid-way. Tools reach a concrete profile with `PilotCore::profile_mut::<T>()` (a safe `Any` downcast), and the landing's exit/arrival plan through `PilotCore::landing_plan_mut()` (the `LandingPlanHolder` trait, implemented by `pattern_fly` before touchdown and `landing_rollout` after). Tools that fly against a newly looked-up runway engage with `engage_profiles_with_config`, so the runway becomes the pilot's reference only if the engage goes through. Cockpit settings outside the flight controls (parking brake, flap handle) are `CockpitSetting`s on `PilotCore`: the latest request from a tool or a profile wins, and each change goes out once in `ActuatorCommands`.
 
-3. **Guidance profiles** (`src/core/profiles.rs`) — `IdleLateralProfile`/`IdleVerticalProfile`/`IdleSpeedProfile` are the default floor. `HeadingHoldProfile`/`AltitudeHoldProfile`/`SpeedHoldProfile` are single-axis. `TakeoffProfile` and `PatternFlyProfile` own all three axes. `PatternFlyProfile` wraps the full phase machine (PREFLIGHT → TAKEOFF_ROLL → ROTATE → … → FLARE → ROLLOUT, plus GO_AROUND) and holds `ModeManager`, `SafetyMonitor`, `RouteManager`, `PatternGeometry`, `L1PathFollower`.
+3. **Guidance profiles** (`src/core/profiles.rs`) — `IdleLateralProfile`/`IdleVerticalProfile`/`IdleSpeedProfile` are the default floor. `HeadingHoldProfile`/`AltitudeHoldProfile`/`SpeedHoldProfile` are single-axis. `TakeoffProfile` and `PatternFlyProfile` own all three axes. `PatternFlyProfile` wraps the airborne phase machine (PREFLIGHT → TAKEOFF_ROLL → ROTATE → … → FLARE, plus GO_AROUND) and holds `ModeManager`, `SafetyMonitor`, `RouteManager`, `PatternGeometry`, `L1PathFollower`. At touchdown it (and `DeadStickLandingProfile`) hands off to `LandingRolloutProfile` (`src/core/landing_rollout.rs`), which owns the ground phases ROLLOUT → RUNWAY_EXIT → TAXI_CLEAR, flies any chosen runway exit, refuses preemption while rolling or mid-exit, and at TAXI_CLEAR hands off to idle or to a pre-planned `ArrivalPlan` taxi (from `plan_arrival`).
 
 4. **Low-level control** (`src/control/`) — `BankController` / `PitchController` PID loops with rate damping, `TECSLite` (altitude + speed → pitch + throttle), `CenterlineRolloutController` for takeoff/rollout rudder. `PilotCore::commands_from_guidance` assembles the final `ActuatorCommands`.
 
@@ -51,11 +51,12 @@ Core principle: **the flight control loop is deterministic; the LLM never touche
 - `PilotCore::update(raw_state, dt)` is the single per-tick entry point, backend-agnostic.
 - The control loop never calls out to the LLM. Tool handlers briefly lock the pilot; the OpenAI HTTP call runs on a separate thread (`llm-worker`) outside the lock.
 - Every profile must own every axis it touches; `engage_profile` enforces unique per-axis ownership.
-- `contribute()` returns a `ProfileTick` with an optional `hand_off: Vec<Box<dyn GuidanceProfile>>`. This is how `PatternFlyProfile` swaps itself for three single-axis holds after a go-around settles — the replacement happens *after* all profiles have ticked so no profile re-enters `PilotCore` mid-tick.
+- A profile that mustn't be interrupted (e.g. a landing rollout still rolling) says so via `GuidanceProfile::preemption()`; never add ad-hoc "is X active?" guards in tool handlers. Hand-offs bypass the check (a profile replacing itself consents).
+- `contribute()` returns a `ProfileTick` with an optional `hand_off: Vec<Box<dyn GuidanceProfile>>`. This is how `PatternFlyProfile` and `DeadStickLandingProfile` hand the ground roll to `LandingRolloutProfile` at touchdown, and how `LandingRolloutProfile` hands off to idle or a planned taxi — the replacement happens *after* all profiles have ticked so no profile re-enters `PilotCore` mid-tick. (After a go-around, `PatternFlyProfile` climbs to pattern altitude and re-enters the pattern itself.)
 
 ### Two execution backends
 
-- **`simple`** (default) — `sim/scenario.rs::ScenarioRunner` drives `SimpleAircraftModel` (point-mass dynamics in `sim/simple_dynamics.rs`) at 0.2 s steps. Used by tests + for offline CSV logging / SVG plotting (`sim/logging.rs`, `sim/plotting.rs`).
+- **`simple`** (default) — `sim/scenario.rs::ScenarioRunner` drives `SimpleAircraftModel` (point-mass dynamics in `sim/simple_dynamics.rs`; wheel physics — kinematic nose wheel, tire grip limit, split brakes, rolling/breakaway friction — in `sim/ground_physics.rs`, tuned by `ground_handling:` in the aircraft YAML) at 0.2 s steps. Used by tests + for offline CSV logging / SVG plotting (`sim/logging.rs`, `sim/plotting.rs`).
 - **`xplane`** — `live_runner::run_live_xplane` drives real X-Plane 12 via the web API. `sim/xplane_bridge.rs::XPlaneWebBridge` does a one-shot REST call to `/api/capabilities` and `/datarefs?filter[name]=...` to resolve session-local dataref IDs, then opens a WebSocket to `/api/v3`. Incoming `dataref_update_values` are *deltas* — only changed fields — so the bridge merges each update into a cached map. Writes go out as `dataref_set_values`. State/command specs live in `sim/datarefs.rs`.
 
 Both backends share `load_default_config_bundle()`, `PilotCore`, `RunwayFrame`, and `estimate_aircraft_state`. The live runner anchors the pilot at startup via `bootstrap_config_from_sample`, which fills in course from current heading and field elevation from `MSL - AGL`.
@@ -64,7 +65,7 @@ Both backends share `load_default_config_bundle()`, `PilotCore`, `RunwayFrame`, 
 
 - **`SimBus`** (`src/bus.rs`) — thread-safe output bus with status (single-line overwrite) / log (scrolling) / radio (ATC transmissions) channels. Optional `FileLog` writes timestamped transcripts to `output/sim_pilot-*.log`.
 - **`tui.rs`** — ratatui-based interactive TUI with four panes (status / log / radio / input). Runs on the main thread by default (pass `--headless` to disable); the control loop moves to its own thread. **`Paragraph::line_count` + `.scroll()`** is used to keep the log/radio panes pinned to the bottom when lines wrap (requires ratatui's `unstable-rendered-line-info` feature — called out in `Cargo.toml`).
-- **`HeartbeatPump`** (`src/live_runner.rs`) — wakes the LLM worker on phase or profile changes and after `heartbeat_interval_s` of idle. Embeds a `build_status_payload` JSON blob in each heartbeat so the LLM doesn't need to call `get_status` just to see state.
+- **`HeartbeatPump`** (`src/live_runner.rs`) — wakes the LLM worker on phase or profile changes and after `heartbeat_interval_s` of idle. It sends only the reason; `conversation::coalesce_queued` merges queued heartbeats and attaches a fresh `status={...}` JSON blob at delivery, so the LLM doesn't need to call `get_status` just to see state. Both pilot brains (API and Claude Code) share that receive loop (`for_each_incoming`).
 - **`ToolBridge` trait** (`src/llm/tools.rs`) — abstract interface for dataref reads/writes, implemented by `XPlaneWebBridge` and by `FakeBridge` in `tests/test_tool_dispatch.rs`. Tool handlers never see the concrete bridge type.
 
 ### Runway-frame coordinates
@@ -99,7 +100,13 @@ runway hold-out). `nearest_node` deliberately filters to nodes that are
 incident on at least one 1202 edge — apt.dat shares node ids across the
 aircraft graph and the ground-vehicle graph, and an unfiltered nearest
 lookup would sometimes snap the aircraft to a baggage-cart-only node and
-the planner would declare "no route".
+the planner would declare "no route". Every taxi tool (preview or engage)
+plans through `taxi_route::plan_from`, which also owns the runway-start
+rules (start on a node ahead, no backtaxi lead-in). Parking routes end at
+a lead-in point back along the spot's heading
+(`TaxiProfile::pose_lead_in_point`, sized from the nose-wheel turn
+radius); the pose phase rolls in along the heading and, if it passes the
+spot unsettled, re-approaches via a lead-in point instead of circling.
 
 `src/data/parquet.rs::resolve(apt_dat_path)` parses the source, feeds rows
 into an in-memory DuckDB via the `Appender` API, Hilbert-sorts each geometry-

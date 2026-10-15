@@ -8,6 +8,7 @@ use std::fmt;
 use std::ops::{Add, Mul, Sub};
 
 pub const NM_TO_FT: f64 = 6076.12;
+pub const M_TO_FT: f64 = 3.280_839_895_013_123;
 pub const KT_TO_FPS: f64 = 1.687_809_857_101_195_7;
 pub const G_FT_S2: f64 = 32.174;
 pub const EARTH_RADIUS_M: f64 = 6_371_008.8;
@@ -329,7 +330,19 @@ pub struct Runway {
     /// threshold — the aircraft must touch down past this point on
     /// landing, but can use the full runway for takeoff.
     pub displaced_threshold_ft: f64,
+    /// Paved width (apt.dat row 100). Used to tell when the aircraft has
+    /// left the runway surface.
+    pub width_ft: f64,
     pub traffic_side: TrafficSide,
+}
+
+impl Runway {
+    /// Aim-point distance past the pavement end (the runway frame's
+    /// origin). See `RunwayFrame::touchdown_runway_x_ft`.
+    pub fn touchdown_x_ft(&self) -> f64 {
+        let half_tdz = self.touchdown_zone_ft * 0.5;
+        self.displaced_threshold_ft + half_tdz.max(500.0).min(self.length_ft / 3.0)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -394,6 +407,8 @@ pub struct GuidanceTargets {
     pub gear_down: Option<bool>,
     pub brakes: f64,
     pub tecs_phase_override: Option<FlightPhase>,
+    /// See `ProfileContribution::parking_brake`.
+    pub parking_brake: Option<f64>,
 }
 
 impl Default for GuidanceTargets {
@@ -415,6 +430,7 @@ impl Default for GuidanceTargets {
             gear_down: None,
             brakes: 0.0,
             tecs_phase_override: None,
+            parking_brake: None,
         }
     }
 }
@@ -442,6 +458,10 @@ pub struct ActuatorCommands {
     /// saturated and the aircraft is below ~5 kt, where nose-wheel alone
     /// can't produce a tight-enough pivot on a C172.
     pub pivot_brake: f64,
+    /// Parking brake ratio to write to the sim this tick. `Some` only
+    /// when the setting changes (see `CockpitSetting`); `None` leaves the
+    /// sim's value alone.
+    pub parking_brake: Option<f64>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -450,6 +470,7 @@ pub struct AircraftState {
     pub dt: f64,
     pub position_ft: Vec2,
     pub alt_msl_ft: f64,
+    /// Height above field elevation (0 on the ground).
     pub alt_agl_ft: f64,
     /// Geometric height above the terrain directly below (a radar
     /// altimeter), vs `alt_agl_ft` which is height above *field

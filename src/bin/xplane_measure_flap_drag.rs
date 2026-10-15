@@ -151,6 +151,7 @@ fn measure_glide(
             gear_down: Some(true),
             brakes: 0.0,
             pivot_brake: 0.0,
+            parking_brake: None,
         };
         bridge.write_commands(&cmds)?;
 

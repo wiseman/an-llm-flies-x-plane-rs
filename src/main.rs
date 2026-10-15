@@ -49,12 +49,14 @@ struct Cli {
 
     /// Which LLM vendor to route through. Selects the wire protocol and
     /// the API-key env var. Defaults to OpenAI for backward compatibility.
+    /// `claude-code` runs a headless Claude Code process on your Claude
+    /// subscription instead (no API key; needs the `claude` CLI logged in).
     #[arg(long = "pilot-llm-provider", value_enum, default_value_t = LlmProvider::OpenAi)]
     pilot_llm_provider: LlmProvider,
 
     /// Model ID for the selected provider. When omitted, each provider
     /// picks a sensible default (OpenAI: gpt-5.4-2026-03-05; Anthropic:
-    /// claude-sonnet-4-6; Gemini: gemini-2.5-flash).
+    /// claude-sonnet-4-6; Gemini: gemini-2.5-flash; claude-code: opus).
     #[arg(long = "pilot-llm-model")]
     pilot_llm_model: Option<String>,
 

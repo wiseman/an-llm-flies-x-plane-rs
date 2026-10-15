@@ -61,7 +61,6 @@ impl SimpleToolBridge {
         values.insert(FUEL_CAPACITY_KG.name.to_string(), FUEL_CAPACITY_KG_VALUE);
         values.insert(FUEL_FLOW_KG_SEC.name.to_string(), 0.0);
         values.insert(ENGINE_RPM.name.to_string(), 0.0);
-        values.insert(PARKING_BRAKE_RATIO.name.to_string(), 1.0);
         values.insert(HAS_CRASHED.name.to_string(), 0.0);
         values.insert(COM1_FREQUENCY_HZ_833.name.to_string(), 122_800_000.0 / 1_000.0);
         values.insert(COM2_FREQUENCY_HZ_833.name.to_string(), 121_500_000.0 / 1_000.0);
@@ -151,6 +150,7 @@ impl ToolBridge for SimpleToolBridge {
                 Some(flap_setting_to_ratio(d.flap_index))
             }
             n if n == GEAR_HANDLE_DOWN.name => Some(if d.gear_down { 1.0 } else { 0.0 }),
+            n if n == PARKING_BRAKE_RATIO.name => Some(d.parking_brake),
             n if n == Y_AGL_M.name => {
                 let agl_ft = d.altitude_ft - self.field_elevation_ft;
                 Some(agl_ft.max(0.0) / M_TO_FT)
@@ -170,6 +170,8 @@ impl ToolBridge for SimpleToolBridge {
             v.insert(name.clone(), *value);
             if name == FLAP_HANDLE_REQUEST_RATIO.name {
                 self.dynamics.lock().flap_index = flap_ratio_to_setting(*value);
+            } else if name == PARKING_BRAKE_RATIO.name {
+                self.dynamics.lock().parking_brake = value.clamp(0.0, 1.0);
             }
         }
         Ok(())

@@ -6,6 +6,9 @@ description = "An LLM-driven pilot for X-Plane 12."
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/wiseman/an-llm-flies-x-plane-rs"
 readme = "README.md"
+# Several binaries live here (eval, transcript, X-Plane test tools);
+# plain `cargo run` means the pilot.
+default-run = "sim-pilot"
 
 [[bin]]
 name = "sim-pilot"
@@ -49,6 +52,7 @@ ratatui = { version = "0.29", features = ["unstable-rendered-line-info"] }
 crossterm = "0.28"
 ctrlc = { version = "3", features = ["termination"] }
 base64 = "0.22"
+tiny_http = "0.12"
 
 [dev-dependencies]
 tempfile = "3"

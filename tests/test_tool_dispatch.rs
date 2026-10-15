@@ -11,6 +11,7 @@ use serde_json::json;
 use tempfile::TempDir;
 
 use xplane_pilot::config::load_default_config_bundle;
+use xplane_pilot::core::landing_rollout::LandingRolloutProfile;
 use xplane_pilot::core::mission_manager::{PilotCore, StatusSnapshot};
 use xplane_pilot::core::profiles::{
     GuidanceProfile, HeadingHoldProfile, PatternFlyProfile, TakeoffProfile,
@@ -232,7 +233,7 @@ fn engage_cruise_from_takeoff_displaces_three_axis_profile() {
         let mut p = ctx.pilot.lock();
         let cfg = ctx.config.lock().clone();
         let rf = p.runway_frame.clone();
-        p.engage_profile(Box::new(TakeoffProfile::new(cfg, rf)));
+        p.engage_profile(Box::new(TakeoffProfile::new(cfg, rf))).unwrap();
     }
     assert_eq!(ctx.pilot.lock().list_profile_names(), vec!["takeoff"]);
     let r = dispatch(
@@ -250,7 +251,7 @@ fn execute_touch_and_go_arms_pattern_fly_flag() {
         let mut p = ctx.pilot.lock();
         let cfg = ctx.config.lock().clone();
         let rf = p.runway_frame.clone();
-        p.engage_profile(Box::new(PatternFlyProfile::new(cfg, rf)));
+        p.engage_profile(Box::new(PatternFlyProfile::new(cfg, rf))).unwrap();
     }
     let r = dispatch("execute_touch_and_go", json!({}), &ctx);
     assert!(r.contains("touch-and-go armed"));
@@ -349,7 +350,7 @@ fn disengage_profile_readds_idles() {
     let ctx = make_ctx(None, None);
     {
         let mut p = ctx.pilot.lock();
-        p.engage_profile(Box::new(HeadingHoldProfile::new(270.0, 25.0, None).unwrap()));
+        p.engage_profile(Box::new(HeadingHoldProfile::new(270.0, 25.0, None).unwrap())).unwrap();
     }
     let r = dispatch("disengage_profile", json!({"name": "heading_hold"}), &ctx);
     assert!(r.contains("heading_hold"));
@@ -372,7 +373,7 @@ fn extend_pattern_leg_downwind_with_pattern_fly_succeeds() {
         let mut p = ctx.pilot.lock();
         let cfg = ctx.config.lock().clone();
         let rf = p.runway_frame.clone();
-        p.engage_profile(Box::new(PatternFlyProfile::new(cfg, rf)));
+        p.engage_profile(Box::new(PatternFlyProfile::new(cfg, rf))).unwrap();
     }
     let r = dispatch(
             "extend_pattern_leg",
@@ -388,7 +389,7 @@ fn extend_pattern_leg_base_returns_error() {
         let mut p = ctx.pilot.lock();
         let cfg = ctx.config.lock().clone();
         let rf = p.runway_frame.clone();
-        p.engage_profile(Box::new(PatternFlyProfile::new(cfg, rf)));
+        p.engage_profile(Box::new(PatternFlyProfile::new(cfg, rf))).unwrap();
     }
     let r = dispatch(
             "extend_pattern_leg",
@@ -404,7 +405,7 @@ fn execute_pattern_turn_base_sets_trigger() {
         let mut p = ctx.pilot.lock();
         let cfg = ctx.config.lock().clone();
         let rf = p.runway_frame.clone();
-        p.engage_profile(Box::new(PatternFlyProfile::new(cfg, rf)));
+        p.engage_profile(Box::new(PatternFlyProfile::new(cfg, rf))).unwrap();
     }
     let r = dispatch("execute_pattern_turn", json!({"leg": "base"}), &ctx);
     assert!(r.contains("turn to base triggered"));
@@ -417,7 +418,7 @@ fn set_pattern_clearance_revokes_base() {
         let mut p = ctx.pilot.lock();
         let cfg = ctx.config.lock().clone();
         let rf = p.runway_frame.clone();
-        p.engage_profile(Box::new(PatternFlyProfile::new(cfg, rf)));
+        p.engage_profile(Box::new(PatternFlyProfile::new(cfg, rf))).unwrap();
     }
     let r = dispatch(
             "set_pattern_clearance",
@@ -433,7 +434,7 @@ fn set_pattern_clearance_cleared_to_land() {
         let mut p = ctx.pilot.lock();
         let cfg = ctx.config.lock().clone();
         let rf = p.runway_frame.clone();
-        p.engage_profile(Box::new(PatternFlyProfile::new(cfg, rf)));
+        p.engage_profile(Box::new(PatternFlyProfile::new(cfg, rf))).unwrap();
     }
     let r = dispatch(
             "set_pattern_clearance",
@@ -1277,12 +1278,9 @@ fn engage_taxi_prepends_pullout_leg_when_far_from_nearest_node() {
     let expected_start: Vec2 = geodetic_offset_ft(start_lat, start_lon, georef);
     let plan = xplane_pilot::llm::tools::build_taxi_legs_with_pullout(
         expected_start,
-        0.0,
         &[], // empty stand-in; we exercise the full path via the dispatch above
         georef,
-        false,
-    )
-    .expect("empty plan never errors");
+    );
     // Empty plan → empty legs list, no pullout.
     assert!(plan.legs.is_empty());
     assert!(plan.pullout_ft.is_none());
@@ -1335,7 +1333,7 @@ fn engage_taxi_allows_big_pullout_turn_off_runway() {
 /// because the lead-in is a synthetic segment, not a graph edge. The
 /// cap must still fire here.
 #[test]
-fn engage_taxi_rejects_big_pullout_turn_on_runway() {
+fn engage_taxi_on_runway_rolls_ahead_instead_of_backtaxiing() {
     // Dedicated KRWY fixture: runway 09/27 with hold-short nodes north
     // of each threshold plus a parallel taxiway A. The aircraft starts
     // mid-runway so nearest-to-aircraft (the 27-end HS, node 2) differs
@@ -1350,8 +1348,10 @@ fn engage_taxi_rejects_big_pullout_turn_on_runway() {
          1201 37.001000 -121.997500 both 1\n\
          1201 37.001000 -121.987500 both 2\n\
          1201 37.000500 -122.002000 both 10\n\
+         1201 37.000100 -121.997000 both 3\n\
          1202 10 1 twoway taxiway_E B\n\
-         1202 1 2 twoway taxiway_E A\n"
+         1202 1 2 twoway taxiway_E A\n\
+         1202 3 1 twoway taxiway_E B1\n"
             .to_string(),
     ];
     build_fake_parquet(dir.path(), &extra);
@@ -1380,12 +1380,12 @@ fn engage_taxi_rejects_big_pullout_turn_on_runway() {
                 "start_lon": start_lon,
             }),
         &ctx);
-    assert!(r.starts_with("error"), "on-runway big-turn should reject: {}", r);
-    assert!(
-        r.contains("backtaxi") || r.contains("runway pavement"),
-        "expected backtaxi/runway message, got: {}",
-        r
-    );
+    // The nearest node (27-end hold-short) is behind; the 09 hold-short
+    // is ahead. Roll forward to it rather than backtaxi, and never engage
+    // an empty route.
+    assert!(!r.starts_with("error"), "{r}");
+    assert!(!r.contains("0 legs"), "empty route engaged: {r}");
+    assert!(r.contains("pullout"), "lead-in from the aircraft to the node ahead: {r}");
 }
 
 #[test]
@@ -1591,6 +1591,31 @@ fn spatial_least_of_both_ends_picks_closer_high_numbered_threshold() {
 
 // ---------- engage_park / plan_park_route ----------
 
+/// KTEST runway 09/27 and its taxi network, shared by the park and
+/// arrival fixtures.
+const KTEST_PARK_NETWORK: &str = "1 0 0 0 KTEST KTEST Test Airport\n\
+     100 22.86 1 0 0.25 0 2 0 \
+     09 37.000100 -121.997500 0.00 0 0 0 0 0 \
+     27 37.000100 -121.987500 0.00 0 0 0 0 0\n\
+     1201 37.000200 -122.001000 both 1\n\
+     1201 37.000200 -121.999500 both 2\n\
+     1201 37.000100 -121.997500 both 3\n\
+     1201 37.000300 -121.998500 both 4\n\
+     1201 37.000100 -121.999000 both 5\n\
+     1201 37.000500 -122.002000 both 10\n\
+     1202 10 1 twoway taxiway_E \n\
+     1202 1 2 twoway taxiway_E A\n\
+     1202 2 3 twoway taxiway_E D\n\
+     1202 2 4 twoway taxiway_E C\n\
+     1202 2 5 twoway taxiway_E B\n";
+
+/// KTEST's two parking spots: Gate A4 by node 5 facing east, and
+/// GA Tie-Down 1 by node 4 facing west.
+const KTEST_PARKING_SPOTS: &str =
+    "1300 37.000100 -121.998950 90.0 gate jets|turboprops|props Gate A4\n\
+     1301 C airline UAL\n\
+     1300 37.000310 -121.998490 270.0 tie_down props|helos GA Tie-Down 1\n";
+
 fn build_park_fixture_parquet(dir: &std::path::Path) -> PathBuf {
     // Synthetic KTEST with a taxi network and two 1300 parking spots:
     //   - "Gate A4": near node 5, heading 90 (east)
@@ -1599,27 +1624,7 @@ fn build_park_fixture_parquet(dir: &std::path::Path) -> PathBuf {
     //   n10 -- connector -- n1 == A ==> n2 == D ==> n3 (rwy 09 thr)
     //                                       \== C ==> n4 (Tie-Down)
     //                                       \== B ==> n5 (Gate A4)
-    let extra = vec![
-        "1 0 0 0 KTEST KTEST Test Airport\n\
-         100 22.86 1 0 0.25 0 2 0 \
-         09 37.000100 -121.997500 0.00 0 0 0 0 0 \
-         27 37.000100 -121.987500 0.00 0 0 0 0 0\n\
-         1201 37.000200 -122.001000 both 1\n\
-         1201 37.000200 -121.999500 both 2\n\
-         1201 37.000100 -121.997500 both 3\n\
-         1201 37.000300 -121.998500 both 4\n\
-         1201 37.000100 -121.999000 both 5\n\
-         1201 37.000500 -122.002000 both 10\n\
-         1202 10 1 twoway taxiway_E \n\
-         1202 1 2 twoway taxiway_E A\n\
-         1202 2 3 twoway taxiway_E D\n\
-         1202 2 4 twoway taxiway_E C\n\
-         1202 2 5 twoway taxiway_E B\n\
-         1300 37.000100 -121.998950 90.0 gate jets|turboprops|props Gate A4\n\
-         1301 C airline UAL\n\
-         1300 37.000310 -121.998490 270.0 tie_down props|helos GA Tie-Down 1\n"
-            .to_string(),
-    ];
+    let extra = vec![format!("{KTEST_PARK_NETWORK}{KTEST_PARKING_SPOTS}")];
     build_fake_parquet(dir, &extra)
 }
 
@@ -1705,29 +1710,70 @@ fn engage_park_installs_taxi_profile_after_runway_exit() {
     assert!(r.contains("Gate A4"));
     assert!(r.contains("heading 90"));
     assert!(ctx.pilot.lock().has_profile("taxi"));
+
+    // Asking again for the same spot doesn't restart the taxi.
+    let again = dispatch(
+            "engage_park",
+            json!({
+                "airport_ident": "KTEST",
+                "parking_name": "gate a4",
+                "via_taxiways": [],
+                "start_lat": 37.000500,
+                "start_lon": -122.002000,
+            }),
+        &ctx);
+    assert!(again.starts_with("already taxiing to"), "got: {}", again);
+
+    // The status the LLM sees names the taxi's destination.
+    ctx.pilot.lock().update(
+        &xplane_pilot::sim::simple_dynamics::SimpleAircraftModel::new(
+            load_default_config_bundle(),
+            Vec2::ZERO,
+        )
+        .initial_state(),
+        0.2,
+    );
+    let status = dispatch("get_status", json!({}), &ctx);
+    let v: serde_json::Value = serde_json::from_str(&status).expect("status json");
+    let taxi = v["profile_details"]["taxi"].as_str().unwrap_or_default();
+    assert!(taxi.starts_with("→ Gate A4"), "profile_details: {}", v["profile_details"]);
+}
+
+fn runway_36() -> xplane_pilot::guidance::runway_geometry::RunwayFrame {
+    xplane_pilot::guidance::runway_geometry::RunwayFrame::new(xplane_pilot::types::Runway {
+        id: Some("36".to_string()),
+        threshold_ft: Vec2::new(0.0, 0.0),
+        course_deg: 360.0,
+        length_ft: 5000.0,
+        touchdown_zone_ft: 1200.0,
+        displaced_threshold_ft: 0.0,
+        width_ft: 100.0,
+        traffic_side: xplane_pilot::types::TrafficSide::Left,
+    })
+}
+
+/// A landing rollout on runway 36 that has ticked once at `gs_kt`, 3000 ft
+/// down the centerline with no exit selected.
+fn landing_rollout_on_runway(gs_kt: f64) -> LandingRolloutProfile {
+    let mut p = LandingRolloutProfile::new(load_default_config_bundle(), runway_36(), None);
+    let state = AircraftState {
+        runway_x_ft: Some(3000.0),
+        runway_y_ft: Some(0.0),
+        position_ft: Vec2::new(0.0, 3000.0),
+        gs_kt,
+        on_ground: true,
+        ..AircraftState::synthetic_default()
+    };
+    p.contribute(&state, 0.2);
+    p
 }
 
 #[test]
-fn engage_park_rejects_while_pattern_controls_runway_exit() {
+fn engage_park_rejects_while_landing_rollout_is_rolling() {
     let dir = TempDir::new().unwrap();
     build_park_fixture_parquet(dir.path());
     let (ctx, _bridge) = make_ctx_with_parquet(dir.path());
-    let p = PatternFlyProfile::new(
-        load_default_config_bundle(),
-        xplane_pilot::guidance::runway_geometry::RunwayFrame::new(
-            xplane_pilot::types::Runway {
-                id: Some("36".to_string()),
-                threshold_ft: Vec2::new(0.0, 0.0),
-                course_deg: 360.0,
-                length_ft: 5000.0,
-                touchdown_zone_ft: 1200.0,
-                displaced_threshold_ft: 0.0,
-                traffic_side: xplane_pilot::types::TrafficSide::Left,
-            },
-        ),
-    );
-    ctx.pilot.lock().engage_profile(Box::new(p));
-    assert!(ctx.pilot.lock().has_profile("pattern_fly"));
+    ctx.pilot.lock().engage_profile(Box::new(landing_rollout_on_runway(25.0))).unwrap();
 
     let r = dispatch(
             "engage_park",
@@ -1740,41 +1786,16 @@ fn engage_park_rejects_while_pattern_controls_runway_exit() {
             }),
         &ctx);
     assert!(r.starts_with("error"), "got: {}", r);
-    assert!(r.contains("pattern_fly"));
-    assert!(r.contains("wait until"));
+    assert!(r.contains("landing_rollout"), "got: {}", r);
+    assert!(r.contains("wait until"), "got: {}", r);
     let names = ctx.pilot.lock().list_profile_names();
-    assert!(!names.contains(&"taxi".to_string()), "profiles = {:?}", names);
-    assert!(names.contains(&"pattern_fly".to_string()));
+    assert_eq!(names, vec!["landing_rollout".to_string()]);
 }
 
-/// A pattern_fly profile on runway 36 that has finished its rollout and is
-/// sitting stopped on the centerline with no exit selected.
-fn pattern_fly_stopped_on_runway() -> PatternFlyProfile {
-    let mut p = PatternFlyProfile::new(
-        load_default_config_bundle(),
-        xplane_pilot::guidance::runway_geometry::RunwayFrame::new(
-            xplane_pilot::types::Runway {
-                id: Some("36".to_string()),
-                threshold_ft: Vec2::new(0.0, 0.0),
-                course_deg: 360.0,
-                length_ft: 5000.0,
-                touchdown_zone_ft: 1200.0,
-                displaced_threshold_ft: 0.0,
-                traffic_side: xplane_pilot::types::TrafficSide::Left,
-            },
-        ),
-    );
-    p.phase = xplane_pilot::types::FlightPhase::Rollout;
-    let stopped = AircraftState {
-        runway_x_ft: Some(3000.0),
-        runway_y_ft: Some(0.0),
-        position_ft: Vec2::new(0.0, 3000.0),
-        gs_kt: 0.0,
-        on_ground: true,
-        ..AircraftState::synthetic_default()
-    };
-    p.contribute(&stopped, 0.2);
-    assert!(p.accepts_ground_handoff());
+/// A landing rollout stopped on the centerline with no exit selected.
+fn landing_rollout_stopped_on_runway() -> LandingRolloutProfile {
+    let p = landing_rollout_on_runway(0.0);
+    assert!(p.preemption().is_ok());
     p
 }
 
@@ -1783,7 +1804,7 @@ fn engage_park_takes_over_when_stopped_on_runway_without_exit() {
     let dir = TempDir::new().unwrap();
     build_park_fixture_parquet(dir.path());
     let (ctx, _bridge) = make_ctx_with_parquet(dir.path());
-    ctx.pilot.lock().engage_profile(Box::new(pattern_fly_stopped_on_runway()));
+    ctx.pilot.lock().engage_profile(Box::new(landing_rollout_stopped_on_runway())).unwrap();
 
     let r = dispatch(
             "engage_park",
@@ -1798,13 +1819,13 @@ fn engage_park_takes_over_when_stopped_on_runway_without_exit() {
     assert!(!r.starts_with("error"), "got: {}", r);
     let names = ctx.pilot.lock().list_profile_names();
     assert!(names.contains(&"taxi".to_string()), "profiles = {:?}", names);
-    assert!(!names.contains(&"pattern_fly".to_string()), "profiles = {:?}", names);
+    assert!(!names.contains(&"landing_rollout".to_string()), "profiles = {:?}", names);
 }
 
 #[test]
 fn go_around_rejected_after_touchdown() {
     let (ctx, _bridge) = make_ctx_with_parquet(TempDir::new().unwrap().path());
-    ctx.pilot.lock().engage_profile(Box::new(pattern_fly_stopped_on_runway()));
+    ctx.pilot.lock().engage_profile(Box::new(landing_rollout_stopped_on_runway())).unwrap();
     let r = dispatch("go_around", json!({}), &ctx);
     assert!(r.starts_with("error"), "got: {}", r);
     assert!(r.contains("ground"), "got: {}", r);
@@ -1864,6 +1885,134 @@ fn choose_runway_exit_picks_intersection_past_touchdown() {
     assert!(st > 2000.0, "picked the near-threshold junction: {r}");
 }
 
+/// KTEST park fixture plus exits off runway 09: E about 1460 ft from the
+/// threshold and T about 60 ft (before touchdown), both joining taxiway A
+/// toward the tie-down.
+fn build_arrival_fixture_parquet(dir: &std::path::Path) -> PathBuf {
+    // The park fixture plus two runway exits off 09: E (nodes 20-21)
+    // and T (30-31), each an active-zone edge then taxiway A to node 4.
+    let exits = "1201 37.000100 -121.992500 both 20\n\
+         1201 37.000300 -121.992500 both 21\n\
+         1202 20 21 twoway taxiway_E E\n\
+         1204 arrival 09\n\
+         1202 21 4 twoway taxiway_E A\n\
+         1201 37.000100 -121.997300 both 30\n\
+         1201 37.000300 -121.997300 both 31\n\
+         1202 30 31 twoway taxiway_E T\n\
+         1204 arrival 09\n\
+         1202 31 4 twoway taxiway_E A\n";
+    let extra = vec![format!("{KTEST_PARK_NETWORK}{exits}{KTEST_PARKING_SPOTS}")];
+    build_fake_parquet(dir, &extra)
+}
+
+fn engage_ktest_pattern(ctx: &ToolContext) {
+    let r = dispatch(
+        "engage_pattern_fly",
+        json!({
+            "airport_ident": "KTEST",
+            "runway_ident": "09",
+            "side": "left",
+            "start_phase": "pattern_entry",
+        }),
+        ctx,
+    );
+    assert!(!r.starts_with("error"), "{r}");
+}
+
+#[test]
+fn plan_arrival_auto_selects_exit_and_stores_taxi_plan() {
+    let dir = TempDir::new().unwrap();
+    build_arrival_fixture_parquet(dir.path());
+    let (ctx, _bridge) = make_ctx_with_parquet(dir.path());
+    engage_ktest_pattern(&ctx);
+
+    let r = dispatch("plan_arrival", json!({"parking_name": "GA Tie-Down 1"}), &ctx);
+    assert!(!r.starts_with("error"), "{r}");
+    assert!(r.contains("exit E"), "{r}");
+    assert!(r.contains("auto-selected"), "{r}");
+    assert!(r.contains("GA Tie-Down 1"), "{r}");
+    let (exit, parking) = ctx
+        .pilot
+        .lock()
+        .profile_mut::<PatternFlyProfile>().map(|p| {
+            (
+                p.preferred_exit.as_ref().map(|e| e.taxiway_name.clone()),
+                p.arrival.as_ref().map(|a| a.parking_name.clone()),
+            )
+        })
+        .unwrap();
+    assert_eq!(exit.as_deref(), Some("E"));
+    assert_eq!(parking.as_deref(), Some("GA Tie-Down 1"));
+
+    // Clearing the exit drops the taxi plan with it.
+    let cleared = dispatch("choose_runway_exit", json!({"taxiway_name": null}), &ctx);
+    assert!(cleared.contains("dropped"), "{cleared}");
+    let has_arrival = ctx
+        .pilot
+        .lock()
+        .profile_mut::<PatternFlyProfile>().map(|p| p.arrival.is_some())
+        .unwrap();
+    assert!(!has_arrival);
+}
+
+#[test]
+fn plan_arrival_ignores_where_an_airborne_aircraft_projects_onto_the_runway() {
+    // On downwind abeam (well past) the far end of runway 09, the
+    // aircraft's along-runway projection is beyond every exit. It's
+    // airborne, so that projection must not rule exits out.
+    let dir = TempDir::new().unwrap();
+    build_arrival_fixture_parquet(dir.path());
+    let (ctx, bridge) = make_ctx_with_parquet(dir.path());
+    engage_ktest_pattern(&ctx);
+    bridge.values.lock().insert("sim/flightmodel/position/latitude".into(), 37.004);
+    bridge.values.lock().insert("sim/flightmodel/position/longitude".into(), -121.980);
+
+    let r = dispatch(
+        "plan_arrival",
+        json!({"parking_name": "GA Tie-Down 1", "exit_taxiway": null, "via_taxiways": []}),
+        &ctx,
+    );
+    assert!(!r.starts_with("error"), "{r}");
+    assert!(r.contains("exit E"), "{r}");
+}
+
+#[test]
+fn plan_arrival_with_named_exit_and_bad_inputs() {
+    let dir = TempDir::new().unwrap();
+    build_arrival_fixture_parquet(dir.path());
+    let (ctx, _bridge) = make_ctx_with_parquet(dir.path());
+
+    let r = dispatch("plan_arrival", json!({"parking_name": "GA Tie-Down 1"}), &ctx);
+    assert!(r.starts_with("error") && r.contains("pattern_fly"), "{r}");
+
+    engage_ktest_pattern(&ctx);
+    let r = dispatch(
+        "plan_arrival",
+        json!({"parking_name": "GA Tie-Down 1", "exit_taxiway": "E"}),
+        &ctx,
+    );
+    assert!(!r.starts_with("error"), "{r}");
+    assert!(!r.contains("auto-selected"), "{r}");
+
+    let r = dispatch(
+        "plan_arrival",
+        json!({"parking_name": "GA Tie-Down 1", "exit_taxiway": "Z"}),
+        &ctx,
+    );
+    assert!(r.starts_with("error") && r.contains("valid") && r.contains("\"E\""), "{r}");
+
+    // T meets runway 09 ~60 ft past the threshold, before touchdown.
+    let r = dispatch(
+        "plan_arrival",
+        json!({"parking_name": "GA Tie-Down 1", "exit_taxiway": "T", "via_taxiways": []}),
+        &ctx,
+    );
+    assert!(r.starts_with("error") && r.contains("behind the touchdown"), "{r}");
+
+    let r = dispatch("plan_arrival", json!({"parking_name": "No Such Spot"}), &ctx);
+    assert!(r.starts_with("error"), "{r}");
+}
+
 #[test]
 fn choose_runway_exit_records_preference_on_pattern_profile() {
     let dir = TempDir::new().unwrap();
@@ -1872,9 +2021,9 @@ fn choose_runway_exit_records_preference_on_pattern_profile() {
          100 22.86 1 0 0.25 0 2 0 \
          09 37.000100 -121.997500 0.00 0 0 0 0 0 \
          27 37.000100 -121.987500 0.00 0 0 0 0 0\n\
-         1201 37.000200 -121.996500 both 1\n\
-         1201 37.000100 -121.996500 both 2\n\
-         1201 37.000300 -121.996500 both 3\n\
+         1201 37.000200 -121.992500 both 1\n\
+         1201 37.000100 -121.992500 both 2\n\
+         1201 37.000300 -121.992500 both 3\n\
          1202 1 2 twoway taxiway_E A5\n\
          1204 arrival 09\n\
          1202 1 3 twoway taxiway_E A\n"
@@ -2236,5 +2385,56 @@ fn engage_dead_stick_landing_displaces_existing_pattern_fly() {
         !names.contains(&"pattern_fly".to_string()),
         "pattern_fly should have been displaced, got {:?}",
         names
+    );
+}
+
+/// OpenAI's strict function calling rejects any schema whose `required`
+/// list doesn't name every property (optional ones must be nullable
+/// instead), and fails the whole request — not just that tool.
+#[test]
+fn every_tool_schema_requires_all_its_properties() {
+    use xplane_pilot::llm::tools::tool_schemas;
+    for include_mission_complete in [false, true] {
+        for tool in tool_schemas(include_mission_complete) {
+            let params = &tool.parameters;
+            let props: std::collections::BTreeSet<String> = params["properties"]
+                .as_object()
+                .map(|m| m.keys().cloned().collect())
+                .unwrap_or_default();
+            let required: std::collections::BTreeSet<String> = params["required"]
+                .as_array()
+                .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+                .unwrap_or_default();
+            assert_eq!(props, required, "tool {} schema", tool.name);
+        }
+    }
+}
+
+#[test]
+fn failed_park_planning_leaves_the_parking_brake_set() {
+    let dir = TempDir::new().unwrap();
+    build_park_fixture_parquet(dir.path());
+    let bridge = FakeBridge::new(
+        &[("sim/cockpit2/controls/parking_brake_ratio", 1.0)],
+        47.4638,
+        -122.308,
+    );
+    let ctx = make_ctx(Some(bridge.clone() as Arc<dyn ToolBridge>), Some(dir.path().to_path_buf()));
+    let r = dispatch(
+        "engage_park",
+        json!({
+            "airport_ident": "KTEST",
+            "parking_name": "No Such Spot",
+            "via_taxiways": [],
+            "start_lat": 37.000500,
+            "start_lon": -122.002000,
+        }),
+        &ctx,
+    );
+    assert!(r.starts_with("error"), "{r}");
+    assert_eq!(
+        bridge.get_dataref_value("sim/cockpit2/controls/parking_brake_ratio"),
+        Some(1.0),
+        "brake released before a failed plan"
     );
 }

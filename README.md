@@ -58,6 +58,15 @@ Opus 4.6 was the only clean sweep, at ~10× the cost of Haiku/Mini and ~20×
 Flash Lite. Three trials is a small sample — treat the success and
 distance columns as rough signal, not a ranking.
 
+These results predate several changes to the deterministic backend:
+ground physics (kinematic nose-wheel steering, tire grip limits, rolling
+and breakaway friction, a parking brake that holds), descent physics
+recalibrated to X-Plane's measured glide (idle descents and power-off
+glides were too steep), approach fixes that put touchdowns near the aim
+point instead of thousands of feet long, and the post-landing
+`landing_rollout` / `plan_arrival` changes. New runs aren't directly
+comparable to this table.
+
 ## Getting the binary
 
 ### Download a prebuilt binary
@@ -85,6 +94,7 @@ cargo test  --release        # ~450 tests, runs in ~4 seconds
 By default the executable connects to a running X-Plane 12 and needs an API key
 for one of the supported LLM model providers in a `.env` file — `OPENAI_API_KEY`
 for OpenAI, `ANTHROPIC_API_KEY` for Claude, or `GEMINI_API_KEY` for Gemini.
+Or skip the key and fly with Claude Code on your Claude subscription (below).
 `DEEPGRAM_API_KEY` is optional, but if you add it then you get voice
 transcription.
 
@@ -102,11 +112,24 @@ cargo run --release -- --pilot-llm-provider anthropic \
 cargo run --release -- --pilot-llm-provider gemini
 cargo run --release -- --pilot-llm-provider gemini \
   --pilot-llm-model gemini-2.5-pro
+
+# Claude Code on your subscription (no API key; needs `claude` installed and logged in)
+cargo run --release -- --pilot-llm-provider claude-code                  # model: opus
+cargo run --release -- --pilot-llm-provider claude-code --pilot-llm-model claude-opus-5-5
 ```
 
 `--pilot-llm-reasoning-effort low|medium|high` maps to each provider's native
 knob: `reasoning.effort` on OpenAI, `thinking.budget_tokens` on Anthropic,
-`thinkingConfig.thinkingBudget` on Gemini.
+`thinkingConfig.thinkingBudget` on Gemini, `--effort` on Claude Code.
+
+With `claude-code`, sim-pilot runs one headless `claude -p` process for the
+session and serves the pilot tools to it over a local MCP server. Claude Code
+runs the tool loop itself. Your own Claude Code settings, hooks, plugins and
+CLAUDE.md files are kept out of the pilot's context, and its built-in tools
+are turned off. Each response takes a little longer than a direct API call,
+and live X-Plane keeps flying while it thinks. Token counts in the log come
+from Claude Code; the `equiv_cost` it reports is what the same usage would
+cost on the API, not what your subscription is charged.
 
 ### Offline simulator testing (no X-Plane, no LLM)
 
@@ -153,6 +176,38 @@ On terminals narrower than 100 columns the radio and action-log split stacks
 vertically (radio on top at 1/4 height, log below) instead of side by side, so
 ATC stays visible without crowding the assistant text.
 
+**Spatial view (TARGETING).** Ctrl-V (or `/view`) toggles an animated,
+targeting-computer-style picture of what the aircraft is doing. It is off by
+default. When on, it takes the left half of the dialog area on terminals at
+least 120 columns wide, or the top 55% on narrower ones, and the radio and log
+keep the rest. The view picks itself from the flight phase:
+
+- **APPROACH** (final, roundout, flare): a perspective tunnel down the
+  glidepath, with gates that stream toward you as range closes. Lock brackets
+  on the aim point tighten and turn magenta (`TGT LOCK`) when glidepath and
+  centerline errors are small. They drift and blink red (`NO LOCK`) when the
+  errors are large. A side-profile strip shows the 3° path, the roundout and
+  flare heights, the runway and your recent altitude trail.
+- **PATTERN**: a heading-up radar scope with a sweeping beam. It shows the
+  pattern legs, with chevrons marching along the active leg, and brackets on
+  the runway.
+- **RUNWAY** (takeoff roll, rollout, runway exit): a runway-up plan view with
+  distance-remaining markers. It also shows the selected exit, with a bracket
+  on its clear-of-runway point.
+- **TAXI** (taxi, line-up, park): a heading-up scope with the taxi route,
+  taxiway names, the nearby runway, and the hold-short line or parking spot,
+  bracketed until reached.
+- **SCOPE** (enroute, idle): a heading-up radar scope with heading and track
+  bugs, the active runway as a contact (or an edge arrow if it is out of
+  range), and any target waypoint.
+
+Colour carries meaning: green for your aircraft and its trail, cyan for
+guidance, blue for context and scan, magenta for lock-on and designated
+targets, amber for caution, and red for warnings. `NO_COLOR` switches the view
+to plain monochrome. `/view on|off|auto` sets the view state, and
+`/view approach|pattern|runway|taxi|scope` pins one view until you send
+`/view auto`.
+
 Keys:
 
 | Key               | Action                                                                                                     |
@@ -161,6 +216,7 @@ Keys:
 | Hold Space        | Push-to-talk as operator. Releasing finalizes the transcription.                                           |
 | Hold Tab          | Push-to-talk as ATC (auto-prefixed `[atc]`).                                                               |
 | Ctrl-T            | Toggle log-pane detail (compact vs full).                                                                  |
+| Ctrl-V            | Toggle the spatial TARGETING view (see above). `/view` does the same and can pin a specific view.          |
 | PgUp / PgDn / End | Scroll the log pane. Home view auto-pins to the tail.                                                      |
 
 The input pane shows a steady (non-blinking) block cursor when idle. During PTT
@@ -213,6 +269,7 @@ stem (`sim_pilot-YYYYMMDD-HHMMSS`):
 | `join_pattern`          | Acknowledges a pattern-entry instruction while `pattern_fly` is active.                                                                           |
 | `list_runway_exits`     | Lists candidate exit taxiways for a landing runway with their stationing from the threshold.                                                       |
 | `choose_runway_exit`    | Records a preferred runway-exit taxiway; the rollout slows to turnoff speed at that exit and hands off the aircraft stopped clear of the runway.  |
+| `plan_arrival`          | Before touchdown: picks the exit and pre-plans the taxi to a parking spot, so the landing rolls out, exits, and parks with no further calls.      |
 
 ### Ground, Radio, And Airport Data
 

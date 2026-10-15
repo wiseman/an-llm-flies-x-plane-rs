@@ -12,11 +12,13 @@ use crate::guidance::pattern_manager::PatternGeometry;
 use crate::guidance::route_manager::RouteManager;
 use crate::types::{clamp, wrap_degrees_180, AircraftState, FlightPhase};
 
-/// ATC-side clearance state for pattern-phase transitions. Each gate
-/// authorizes one transition from running automatically. Default is "all
-/// granted" so untowered/CTAF ops behave as before. "I'll call your base"
-/// revokes `turn_base`; "turn base now" is handled via
-/// [`PatternTriggers`], not by flipping a clearance.
+/// Gates on pattern-phase transitions. Each gate authorizes one
+/// transition from running automatically. Default is "all granted" so
+/// untowered/CTAF ops behave as before. They carry ATC clearances ("I'll
+/// call your base" revokes `turn_base`; "turn base now" is handled via
+/// [`PatternTriggers`], not by flipping a clearance) and a profile's own
+/// turn policy (dead-stick holds the base turn until its energy says
+/// go).
 ///
 /// `land` defaults to `true` and is informational only — the mode
 /// machine does not enforce landing clearance. The LLM reads it in the
@@ -55,6 +57,10 @@ pub struct PatternTriggers {
     pub turn_base: bool,
     pub turn_final: bool,
 }
+
+/// Fraction of the base leg flown before the automatic turn to final.
+/// Base guidance plans its descent to reach the glidepath by this point.
+pub const BASE_TO_FINAL_FRACTION: f64 = 0.65;
 
 pub struct ModeManagerUpdate<'a> {
     pub phase: FlightPhase,
@@ -117,7 +123,7 @@ impl ModeManager {
                 phase
             }
             FlightPhase::Rotate => {
-                if !state.on_ground && state.alt_agl_ft >= 20.0 {
+                if !state.on_ground && state.alt_agl_ft >= self.config.phase_gates.rotate_agl_ft {
                     return FlightPhase::InitialClimb;
                 }
                 phase
@@ -127,8 +133,8 @@ impl ModeManager {
                 // has noisy VS) still advances, but not while sinking: an
                 // aircraft losing altitude after takeoff stays on the
                 // runway heading instead of banking into the crosswind.
-                const MAX_SINK_FOR_CLIMB_GATE_FPM: f64 = -300.0;
-                let not_sinking = state.vs_fpm > MAX_SINK_FOR_CLIMB_GATE_FPM;
+                let gates = &self.config.phase_gates;
+                let not_sinking = state.vs_fpm > gates.climb_gate_max_sink_fpm;
                 if stay_in_pattern {
                     let crosswind_turn_agl_ft =
                         (self.config.pattern.altitude_agl_ft - 300.0).max(400.0);
@@ -138,7 +144,7 @@ impl ModeManager {
                     }
                     return phase;
                 }
-                if state.alt_agl_ft >= 400.0 && not_sinking {
+                if state.alt_agl_ft >= gates.enroute_climb_agl_ft && not_sinking {
                     return FlightPhase::EnrouteClimb;
                 }
                 phase
@@ -219,7 +225,7 @@ impl ModeManager {
                 let rel = state.position_ft - leg.start_ft;
                 let path_length = path.length().max(1.0);
                 let along = rel.dot(path.normalized());
-                let past_65_pct = along >= path_length * 0.65;
+                let past_65_pct = along >= path_length * BASE_TO_FINAL_FRACTION;
                 let auto_ready = on_final || past_65_pct;
                 if triggers.turn_final || (clearances.turn_final && auto_ready) {
                     return FlightPhase::Final;
@@ -251,55 +257,9 @@ impl ModeManager {
                     _ => unreachable!(),
                 }
             }
-            FlightPhase::Rollout => {
-                // Advance to RunwayExit once the aircraft has left the
-                // runway surface laterally. `PatternFlyProfile` now
-                // holds rollout at turnoff speed (not zero), so the
-                // old "gs ≤ 5 kt" guard doesn't fire on its own after a
-                // nominal landing. The LLM calls engage_park once it's
-                // decided where to go; this transition is the clear-
-                // of-runway marker that gates the handoff.
-                //
-                // Thresholds are fixed rather than pulled from a config
-                // RunwayConfig because the pilot doesn't carry runway
-                // width into the runway frame. 75 ft covers the widest
-                // airline-class runways (200 ft wide → half-width 100 ft)
-                // only loosely, but for GA ops on 75-150 ft runways it's
-                // a clean "you're on the taxiway" signal.
-                const RUNWAY_EXIT_OFFSET_FT: f64 = 75.0;
-                let lateral_off = state.runway_y_ft.map(f64::abs).unwrap_or(0.0);
-                if lateral_off > RUNWAY_EXIT_OFFSET_FT {
-                    return FlightPhase::RunwayExit;
-                }
-                // Only declare TaxiClear when the aircraft is both
-                // stopped and past the runway end — stopping mid-runway
-                // on centerline leaves the aircraft on pavement, and
-                // the next engage_park/engage_taxi would plan a pullout
-                // straight back up the runway.
-                let past_end = state
-                    .runway_x_ft
-                    .map(|x| x > pattern.runway_frame.runway.length_ft)
-                    .unwrap_or(false);
-                if state.gs_kt <= 1.0 && past_end {
-                    return FlightPhase::TaxiClear;
-                }
-                phase
-            }
-            FlightPhase::RunwayExit => {
-                // Full stop = clear of runway + brakes down. Alternately,
-                // ≥ 150 ft off centerline means we're well onto the
-                // taxiway, even if still creeping forward.
-                const RUNWAY_CLEAR_OFFSET_FT: f64 = 150.0;
-                if state.gs_kt <= 1.0 {
-                    return FlightPhase::TaxiClear;
-                }
-                let lateral_off = state.runway_y_ft.map(f64::abs).unwrap_or(0.0);
-                if lateral_off > RUNWAY_CLEAR_OFFSET_FT {
-                    return FlightPhase::TaxiClear;
-                }
-                phase
-            }
-            FlightPhase::TaxiClear => phase,
+            // Touchdown hands off to LandingRolloutProfile, which owns the
+            // ground phase machine (Rollout → RunwayExit → TaxiClear).
+            FlightPhase::Rollout | FlightPhase::RunwayExit | FlightPhase::TaxiClear => phase,
             FlightPhase::GoAround => phase,
         }
     }

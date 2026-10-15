@@ -7,7 +7,7 @@ use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
 use anyhow::{anyhow, bail, Context, Result};
 use duckdb::Connection;
 
-use crate::types::{haversine_m, initial_bearing_deg};
+use crate::types::{haversine_m, initial_bearing_deg, wrap_degrees_180, M_TO_FT};
 
 #[derive(Debug, Clone)]
 pub struct TaxiNode {
@@ -136,19 +136,27 @@ pub fn load_graph(conn: &Connection, airport_ident: &str) -> Result<TaxiGraph> {
         });
     }
 
-    let mut adj: HashMap<i64, Vec<(i64, usize)>> = HashMap::new();
-    for (idx, e) in edges.iter().enumerate() {
-        adj.entry(e.from_node).or_default().push((e.to_node, idx));
-        if e.direction == "twoway" {
-            adj.entry(e.to_node).or_default().push((e.from_node, idx));
+    Ok(TaxiGraph::new(airport_ident, nodes, edges))
+}
+
+impl TaxiGraph {
+    /// A graph over `nodes` and `edges`, with adjacency honouring each
+    /// edge's direction.
+    pub fn new(
+        airport_ident: &str,
+        nodes: HashMap<i64, TaxiNode>,
+        edges: impl Into<Vec<TaxiEdge>>,
+    ) -> Self {
+        let edges = edges.into();
+        let mut adj: HashMap<i64, Vec<(i64, usize)>> = HashMap::new();
+        for (idx, e) in edges.iter().enumerate() {
+            adj.entry(e.from_node).or_default().push((e.to_node, idx));
+            if e.direction == "twoway" {
+                adj.entry(e.to_node).or_default().push((e.from_node, idx));
+            }
         }
+        Self { airport_ident: airport_ident.to_string(), nodes, edges, adj }
     }
-    Ok(TaxiGraph {
-        airport_ident: airport_ident.to_string(),
-        nodes,
-        edges,
-        adj,
-    })
 }
 
 /// Nearest node to `(lat, lon)` that is attached to at least one taxi edge.
@@ -175,6 +183,151 @@ pub fn nearest_node(graph: &TaxiGraph, lat: f64, lon: f64) -> Result<i64> {
     }
     best.map(|(id, _)| id)
         .ok_or_else(|| anyhow!("airport {} has no aircraft-taxiable nodes", graph.airport_ident))
+}
+
+/// A plan whose start node is already the destination has no legs, but
+/// the aircraft may still be some way from that node (e.g. rolling down
+/// the runway to the hold-short ahead). Give it a zero-length leg at the
+/// start node so the caller's lead-in from the aircraft has a target.
+pub fn ensure_start_leg(plan: &mut TaxiPlan, graph: &TaxiGraph) {
+    if !plan.legs.is_empty() {
+        return;
+    }
+    if let Some(n) = graph.nodes.get(&plan.start_node) {
+        plan.legs.push(TaxiLeg {
+            from_node: n.node_id,
+            to_node: n.node_id,
+            from_lat: n.latitude_deg,
+            from_lon: n.longitude_deg,
+            to_lat: n.latitude_deg,
+            to_lon: n.longitude_deg,
+            taxiway_name: String::new(),
+            distance_m: 0.0,
+            active_zones: String::new(),
+        });
+    }
+}
+
+/// Taxi start node for an aircraft at (`lat`, `lon`) heading
+/// `heading_deg`. On a runway (`on_runway`) the nearest node can be
+/// behind it, and reaching it would mean a backtaxi; prefer the nearest
+/// node ahead along its line of travel instead (within 60° of the
+/// heading and 40 m of the heading line — the runway's own nodes and
+/// turnoffs, not a parallel taxiway across the grass), so the aircraft
+/// rolls forward to the next turnoff. Elsewhere, the nearest.
+pub fn start_node(graph: &TaxiGraph, lat: f64, lon: f64, heading_deg: f64, on_runway: bool) -> Result<i64> {
+    const AHEAD_HALF_ANGLE_DEG: f64 = 60.0;
+    const MAX_LATERAL_M: f64 = 40.0;
+    if on_runway {
+        let ahead = graph
+            .adj
+            .iter()
+            .filter(|(_, neighbors)| !neighbors.is_empty())
+            .filter_map(|(id, _)| graph.nodes.get(id))
+            .filter_map(|n| {
+                let bearing = initial_bearing_deg(lat, lon, n.latitude_deg, n.longitude_deg);
+                let off = wrap_degrees_180(bearing - heading_deg);
+                let distance_m = haversine_m(lat, lon, n.latitude_deg, n.longitude_deg);
+                let lateral_m = distance_m * off.to_radians().sin().abs();
+                (off.abs() <= AHEAD_HALF_ANGLE_DEG && lateral_m <= MAX_LATERAL_M)
+                    .then_some((n.node_id, distance_m))
+            })
+            .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(Ordering::Equal));
+        if let Some((id, _)) = ahead {
+            return Ok(id);
+        }
+    }
+    nearest_node(graph, lat, lon)
+}
+
+/// Where a taxi starts: the aircraft's position and heading, or a
+/// planned point such as the end of a runway exit.
+#[derive(Debug, Clone, Copy)]
+pub struct TaxiStart {
+    pub lat: f64,
+    pub lon: f64,
+    pub heading_deg: f64,
+}
+
+/// What a taxi goes to.
+pub enum TaxiGoal<'a> {
+    Runway(TaxiDestination<'a>),
+    Parking(&'a str),
+}
+
+/// A planned taxi and what its start and goal resolved to.
+pub struct PlannedTaxi {
+    pub plan: TaxiPlan,
+    /// The start is on runway pavement.
+    pub on_runway: bool,
+    /// Runway goals: a point just inside the active zone past the chosen
+    /// hold-short, for orientation notes.
+    pub face_toward_latlon: Option<(f64, f64)>,
+    /// Parking goals: the resolved spot.
+    pub parking: Option<ParkingResolution>,
+}
+
+/// On a runway, a lead-in to the start node needing more than this much
+/// turn means the node is behind the aircraft: a backtaxi.
+const RUNWAY_MAX_LEAD_IN_TURN_DEG: f64 = 135.0;
+/// Lead-ins shorter than this are not checked (the aircraft is at the node).
+const LEAD_IN_MIN_FT: f64 = 20.0;
+
+/// The one taxi-planning pipeline behind every taxi tool, so previews
+/// and engages plan the same route. Picks the start node (on a runway,
+/// one ahead rather than a backtaxi), resolves the goal, plans with the
+/// via constraints and without running backward along a runway, and
+/// gives a plan that starts at its destination a start leg.
+pub fn plan_from(
+    conn: &Connection,
+    graph: &TaxiGraph,
+    start: TaxiStart,
+    goal: &TaxiGoal,
+    via_taxiways: &[String],
+) -> Result<PlannedTaxi> {
+    let airport = graph.airport_ident.as_str();
+    if graph.nodes.is_empty() {
+        bail!("airport {} has no taxi network in apt.dat", airport);
+    }
+    let on_runway = position_on_runway(conn, airport, start.lat, start.lon);
+    let start_id = start_node(graph, start.lat, start.lon, start.heading_deg, on_runway)?;
+    if on_runway {
+        let n = &graph.nodes[&start_id];
+        let lead_in_ft = haversine_m(start.lat, start.lon, n.latitude_deg, n.longitude_deg) * M_TO_FT;
+        let turn_deg = wrap_degrees_180(
+            initial_bearing_deg(start.lat, start.lon, n.latitude_deg, n.longitude_deg) - start.heading_deg,
+        )
+        .abs();
+        if lead_in_ft > LEAD_IN_MIN_FT && turn_deg > RUNWAY_MAX_LEAD_IN_TURN_DEG {
+            bail!(
+                "lead-in to the first taxi node would need a {:.0}° turn from heading {:.0}° on runway pavement (max {:.0}°): that's a backtaxi down the runway. Reposition before engaging",
+                turn_deg, start.heading_deg, RUNWAY_MAX_LEAD_IN_TURN_DEG
+            );
+        }
+    }
+    let (destination_nodes, forbidden_edges, hold_short, parking) = match goal {
+        TaxiGoal::Runway(spec) => {
+            let d = resolve_destination(conn, graph, airport, spec)?;
+            (d.all_node_ids(), d.forbidden_edges.clone(), Some(d), None)
+        }
+        TaxiGoal::Parking(name) => {
+            let r = resolve_parking_destination(conn, graph, airport, name)?;
+            (vec![r.nearest_node], HashSet::new(), None, Some(r))
+        }
+    };
+    let allowed: HashSet<&str> = via_taxiways.iter().map(String::as_str).collect();
+    let forbidden_directional = forbid_backward_runway_traversals(graph, start.heading_deg, &allowed);
+    let mut plan = plan(
+        graph,
+        start_id,
+        &destination_nodes,
+        via_taxiways,
+        &forbidden_edges,
+        &forbidden_directional,
+    )?;
+    ensure_start_leg(&mut plan, graph);
+    let face_toward_latlon = hold_short.and_then(|d| d.face_toward_for(plan.destination_node));
+    Ok(PlannedTaxi { plan, on_runway, face_toward_latlon, parking })
 }
 
 /// One valid stopping node for a runway hold-short. A full-length runway
@@ -716,10 +869,10 @@ fn point_to_segment_m(plat: f64, plon: f64, alat: f64, alon: f64, blat: f64, blo
 
 /// True when `(lat, lon)` lies on the paved footprint of any runway at
 /// the given airport — perpendicular distance to the centerline segment
-/// no greater than half the runway width. Used by the pullout check in
-/// `build_taxi_legs_with_pullout` to decide whether a big-turn lead-in
-/// risks a runway backtaxi (only possible when the aircraft is actually
-/// on a runway) versus an innocent ramp pirouette.
+/// no greater than half the runway width. `plan_from` uses it to decide
+/// whether a big-turn lead-in risks a runway backtaxi (only possible when
+/// the aircraft is actually on a runway) versus an innocent ramp
+/// pirouette.
 ///
 /// Returns `false` if the airport has no runways in the parquet view,
 /// or if the query errors. The caller treats that as "not on a runway"
@@ -1316,17 +1469,7 @@ mod tests {
             mk_taxiway_edge(2, 4, "C", "ils:31"),
             mk_taxiway_edge(4, 3, "D", ""),
         ];
-        let mut adj: HashMap<i64, Vec<(i64, usize)>> = HashMap::new();
-        for (i, e) in edges.iter().enumerate() {
-            adj.entry(e.from_node).or_default().push((e.to_node, i));
-            adj.entry(e.to_node).or_default().push((e.from_node, i));
-        }
-        TaxiGraph {
-            airport_ident: "KTEST".into(),
-            nodes,
-            edges,
-            adj,
-        }
+        TaxiGraph::new("KTEST", nodes, edges)
     }
 
     #[test]
@@ -1354,17 +1497,7 @@ mod tests {
             mk_taxiway_edge(29, 32, "A", ""),
             mk_runway_edge(66, 67, "09/27", active),
         ];
-        let mut adj: HashMap<i64, Vec<(i64, usize)>> = HashMap::new();
-        for (idx, edge) in edges.iter().enumerate() {
-            adj.entry(edge.from_node).or_default().push((edge.to_node, idx));
-            adj.entry(edge.to_node).or_default().push((edge.from_node, idx));
-        }
-        let graph = TaxiGraph {
-            airport_ident: "KTEST".into(),
-            nodes,
-            edges,
-            adj,
-        };
+        let graph = TaxiGraph::new("KTEST", nodes, edges);
 
         let exits = resolve_runway_exit_paths_in_graph(
             &graph,
@@ -1406,17 +1539,7 @@ mod tests {
             mk_taxiway_edge(21, 20, "A", active),
             mk_runway_edge(10, 20, "09/27", active),
         ];
-        let mut adj: HashMap<i64, Vec<(i64, usize)>> = HashMap::new();
-        for (idx, edge) in edges.iter().enumerate() {
-            adj.entry(edge.from_node).or_default().push((edge.to_node, idx));
-            adj.entry(edge.to_node).or_default().push((edge.from_node, idx));
-        }
-        let graph = TaxiGraph {
-            airport_ident: "KTEST".into(),
-            nodes,
-            edges,
-            adj,
-        };
+        let graph = TaxiGraph::new("KTEST", nodes, edges);
 
         let exits = runway_exit_paths(&graph, "09", (37.0, -122.01), (37.0, -121.99));
         let mut starts: Vec<(i64, i64)> = exits
@@ -1426,6 +1549,41 @@ mod tests {
         starts.sort();
         assert_eq!(starts, [(10, 11), (20, 21)]);
         assert!(exits.iter().all(|e| e.taxiway_name == "A"));
+    }
+
+    #[test]
+    fn start_node_on_runway_prefers_the_next_node_ahead() {
+        // Eastbound on the runway centerline, just past node 1 (30 m
+        // behind); node 2 is 150 m ahead.
+        let mk = |id, lat, lon| TaxiNode {
+            node_id: id,
+            latitude_deg: lat,
+            longitude_deg: lon,
+            usage: "both".to_string(),
+        };
+        let mut nodes = HashMap::new();
+        nodes.insert(1, mk(1, 37.0, -122.000338));
+        nodes.insert(2, mk(2, 37.0, -121.998313));
+        nodes.insert(3, mk(3, 37.003, -121.999));
+        let edges = vec![
+            mk_taxiway_edge(1, 3, "B", ""),
+            mk_taxiway_edge(2, 3, "C", ""),
+        ];
+        let graph = TaxiGraph::new("KTEST", nodes, edges);
+        let (lat, lon) = (37.0, -122.0);
+        assert_eq!(nearest_node(&graph, lat, lon).unwrap(), 1, "nearest is behind");
+        assert_eq!(start_node(&graph, lat, lon, 90.0, true).unwrap(), 2, "on runway: roll ahead");
+        assert_eq!(start_node(&graph, lat, lon, 90.0, false).unwrap(), 1, "off runway: nearest");
+
+        // A parallel-taxiway node off to the side, closer than node 2 and
+        // inside the 60° cone, must not win: that lead-in crosses grass.
+        let mut graph = graph;
+        graph.nodes.insert(4, mk(4, 37.0008, -121.9991));
+        graph.edges.push(mk_taxiway_edge(4, 3, "A", ""));
+        let idx = graph.edges.len() - 1;
+        graph.adj.entry(4).or_default().push((3, idx));
+        graph.adj.entry(3).or_default().push((4, idx));
+        assert_eq!(start_node(&graph, lat, lon, 90.0, true).unwrap(), 2, "parallel taxiway skipped");
     }
 
     #[test]
@@ -1482,17 +1640,7 @@ mod tests {
             mk_taxiway_edge(1, 2, "A", ""),
             mk_runway_edge(2, 3, "31/13", "departure:31,13;arrival:31,13"),
         ];
-        let mut adj: HashMap<i64, Vec<(i64, usize)>> = HashMap::new();
-        for (i, e) in edges.iter().enumerate() {
-            adj.entry(e.from_node).or_default().push((e.to_node, i));
-            adj.entry(e.to_node).or_default().push((e.from_node, i));
-        }
-        TaxiGraph {
-            airport_ident: "KHOLD".into(),
-            nodes,
-            edges,
-            adj,
-        }
+        TaxiGraph::new("KHOLD", nodes, edges)
     }
 
     #[test]
@@ -1551,17 +1699,7 @@ mod tests {
             mk_taxiway_edge(3, 4, "C", "departure:16L"), // west crossing (forbidden)
             mk_taxiway_edge(1, 4, "D", ""),       // clean, long detour
         ];
-        let mut adj: HashMap<i64, Vec<(i64, usize)>> = HashMap::new();
-        for (i, e) in edges.iter().enumerate() {
-            adj.entry(e.from_node).or_default().push((e.to_node, i));
-            adj.entry(e.to_node).or_default().push((e.from_node, i));
-        }
-        let g = TaxiGraph {
-            airport_ident: "KSYN".into(),
-            nodes,
-            edges,
-            adj,
-        };
+        let g = TaxiGraph::new("KSYN", nodes, edges);
         // Both node 2 and node 4 border forbidden edges with one clean
         // neighbour — both are valid hold-short candidates. Give both to
         // the planner and require it to pick node 2 (cheap) over node 4
@@ -1660,17 +1798,7 @@ mod tests {
             mk_taxiway_edge(0, 1, "A", "departure:12,30"),     // 3
             mk_taxiway_edge(3, 5, "B", "departure:12,30"),     // 4
         ];
-        let mut adj: HashMap<i64, Vec<(i64, usize)>> = HashMap::new();
-        for (i, e) in edges.iter().enumerate() {
-            adj.entry(e.from_node).or_default().push((e.to_node, i));
-            adj.entry(e.to_node).or_default().push((e.from_node, i));
-        }
-        let g = TaxiGraph {
-            airport_ident: "KTEST-rwy".into(),
-            nodes,
-            edges,
-            adj,
-        };
+        let g = TaxiGraph::new("KTEST-rwy", nodes, edges);
 
         // Shortest path from 2 to gate node 0: 2→1→0 via runway backward
         // (~10 m of runway) then taxi A. Without the directional forbid,

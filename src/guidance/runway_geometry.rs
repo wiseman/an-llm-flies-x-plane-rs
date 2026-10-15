@@ -20,6 +20,20 @@ impl RunwayFrame {
         heading_to_vector(self.runway.course_deg + 90.0, 1.0)
     }
 
+    /// Half the runway width plus `margin_ft`: past this lateral offset
+    /// the aircraft is off the runway.
+    pub fn half_width_plus_ft(&self, margin_ft: f64) -> f64 {
+        self.runway.width_ft * 0.5 + margin_ft
+    }
+
+    /// On the runway pavement, give or take `margin_ft` all round.
+    pub fn on_runway_surface(&self, position_ft: Vec2, margin_ft: f64) -> bool {
+        let p = self.to_runway_frame(position_ft);
+        p.x >= -margin_ft
+            && p.x <= self.runway.length_ft + margin_ft
+            && p.y.abs() <= self.half_width_plus_ft(margin_ft)
+    }
+
     pub fn to_runway_frame(&self, point_ft: Vec2) -> Vec2 {
         let delta = point_ft - self.runway.threshold_ft;
         Vec2::new(delta.dot(self.forward()), delta.dot(self.right()))
@@ -41,9 +55,7 @@ impl RunwayFrame {
     /// - `clamp(tdz/2, 500, length/3)`: the standard 1000 ft TDZ aim
     ///   (via `touchdown_zone_ft = 2000`), clamped for short runways.
     pub fn touchdown_runway_x_ft(&self) -> f64 {
-        let half_tdz = self.runway.touchdown_zone_ft * 0.5;
-        let aim_from_landing_threshold = half_tdz.max(500.0).min(self.runway.length_ft / 3.0);
-        self.runway.displaced_threshold_ft + aim_from_landing_threshold
+        self.runway.touchdown_x_ft()
     }
 
     pub fn touchdown_point_ft(&self) -> Vec2 {

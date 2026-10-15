@@ -118,3 +118,54 @@ fn high_radio_agl_suppresses_premature_field_agl_check() {
     assert!(!mon.evaluate(&state, FlightPhase::Final).request_go_around);
     assert_eq!(mon.risk_summary(&state, FlightPhase::Final).cte_band, CteBand::Safe);
 }
+
+#[test]
+fn still_airborne_with_too_little_runway_left_goes_around() {
+    let mon = monitor();
+    // Default fixture: 21000 ft runway → go around with < 1500 ft left.
+    assert_eq!(mon.long_landing_limit_x_ft(), 19_500.0);
+    let floating = |x: f64| {
+        state_with(|s| {
+            s.alt_agl_ft = 8.0;
+            s.runway_x_ft = Some(x);
+            s.runway_y_ft = Some(0.0);
+            s.centerline_error_ft = Some(0.0);
+            s.stall_margin = 1.4;
+            s.vs_fpm = -100.0;
+        })
+    };
+    assert!(!mon.evaluate(&floating(5000.0), FlightPhase::Flare).request_go_around);
+    let status = mon.evaluate(&floating(19_600.0), FlightPhase::Flare);
+    assert!(status.request_go_around);
+    assert!(status.reason.unwrap().contains("long_landing"));
+}
+
+#[test]
+fn long_landing_limit_stays_past_the_aim_point_on_short_runways() {
+    let mut cfg = load_default_config_bundle();
+    cfg.airport.runway.length_ft = 1500.0;
+    cfg.airport.runway.touchdown_zone_ft = 1200.0;
+    let mon = SafetyMonitor::new(cfg);
+    // Aim point is clamped to length/3 = 500; the limit can't sit on it.
+    assert_eq!(mon.long_landing_limit_x_ft(), 1000.0);
+}
+
+#[test]
+fn kwhp_landing_1900_ft_down_the_runway_is_not_a_go_around() {
+    // The live case: 4124 ft runway, still 9 ft up at x=1873 with ~2250 ft
+    // of runway ahead. Plenty to stop a C172.
+    let mut cfg = load_default_config_bundle();
+    cfg.airport.runway.length_ft = 4124.0;
+    cfg.airport.runway.touchdown_zone_ft = 1200.0;
+    let mon = SafetyMonitor::new(cfg);
+    assert_eq!(mon.long_landing_limit_x_ft(), 2624.0);
+    let state = state_with(|s| {
+        s.alt_agl_ft = 9.0;
+        s.runway_x_ft = Some(1873.0);
+        s.runway_y_ft = Some(0.0);
+        s.centerline_error_ft = Some(0.0);
+        s.stall_margin = 1.4;
+        s.vs_fpm = -150.0;
+    });
+    assert!(!mon.evaluate(&state, FlightPhase::Flare).request_go_around);
+}

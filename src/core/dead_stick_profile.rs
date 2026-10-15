@@ -22,14 +22,16 @@
 //! to the Low Key fix.
 
 use crate::config::ConfigBundle;
+use crate::core::landing_rollout::{touchdown_debounce, touchdown_handoff, LandingRolloutProfile};
 use crate::core::mode_manager::{
     ModeManager, ModeManagerUpdate, PatternClearances, PatternTriggers,
 };
 use crate::core::profiles::{
-    guidance_to_contribution, post_landing_handoff, AxisSet, GuidanceProfile, PatternMetadata,
-    ProfileTick, TransitionHint,
+    guidance_to_contribution, AxisSet, GuidanceProfile, PatternMetadata, ProfileTick,
+    TransitionHint,
 };
 use crate::core::safety_monitor::SafetyMonitor;
+use crate::core::spatial::{LabeledLeg, SpatialOverlay};
 use crate::guidance::lateral::L1PathFollower;
 use crate::guidance::pattern_manager::{
     build_pattern_geometry, PatternGeometry,
@@ -97,17 +99,13 @@ const SPIRAL_EXIT_AGL_BUFFER_FT: f64 = 600.0;
 /// out on the centerline rather than overshooting it.
 pub const DEAD_STICK_PATTERN_OFFSET_FT: f64 = 2500.0;
 
-/// Final-approach AGL below which we deploy full flaps (vs 20° above).
-/// Higher than the powered-pattern value: dead-stick needs the full
-/// flap drag for most of Final to fit the altitude budget.
-const LATE_FLAP_AGL_FT: f64 = 700.0;
-
 /// Final-approach AGL at which the speed target steps from vbg to vref.
 /// Above this we keep best glide so the runway stays reachable; below
 /// it the field is made and we can trade speed for touchdown attitude.
 const SHORT_FINAL_AGL_FT: f64 = 300.0;
 
 const BASE_LEG_FRACTION_GATE: f64 = 0.5;
+
 
 pub struct DeadStickLandingProfile {
     pub config: ConfigBundle,
@@ -119,6 +117,10 @@ pub struct DeadStickLandingProfile {
     pub route_manager: RouteManager,
     pub phase: FlightPhase,
     pub last_safety_reason: Option<String>,
+    /// Continuous ground contact since touchdown (debounces the hand-off).
+    ground_contact_s: f64,
+    /// Highest flap setting commanded so far on base/final.
+    flaps_committed: i32,
     /// Runway-frame coords of the Low Key fix (abeam touchdown on the
     /// pattern side). Cached for `low_key_runway_ft()`.
     low_key_runway_ft: Vec2,
@@ -220,6 +222,8 @@ impl DeadStickLandingProfile {
             route_manager,
             phase,
             last_safety_reason: None,
+            ground_contact_s: 0.0,
+            flaps_committed: 0,
             low_key_runway_ft,
             low_key_world_ft,
             spiral_center_world_ft,
@@ -228,6 +232,38 @@ impl DeadStickLandingProfile {
             config,
             runway_frame,
         }
+    }
+
+    /// Glide ratio needed to reach the aim point from here: the remaining
+    /// path over height. `via_base` measures the base + final dogleg
+    /// (downwind and base); otherwise straight to the aim point (final).
+    fn needed_glide_ratio(&self, state: &AircraftState, via_base: bool) -> f64 {
+        let aim_x = self.runway_frame.touchdown_runway_x_ft();
+        let rx = state.runway_x_ft.unwrap_or(aim_x);
+        let y = state.runway_y_ft.unwrap_or(0.0).abs();
+        let path_ft = if via_base { y + (aim_x - rx).max(0.0) } else { (aim_x - rx).hypot(y) };
+        path_ft / state.landing_agl_ft().max(1.0)
+    }
+
+    /// Flaps for the glide still needed on base or final: the committed
+    /// path (base + final from here on base, straight to the aim point on
+    /// final) over height. Once out, flaps stay out — no retracting or
+    /// toggling between settings near a threshold. Downwind stays clean:
+    /// there the base-turn rule manages energy by extending the leg.
+    fn energy_flaps(&mut self, state: &AircraftState, phase: FlightPhase) -> i32 {
+        let needed_ratio = self.needed_glide_ratio(state, phase == FlightPhase::Base);
+        // Flaps only come out once there's glide to spare: the power-off
+        // rule of "flaps when the runway is made".
+        let flaps = self
+            .config
+            .dead_stick
+            .flap_glide_ratio_steps
+            .iter()
+            .find(|(ratio, _)| needed_ratio > *ratio)
+            .map(|(_, flaps)| *flaps)
+            .unwrap_or(30);
+        self.flaps_committed = self.flaps_committed.max(flaps);
+        self.flaps_committed
     }
 
     fn guidance_for_phase(&mut self, state: &AircraftState, phase: FlightPhase) -> GuidanceTargets {
@@ -340,7 +376,7 @@ impl DeadStickLandingProfile {
                     target_path: Some(leg),
                     target_speed_kt: Some(perf.vbg_kt),
                     throttle_limit: Some((0.0, 0.0)),
-                    flaps_cmd: Some(10),
+                    flaps_cmd: Some(self.energy_flaps(state, FlightPhase::Base)),
                     ..Default::default()
                 }
             }
@@ -363,7 +399,7 @@ impl DeadStickLandingProfile {
                 } else {
                     perf.vbg_kt
                 };
-                let flaps = if state.alt_agl_ft > LATE_FLAP_AGL_FT { 20 } else { 30 };
+                let flaps = self.energy_flaps(state, FlightPhase::Final);
                 GuidanceTargets {
                     lateral_mode: LateralMode::PathFollow,
                     vertical_mode: VerticalMode::PitchForAirspeed,
@@ -418,26 +454,6 @@ impl DeadStickLandingProfile {
                     ..Default::default()
                 }
             }
-            FlightPhase::Rollout | FlightPhase::RunwayExit => GuidanceTargets {
-                lateral_mode: LateralMode::RolloutCenterline,
-                vertical_mode: VerticalMode::PitchHold,
-                target_bank_deg: Some(0.0),
-                target_heading_deg: Some(course),
-                target_pitch_deg: Some(0.0),
-                throttle_limit: Some((0.0, 0.0)),
-                brakes: 0.75,
-                ..Default::default()
-            },
-            FlightPhase::TaxiClear => GuidanceTargets {
-                lateral_mode: LateralMode::RolloutCenterline,
-                vertical_mode: VerticalMode::PitchHold,
-                target_bank_deg: Some(0.0),
-                target_heading_deg: Some(course),
-                target_pitch_deg: Some(0.0),
-                throttle_limit: Some((0.0, 0.0)),
-                brakes: 0.75,
-                ..Default::default()
-            },
             _ => {
                 // Phases the dead-stick profile shouldn't enter — Preflight,
                 // TakeoffRoll, Rotate, InitialClimb, Crosswind, EnrouteClimb,
@@ -502,9 +518,7 @@ impl GuidanceProfile for DeadStickLandingProfile {
         AxisSet::ALL
     }
 
-    fn contribute(&mut self, state: &AircraftState, _dt: f64) -> ProfileTick {
-        let previous_phase = self.phase;
-
+    fn contribute(&mut self, state: &AircraftState, dt: f64) -> ProfileTick {
         // Suppress go-around: powerless aircraft can't climb. Stash
         // the reason for telemetry; zero the request.
         let mut safety = self.safety_monitor.evaluate(state, self.phase);
@@ -539,8 +553,19 @@ impl GuidanceProfile for DeadStickLandingProfile {
             // Gate the turns ourselves on the geometry trigger.
             let mut clearances = PatternClearances::default();
             let rx = state.runway_x_ft.unwrap_or(0.0);
-            // Base turn: physically past the nominal base-turn x.
-            if rx > self.pattern.base_turn_x_ft {
+            // Base turn by energy, as in a power-off 180: every foot of
+            // downwind past the threshold has to be glided back, so keep
+            // going while high and turn once the base + final distance
+            // needs a glide ratio of `dead_stick.base_turn_glide_ratio`. That extends
+            // the downwind when high and turns early when low. Never
+            // before leaving a minimum final, and never farther out than
+            // `max_downwind_extension_ft` past the nominal base turn.
+            let aim_x = self.runway_frame.touchdown_runway_x_ft();
+            let ds = &self.config.dead_stick;
+            let energy_says_turn = self.needed_glide_ratio(state, true) >= ds.base_turn_glide_ratio;
+            let room_for_final = rx < aim_x - ds.min_final_ft;
+            let extension_limit = rx < self.pattern.base_turn_x_ft - ds.max_downwind_extension_ft;
+            if !((room_for_final && energy_says_turn) || extension_limit) {
                 clearances.turn_base = false;
             }
             // Final turn: only allow when established on final or
@@ -574,18 +599,39 @@ impl GuidanceProfile for DeadStickLandingProfile {
             });
         }
 
+        // Touchdown: hand the ground roll to LandingRolloutProfile, with
+        // the throttle locked closed and no exit taxiing.
+        self.phase = touchdown_debounce(self.phase, state.on_ground, dt, &mut self.ground_contact_s);
+        if self.phase == FlightPhase::Rollout {
+            let rollout = LandingRolloutProfile::new(
+                self.config.clone(),
+                self.runway_frame.clone(),
+                None,
+            )
+            .without_power()
+            .with_go_around_reason(self.last_safety_reason.clone());
+            return touchdown_handoff(rollout, state, dt);
+        }
+
         let guidance = self.guidance_for_phase(state, self.phase);
         let mut guidance = self.safety_monitor.apply_limits(guidance, self.phase);
         // Belt-and-suspenders: every guidance branch already sets this,
         // but a missing throttle clamp here would re-enable the engine.
         guidance.throttle_limit = Some((0.0, 0.0));
 
-        let hand_off = post_landing_handoff(self.phase, previous_phase, state.gs_kt);
-
         ProfileTick {
             contribution: guidance_to_contribution(guidance),
-            hand_off,
+            hand_off: None,
         }
+    }
+
+    fn spatial_overlay(&self) -> Option<SpatialOverlay> {
+        Some(SpatialOverlay {
+            runway: Some(self.runway_frame.runway.clone()),
+            pattern_legs: vec![LabeledLeg::new("FINAL", self.pattern.final_leg)],
+            active_pattern_leg: (self.phase == FlightPhase::Final).then_some(0),
+            ..Default::default()
+        })
     }
 
     fn pattern_metadata(&self) -> Option<PatternMetadata> {
@@ -675,16 +721,6 @@ impl GuidanceProfile for DeadStickLandingProfile {
             FlightPhase::Flare => Some(TransitionHint {
                 next_phase: FlightPhase::Rollout,
                 condition_text: "wheels on the ground".to_string(),
-                eta_s: None,
-            }),
-            FlightPhase::Rollout => Some(TransitionHint {
-                next_phase: FlightPhase::RunwayExit,
-                condition_text: "off centerline (>75 ft) or stopped past end".to_string(),
-                eta_s: None,
-            }),
-            FlightPhase::RunwayExit => Some(TransitionHint {
-                next_phase: FlightPhase::TaxiClear,
-                condition_text: "stopped, off runway".to_string(),
                 eta_s: None,
             }),
             _ => None,

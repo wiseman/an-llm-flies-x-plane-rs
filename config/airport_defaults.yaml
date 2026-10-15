@@ -7,6 +7,7 @@ runway:
   threshold_y_ft: 0
   length_ft: 21000
   touchdown_zone_ft: 2000
+  width_ft: 150
   traffic_side: left
 mission:
   entry_start_runway_x_ft: 7200

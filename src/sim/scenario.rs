@@ -65,7 +65,9 @@ impl ScenarioRunner {
         let model = SimpleAircraftModel::new(self.config.clone(), self.wind_vector_kt);
         let mut pilot = PilotCore::new(self.config.clone());
         let runway_frame = RunwayFrame::new(self.config.airport.runway.clone());
-        pilot.engage_profile(Box::new(PatternFlyProfile::new(self.config.clone(), runway_frame.clone())));
+        pilot
+            .engage_profile(Box::new(PatternFlyProfile::new(self.config.clone(), runway_frame.clone())))
+            .expect("fresh pilot has only idle profiles");
         let mut raw_state = model.initial_state();
 
         let mut history: Vec<ScenarioLogRow> = Vec::new();
@@ -131,9 +133,13 @@ impl ScenarioRunner {
         }
 
         let final_phase = pilot.phase();
-        let runway_length = self.config.airport.runway.length_ft;
+        // Touch down within 1000 ft past the aim point (never before the
+        // threshold, never past the first third).
+        let runway = &self.config.airport.runway;
+        let aim_x = runway.touchdown_x_ft();
+        let zone_end_x = (aim_x + 1000.0).min(runway.length_ft / 3.0).max(aim_x + 200.0);
         let touchdown_in_zone = touchdown_runway_x_ft
-            .map(|x| (0.0..=runway_length / 3.0).contains(&x))
+            .map(|x| (runway.displaced_threshold_ft..=zone_end_x).contains(&x))
             .unwrap_or(false);
         let centerline_ok = touchdown_centerline_ft
             .map(|y| y.abs() < 20.0)

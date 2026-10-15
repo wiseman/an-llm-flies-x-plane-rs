@@ -21,31 +21,21 @@ fn extend_downwind_rebuilds_pattern_geometry() {
     let cfg = load_default_config_bundle();
     let mut pilot = PilotCore::new(cfg.clone());
     let rf = pilot.runway_frame.clone();
-    pilot.engage_profile(Box::new(PatternFlyProfile::new(cfg, rf)));
-    let original_ext = pilot.find_profile_mut("pattern_fly", |p| {
-        let ptr = p as *mut dyn xplane_pilot::core::profiles::GuidanceProfile as *mut u8;
-        let concrete = ptr as *mut PatternFlyProfile;
-        unsafe { (*concrete).pattern.extension_ft }
-    }).unwrap();
-    let original_base = pilot.find_profile_mut("pattern_fly", |p| {
-        let ptr = p as *mut dyn xplane_pilot::core::profiles::GuidanceProfile as *mut u8;
-        let concrete = ptr as *mut PatternFlyProfile;
-        unsafe { (*concrete).pattern.base_turn_x_ft }
-    }).unwrap();
-    pilot.find_profile_mut("pattern_fly", |p| {
-        let ptr = p as *mut dyn xplane_pilot::core::profiles::GuidanceProfile as *mut u8;
-        let concrete = ptr as *mut PatternFlyProfile;
-        unsafe {
-            (*concrete)
-                .extend_leg(PatternLeg::Downwind, 2400.0, ExtendMode::Add)
-                .unwrap()
-        }
-    });
-    let (new_ext, new_base) = pilot.find_profile_mut("pattern_fly", |p| {
-        let ptr = p as *mut dyn xplane_pilot::core::profiles::GuidanceProfile as *mut u8;
-        let concrete = ptr as *mut PatternFlyProfile;
-        unsafe { ((*concrete).pattern.extension_ft, (*concrete).pattern.base_turn_x_ft) }
-    }).unwrap();
+    pilot.engage_profile(Box::new(PatternFlyProfile::new(cfg, rf))).unwrap();
+    let original_ext = pilot
+        .profile_mut::<PatternFlyProfile>().map(|p| p.pattern.extension_ft)
+        .unwrap();
+    let original_base = pilot
+        .profile_mut::<PatternFlyProfile>().map(|p| p.pattern.base_turn_x_ft)
+        .unwrap();
+    pilot
+        .profile_mut::<PatternFlyProfile>().map(|p| {
+            p.extend_leg(PatternLeg::Downwind, 2400.0, ExtendMode::Add).unwrap()
+        })
+        .unwrap();
+    let (new_ext, new_base) = pilot
+        .profile_mut::<PatternFlyProfile>().map(|p| (p.pattern.extension_ft, p.pattern.base_turn_x_ft))
+        .unwrap();
     assert_abs_diff_eq!(new_ext, original_ext + 2400.0, epsilon = 1e-6);
     assert!(new_base < original_base);
 }

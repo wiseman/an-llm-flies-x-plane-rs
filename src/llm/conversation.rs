@@ -18,9 +18,10 @@ use crossbeam_channel::Receiver;
 
 use crate::bus::{LogKind, SimBus};
 use crate::llm::backend::{
-    LlmBackend, LlmRequest, LlmResponse, Message, Part, ReasoningEffort, Role,
+    CacheSnapshot, LlmBackend, LlmRequest, LlmResponse, LlmUsage, Message, Part, ReasoningEffort,
+    Role,
 };
-use crate::llm::tools::{dispatch_tool, tool_schemas, ToolContext};
+use crate::llm::tools::{dispatch_tool, tool_schemas, ToolContext, ToolResult};
 
 // system_prompt.md is pinned as message 0 and is the prompt-cache anchor for
 // every turn — its bytes must stay stable mid-session. Per-session data (tail
@@ -234,10 +235,7 @@ impl Conversation {
     /// than as a second system block that would invalidate the
     /// system-side cache entry on every profile change.
     pub fn build_input(&self, active_profiles_summary: &str) -> Vec<Message> {
-        let summary_text = format!(
-            "Active profiles: {}",
-            if active_profiles_summary.is_empty() { "(none)" } else { active_profiles_summary }
-        );
+        let summary_text = active_profiles_line(active_profiles_summary);
         let mut out = Vec::with_capacity(self.pinned.len() + self.rotating.len() + 1);
         out.extend(self.pinned.iter().cloned());
         out.extend(self.rotating.iter().cloned());
@@ -300,22 +298,12 @@ pub fn run_conversation_loop(
         LogKind::Mode,
         &format!("pilot mode: {}", initial_mode.label()),
     );
-    while !stop.load(Ordering::Acquire) {
-        let message = match input_queue.recv_timeout(Duration::from_millis(500)) {
-            Ok(m) => m,
-            Err(crossbeam_channel::RecvTimeoutError::Timeout) => continue,
-            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => return,
-        };
-        // Gate llm_busy for the whole handle_message window (tool
-        // dispatch + inner tool-call loop), not just the HTTP round-
-        // trip — the eval harness's SimClock only advances while idle,
-        // so `sleep(N)` stays anchored to sim time.
-        let _busy = LlmBusyGuard::new(bus);
+    for_each_incoming(input_queue, tool_context, &stop, bus, |message| {
         if let Err(e) = handle_message(
             &mut conv,
             client,
             tool_context,
-            &message,
+            message,
             per_request_timeout_s,
             total_wall_budget_s,
             reasoning_effort,
@@ -328,7 +316,95 @@ pub fn run_conversation_loop(
                 &format!("[llm-worker] error handling message: {:?}", e),
             );
         }
+    });
+}
+
+/// The receive loop both pilot brains share: wait for input, take it with
+/// everything else already queued (`coalesce_queued`), and hand each
+/// message to `handle` while marked busy. Busy covers the whole handling,
+/// tool calls included: the eval harness's SimClock only advances while
+/// idle, so `sleep(N)` stays anchored to sim time. Returns when `stop` is
+/// set or the queue closes.
+pub(crate) fn for_each_incoming(
+    input_queue: &Receiver<IncomingMessage>,
+    tool_context: &ToolContext,
+    stop: &AtomicBool,
+    bus: Option<&SimBus>,
+    mut handle: impl FnMut(&IncomingMessage),
+) {
+    while !stop.load(Ordering::Acquire) {
+        let first = match input_queue.recv_timeout(Duration::from_millis(500)) {
+            Ok(m) => m,
+            Err(crossbeam_channel::RecvTimeoutError::Timeout) => continue,
+            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => return,
+        };
+        let _busy = LlmBusyGuard::new(bus);
+        for message in coalesce_queued(first, input_queue, tool_context) {
+            if stop.load(Ordering::Acquire) {
+                return;
+            }
+            handle(&message);
+        }
     }
+}
+
+/// `first` plus everything else already waiting, with all queued
+/// heartbeats merged into one that comes after the other messages.
+/// Heartbeats pile up while the LLM is busy on a long turn; replaying
+/// each would walk it through a series of stale snapshots. The heartbeat
+/// keeps every reason (so no phase change or completion is lost) and gets
+/// the status attached now, at delivery, so it's never stale.
+pub fn coalesce_queued(
+    first: IncomingMessage,
+    input_queue: &Receiver<IncomingMessage>,
+    tool_context: &ToolContext,
+) -> Vec<IncomingMessage> {
+    let mut queued = vec![first];
+    queued.extend(input_queue.try_iter());
+    let (heartbeats, mut out): (Vec<_>, Vec<_>) = queued
+        .into_iter()
+        .partition(|m| m.source == IncomingSource::Heartbeat);
+    if !heartbeats.is_empty() {
+        let mut reasons: Vec<&str> = Vec::new();
+        for hb in &heartbeats {
+            let reason = hb.text.trim();
+            if !reason.is_empty() && !reasons.contains(&reason) {
+                reasons.push(reason);
+            }
+        }
+        let merged = match heartbeats.len() {
+            1 => String::new(),
+            n => format!(" (merged {n} queued heartbeats)"),
+        };
+        let status = crate::llm::tools::tool_get_status(tool_context, &serde_json::Map::new());
+        out.push(IncomingMessage::heartbeat(format!(
+            "{}{merged} | status={status}",
+            reasons.join("; ")
+        )));
+    }
+    out
+}
+
+/// The `Active profiles: …` line appended to each LLM turn.
+pub(crate) fn active_profiles_line(summary: &str) -> String {
+    format!("Active profiles: {}", if summary.is_empty() { "(none)" } else { summary })
+}
+
+/// The `tokens …` log line (`sim-pilot-transcript` parses it). `extra`
+/// goes between the per-call counts and the session totals.
+pub(crate) fn usage_log_line(u: &LlmUsage, extra: &str, s: &CacheSnapshot) -> String {
+    format!(
+        "tokens in={} (cached={} written={}) out={}{extra} | session in={} (cached={} written={}) out={} calls={}",
+        u.input_tokens,
+        u.cached_tokens,
+        u.cache_creation_tokens,
+        u.output_tokens,
+        s.total_input_tokens,
+        s.total_cached_tokens,
+        s.total_cache_creation_tokens,
+        s.total_output_tokens,
+        s.total_requests,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -343,30 +419,14 @@ fn handle_message(
     bus: Option<&SimBus>,
     stop: &AtomicBool,
 ) -> anyhow::Result<()> {
+    announce_incoming(message, bus);
     match &message.source {
         IncomingSource::Operator => conv.append_operator_message(&message.text),
-        IncomingSource::System => {
-            conv.append_system_message(&message.text);
-            emit_log_kind(bus, LogKind::System, &message.text);
-        }
-        IncomingSource::Heartbeat => {
-            conv.append_heartbeat_message(&message.text);
-            emit_log_kind(bus, LogKind::Heartbeat, &message.text);
-        }
-        IncomingSource::Atc => {
-            conv.append_atc_message(&message.text);
-            emit_radio(bus, &format!("[atc] {}", message.text));
-        }
+        IncomingSource::System => conv.append_system_message(&message.text),
+        IncomingSource::Heartbeat => conv.append_heartbeat_message(&message.text),
+        IncomingSource::Atc => conv.append_atc_message(&message.text),
         IncomingSource::ModeSwitch(mode) => {
             conv.append_mode_switch_message(mode.runtime_overlay());
-            emit_log_kind(
-                bus,
-                LogKind::Mode,
-                &format!(
-                    "pilot mode switched to {} (overlay injected as user message)",
-                    mode.label()
-                ),
-            );
             return Ok(());
         }
     }
@@ -426,20 +486,10 @@ fn handle_message(
                 );
                 continue;
             }
-            let result = dispatch_tool(&name, &arguments, tool_context);
-            if let Some(counters) = tool_context.tool_counters.as_ref() {
-                counters.record(&name, result.ok);
-            }
-            // Both tools end the current turn — sleep yields to
-            // profiles, mission_complete signals eval shutdown.
-            if name == "sleep" || name == "mission_complete" {
+            let result = execute_tool_call(&name, &arguments, tool_context, bus);
+            if ends_turn(&name) {
                 slept = true;
             }
-            emit_log_kind(
-                bus,
-                LogKind::ToolCall,
-                &format!("tool {} -> {}", name, result.output),
-            );
             conv.append_tool_result(&call_id, &result.output)?;
         }
         if slept {
@@ -448,16 +498,59 @@ fn handle_message(
     }
 }
 
+/// Log/echo an incoming message the way the operator sees it: ATC on the
+/// radio pane, heartbeats and system notes in the log, mode switches as
+/// a mode line. Operator text is echoed by whoever queued it.
+pub(crate) fn announce_incoming(message: &IncomingMessage, bus: Option<&SimBus>) {
+    match &message.source {
+        IncomingSource::Operator => {}
+        IncomingSource::System => emit_log_kind(bus, LogKind::System, &message.text),
+        IncomingSource::Heartbeat => emit_log_kind(bus, LogKind::Heartbeat, &message.text),
+        IncomingSource::Atc => emit_radio(bus, &format!("[atc] {}", message.text)),
+        IncomingSource::ModeSwitch(mode) => emit_log_kind(
+            bus,
+            LogKind::Mode,
+            &format!(
+                "pilot mode switched to {} (overlay injected as user message)",
+                mode.label()
+            ),
+        ),
+    }
+}
+
+/// Tools after which the pilot should end its turn: `sleep` yields to
+/// the profiles, `mission_complete` signals eval shutdown.
+pub(crate) fn ends_turn(tool_name: &str) -> bool {
+    tool_name == "sleep" || tool_name == "mission_complete"
+}
+
+/// Run one tool call for the LLM: dispatch it, count it, and log it as
+/// `tool NAME -> RESULT` (the line `sim-pilot-transcript` parses).
+/// Shared by the API tool loop and the Claude Code MCP server.
+pub(crate) fn execute_tool_call(
+    name: &str,
+    arguments: &str,
+    tool_context: &ToolContext,
+    bus: Option<&SimBus>,
+) -> ToolResult {
+    let result = dispatch_tool(name, arguments, tool_context);
+    if let Some(counters) = tool_context.tool_counters.as_ref() {
+        counters.record(name, result.ok);
+    }
+    emit_log_kind(bus, LogKind::ToolCall, &format!("tool {} -> {}", name, result.output));
+    result
+}
+
 /// Flips the bus `llm_busy` flag on for as long as this guard lives and
 /// clears it on drop — including when `?` unwinds through the HTTP
 /// call. The TUI polls the flag every frame to animate the waiting
-/// spinner.
-struct LlmBusyGuard<'a> {
+/// spinner, and the eval harness freezes sim time while it's set.
+pub(crate) struct LlmBusyGuard<'a> {
     bus: Option<&'a SimBus>,
 }
 
 impl<'a> LlmBusyGuard<'a> {
-    fn new(bus: Option<&'a SimBus>) -> Self {
+    pub(crate) fn new(bus: Option<&'a SimBus>) -> Self {
         if let Some(b) = bus {
             b.set_llm_busy(true);
         }
@@ -473,7 +566,7 @@ impl Drop for LlmBusyGuard<'_> {
     }
 }
 
-fn emit_log_kind(bus: Option<&SimBus>, kind: LogKind, text: &str) {
+pub(crate) fn emit_log_kind(bus: Option<&SimBus>, kind: LogKind, text: &str) {
     match bus {
         Some(b) => b.push_log_kind(kind, text),
         None => {
@@ -506,26 +599,10 @@ fn log_usage(response: &LlmResponse, client: &dyn LlmBackend, bus: Option<&SimBu
     if u.input_tokens == 0 && u.output_tokens == 0 && u.cached_tokens == 0 {
         return;
     }
-    let s = client.cache_snapshot();
-    emit_log_kind(
-        bus,
-        LogKind::Tokens,
-        &format!(
-            "tokens in={} (cached={} written={}) out={} | session in={} (cached={} written={}) out={} calls={}",
-            u.input_tokens,
-            u.cached_tokens,
-            u.cache_creation_tokens,
-            u.output_tokens,
-            s.total_input_tokens,
-            s.total_cached_tokens,
-            s.total_cache_creation_tokens,
-            s.total_output_tokens,
-            s.total_requests,
-        ),
-    );
+    emit_log_kind(bus, LogKind::Tokens, &usage_log_line(u, "", &client.cache_snapshot()));
 }
 
-fn emit_text_lines<'a, I>(bus: Option<&SimBus>, kind: LogKind, lines: I)
+pub(crate) fn emit_text_lines<'a, I>(bus: Option<&SimBus>, kind: LogKind, lines: I)
 where
     I: IntoIterator<Item = &'a str>,
 {
@@ -546,4 +623,38 @@ fn emit_assistant_text(output: &[Part], bus: Option<&SimBus>) {
         _ => None,
     });
     emit_text_lines(bus, LogKind::Llm, texts);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn queued_heartbeats_merge_into_one_fresh_heartbeat_after_other_messages() {
+        use crate::config::load_default_config_bundle;
+        use crate::core::mission_manager::PilotCore;
+        let cfg = load_default_config_bundle();
+        let ctx = ToolContext::new(Arc::new(parking_lot::Mutex::new(PilotCore::new(cfg.clone()))), cfg);
+        let (tx, rx) = crossbeam_channel::unbounded();
+        tx.send(IncomingMessage::heartbeat("phase changed: final -> roundout")).unwrap();
+        tx.send(IncomingMessage::operator("how's it going?")).unwrap();
+        tx.send(IncomingMessage::heartbeat("completed: taxi")).unwrap();
+        let first = IncomingMessage::heartbeat("periodic check-in");
+        let out = coalesce_queued(first, &rx, &ctx);
+        assert_eq!(out.len(), 2, "{out:?}");
+        assert_eq!(out[0].source, IncomingSource::Operator);
+        let hb = &out[1];
+        assert_eq!(hb.source, IncomingSource::Heartbeat);
+        assert!(
+            hb.text.starts_with("periodic check-in; phase changed: final -> roundout; completed: taxi (merged 3 queued heartbeats) | status={"),
+            "{}",
+            hb.text
+        );
+        assert!(rx.try_recv().is_err(), "queue drained");
+
+        // A lone heartbeat gets its status attached at delivery too.
+        let lone = coalesce_queued(IncomingMessage::heartbeat("x"), &rx, &ctx);
+        assert_eq!(lone.len(), 1);
+        assert!(lone[0].text.starts_with("x | status={"), "{}", lone[0].text);
+    }
 }

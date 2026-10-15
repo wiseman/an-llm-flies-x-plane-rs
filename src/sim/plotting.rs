@@ -383,7 +383,7 @@ fn build_ground_path_svg(result: &ScenarioResult, config: &ConfigBundle, scenari
 
     let runway_frame = RunwayFrame::new(config.airport.runway.clone());
     let runway_length_ft = config.airport.runway.length_ft;
-    let runway_half_width_ft = 75.0;
+    let runway_half_width_ft = config.airport.runway.width_ft * 0.5;
     let touchdown_zone_end_ft = config.airport.runway.touchdown_zone_ft.min(runway_length_ft / 3.0);
 
     let runway_polygon_world: Vec<Vec2> = [

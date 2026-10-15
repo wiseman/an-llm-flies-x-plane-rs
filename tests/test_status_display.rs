@@ -167,9 +167,9 @@ fn shows_ground_vs_airborne() {
 fn live_pilot_update_wires_guidance_into_snapshot() {
     let cfg = load_default_config_bundle();
     let mut pilot = PilotCore::new(cfg.clone());
-    pilot.engage_profile(Box::new(HeadingHoldProfile::new(270.0, 25.0, None).unwrap()));
-    pilot.engage_profile(Box::new(AltitudeHoldProfile::new(3000.0)));
-    pilot.engage_profile(Box::new(SpeedHoldProfile::new(90.0)));
+    pilot.engage_profile(Box::new(HeadingHoldProfile::new(270.0, 25.0, None).unwrap())).unwrap();
+    pilot.engage_profile(Box::new(AltitudeHoldProfile::new(3000.0))).unwrap();
+    pilot.engage_profile(Box::new(SpeedHoldProfile::new(90.0))).unwrap();
     let model = SimpleAircraftModel::new(cfg, Vec2::ZERO);
     let raw = model.initial_state();
     pilot.update(&raw, 0.2);

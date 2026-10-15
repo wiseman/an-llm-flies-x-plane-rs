@@ -7,7 +7,7 @@ use xplane_pilot::config::load_default_config_bundle;
 use xplane_pilot::core::mission_manager::PilotCore;
 use xplane_pilot::core::profiles::{
     build_rotate_guidance, build_takeoff_roll_guidance, AltitudeHoldProfile, ExtendMode,
-    GuidanceProfile, HeadingHoldProfile, PatternFlyProfile, PatternLeg, RunwayExitPlan,
+    GuidanceProfile, HeadingHoldProfile, PatternFlyProfile, PatternLeg,
     SpeedHoldProfile, TakeoffProfile, TaxiProfile,
 };
 use xplane_pilot::guidance::pattern_manager::glidepath_target_altitude_ft_default;
@@ -37,7 +37,7 @@ fn engaging_heading_hold_displaces_idle_lateral_only() {
     let (_, mut pilot) = make_pilot();
     let displaced = pilot.engage_profile(Box::new(
         HeadingHoldProfile::new(270.0, 25.0, None).unwrap(),
-    ));
+    )).unwrap();
     assert_eq!(displaced, vec!["idle_lateral"]);
     let names: BTreeSet<String> = pilot.list_profile_names().into_iter().collect();
     let expected: BTreeSet<String> =
@@ -49,7 +49,7 @@ fn engaging_heading_hold_displaces_idle_lateral_only() {
 fn engaging_pattern_fly_displaces_all_three_idle_profiles() {
     let (cfg, mut pilot) = make_pilot();
     let rf = pilot.runway_frame.clone();
-    let displaced = pilot.engage_profile(Box::new(PatternFlyProfile::new(cfg, rf)));
+    let displaced = pilot.engage_profile(Box::new(PatternFlyProfile::new(cfg, rf))).unwrap();
     let displaced_set: BTreeSet<String> = displaced.into_iter().collect();
     let expected: BTreeSet<String> =
         ["idle_lateral", "idle_vertical", "idle_speed"].iter().map(|s| s.to_string()).collect();
@@ -61,8 +61,8 @@ fn engaging_pattern_fly_displaces_all_three_idle_profiles() {
 fn disengage_pattern_fly_readds_three_idle_profiles() {
     let (cfg, mut pilot) = make_pilot();
     let rf = pilot.runway_frame.clone();
-    pilot.engage_profile(Box::new(PatternFlyProfile::new(cfg, rf)));
-    let added: BTreeSet<String> = pilot.disengage_profile("pattern_fly").into_iter().collect();
+    pilot.engage_profile(Box::new(PatternFlyProfile::new(cfg, rf))).unwrap();
+    let added: BTreeSet<String> = pilot.disengage_profile("pattern_fly").unwrap().into_iter().collect();
     let expected: BTreeSet<String> =
         ["idle_lateral", "idle_vertical", "idle_speed"].iter().map(|s| s.to_string()).collect();
     assert_eq!(added, expected);
@@ -71,14 +71,14 @@ fn disengage_pattern_fly_readds_three_idle_profiles() {
 #[test]
 fn disengage_unknown_profile_is_noop() {
     let (_, mut pilot) = make_pilot();
-    assert_eq!(pilot.disengage_profile("no_such"), Vec::<String>::new());
+    assert_eq!(pilot.disengage_profile("no_such").unwrap(), Vec::<String>::new());
 }
 
 #[test]
 fn alt_and_speed_hold_compose_without_conflict() {
     let (_, mut pilot) = make_pilot();
-    pilot.engage_profile(Box::new(AltitudeHoldProfile::new(3000.0)));
-    pilot.engage_profile(Box::new(SpeedHoldProfile::new(95.0)));
+    pilot.engage_profile(Box::new(AltitudeHoldProfile::new(3000.0))).unwrap();
+    pilot.engage_profile(Box::new(SpeedHoldProfile::new(95.0))).unwrap();
     let names: BTreeSet<String> = pilot.list_profile_names().into_iter().collect();
     let expected: BTreeSet<String> =
         ["idle_lateral", "altitude_hold", "speed_hold"].iter().map(|s| s.to_string()).collect();
@@ -89,12 +89,12 @@ fn alt_and_speed_hold_compose_without_conflict() {
 fn engage_profiles_atomically_replaces_pattern_fly() {
     let (cfg, mut pilot) = make_pilot();
     let rf = pilot.runway_frame.clone();
-    pilot.engage_profile(Box::new(PatternFlyProfile::new(cfg.clone(), rf)));
+    pilot.engage_profile(Box::new(PatternFlyProfile::new(cfg.clone(), rf))).unwrap();
     let displaced = pilot.engage_profiles(vec![
         Box::new(HeadingHoldProfile::new(90.0, 25.0, None).unwrap()),
         Box::new(AltitudeHoldProfile::new(3000.0)),
         Box::new(SpeedHoldProfile::new(95.0)),
-    ]);
+    ]).unwrap();
     assert!(displaced.contains(&"pattern_fly".to_string()));
     let names: BTreeSet<String> = pilot.list_profile_names().into_iter().collect();
     let expected: BTreeSet<String> =
@@ -203,7 +203,7 @@ fn takeoff_profile_owns_all_three_axes() {
 fn takeoff_starts_in_preflight_and_advances_on_acceleration() {
     let (cfg, mut pilot) = make_pilot();
     let rf = pilot.runway_frame.clone();
-    pilot.engage_profile(Box::new(TakeoffProfile::new(cfg.clone(), rf)));
+    pilot.engage_profile(Box::new(TakeoffProfile::new(cfg.clone(), rf))).unwrap();
     let model = SimpleAircraftModel::new(cfg, Vec2::ZERO);
     let mut raw_state = model.initial_state();
 
@@ -451,9 +451,17 @@ fn final_glidepath_capture_limits_commanded_altitude_error() {
         ..AircraftState::synthetic_default()
     };
     let g_far = profile.guidance_for_phase(&far_out, FlightPhase::Final);
-    assert_abs_diff_eq!(g_far.target_altitude_ft.unwrap(), pattern_alt - 25.0, epsilon = 1e-6);
     assert_eq!(g_far.vertical_mode, VerticalMode::GlidepathTrack);
-    assert!(g_far.glidepath.is_some());
+    let gp = g_far.glidepath.expect("final tracks a glidepath");
+    // The tracker caps the capture 25 ft below the aircraft...
+    let (target, limits) = pilot.glidepath_targets(&far_out, gp, (0.0, 1.0));
+    assert_abs_diff_eq!(target, pattern_alt - 25.0, epsilon = 1e-6);
+    // ...and, far above the path at final speed, takes the power away so
+    // TECS has to steepen the descent instead of flying parallel to it.
+    assert_eq!(limits, (0.0, 0.0));
+    // Same height but slow: power is available again.
+    let slow_high = AircraftState { ias_kt: cfg.performance.vref_kt - 6.0, ..far_out.clone() };
+    assert_eq!(pilot.glidepath_targets(&slow_high, gp, (0.0, 1.0)).1, (0.0, 1.0));
 
     let expected = glidepath_target_altitude_ft_default(
         &pilot.runway_frame,
@@ -518,248 +526,10 @@ fn flap_schedule_per_phase_follows_c172_sop() {
 }
 
 #[test]
-fn selected_runway_exit_slows_without_leaving_centerline_early() {
-    let (cfg, pilot) = make_pilot();
-    let mut profile = PatternFlyProfile::new(cfg, pilot.runway_frame.clone());
-    profile.set_preferred_exit(Some(RunwayExitPlan {
-        taxiway_name: "A5".to_string(),
-        stationing_ft: 3000.0,
-        path_runway_ft: vec![Vec2::new(3000.0, 0.0), Vec2::new(2950.0, 100.0)],
-    })).unwrap();
-    let state = AircraftState {
-        runway_x_ft: Some(2800.0),
-        runway_y_ft: Some(0.0),
-        position_ft: pilot.runway_frame.to_world_frame(Vec2::new(2800.0, 0.0)),
-        gs_kt: 15.0,
-        on_ground: true,
-        ..AircraftState::synthetic_default()
-    };
-    let guidance = profile.guidance_for_phase(&state, FlightPhase::Rollout);
-    assert_eq!(guidance.lateral_mode, LateralMode::RolloutCenterline);
-    assert_eq!(guidance.vertical_mode, VerticalMode::Taxi);
-    assert_eq!(guidance.target_speed_kt, Some(5.0));
-    assert!(guidance.target_path.is_none());
-}
-
-#[test]
-fn selected_runway_exit_commits_to_exact_graph_leg_at_intersection() {
-    let (cfg, pilot) = make_pilot();
-    let mut profile = PatternFlyProfile::new(cfg, pilot.runway_frame.clone());
-    profile.phase = FlightPhase::Rollout;
-    profile.set_preferred_exit(Some(RunwayExitPlan {
-        taxiway_name: "E".to_string(),
-        stationing_ft: 3000.0,
-        path_runway_ft: vec![
-            Vec2::new(3000.0, 0.0),
-            Vec2::new(2950.0, -100.0),
-            Vec2::new(2920.0, -140.0),
-        ],
-    })).unwrap();
-    let state = AircraftState {
-        runway_x_ft: Some(2990.0),
-        runway_y_ft: Some(0.0),
-        position_ft: pilot.runway_frame.to_world_frame(Vec2::new(2990.0, 0.0)),
-        gs_kt: 5.0,
-        on_ground: true,
-        ..AircraftState::synthetic_default()
-    };
-
-    let tick = profile.contribute(&state, 0.2);
-    assert_eq!(profile.phase, FlightPhase::RunwayExit);
-    assert_eq!(tick.contribution.lateral_mode, Some(LateralMode::TaxiFollow));
-    let path = tick.contribution.target_path.expect("actual exit graph leg");
-    let start = pilot.runway_frame.to_runway_frame(path.start_ft);
-    let end = pilot.runway_frame.to_runway_frame(path.end_ft);
-    assert_abs_diff_eq!(start.x, 3000.0, epsilon = 1e-6);
-    assert_abs_diff_eq!(start.y, 0.0, epsilon = 1e-6);
-    assert_abs_diff_eq!(end.x, 2950.0, epsilon = 1e-6);
-    assert_abs_diff_eq!(end.y, -100.0, epsilon = 1e-6);
-}
-
-#[test]
-fn missed_runway_exit_never_commands_a_cutback() {
-    let (cfg, pilot) = make_pilot();
-    let runway_length = pilot.runway_frame.runway.length_ft;
-    let turnoff_speed = cfg.post_landing.turnoff_speed_kt;
-    let mut profile = PatternFlyProfile::new(cfg, pilot.runway_frame.clone());
-    profile.phase = FlightPhase::Rollout;
-    profile.set_preferred_exit(Some(RunwayExitPlan {
-        taxiway_name: "B".to_string(),
-        stationing_ft: 3000.0,
-        path_runway_ft: vec![Vec2::new(3000.0, 0.0), Vec2::new(2950.0, 100.0)],
-    })).unwrap();
-    let missed = AircraftState {
-        runway_x_ft: Some(3070.0),
-        runway_y_ft: Some(0.0),
-        position_ft: pilot.runway_frame.to_world_frame(Vec2::new(3070.0, 0.0)),
-        gs_kt: 15.0,
-        on_ground: true,
-        ..AircraftState::synthetic_default()
-    };
-
-    let tick = profile.contribute(&missed, 0.2);
-    assert_eq!(profile.phase, FlightPhase::Rollout);
-    assert_eq!(tick.contribution.lateral_mode, Some(LateralMode::RolloutCenterline));
-    assert!(tick.contribution.target_path.is_none());
-    assert_eq!(tick.contribution.target_speed_kt, Some(turnoff_speed));
-
-    let near_end = AircraftState {
-        runway_x_ft: Some(runway_length - 100.0),
-        runway_y_ft: Some(0.0),
-        position_ft: pilot
-            .runway_frame
-            .to_world_frame(Vec2::new(runway_length - 100.0, 0.0)),
-        ..missed
-    };
-    let tick = profile.contribute(&near_end, 0.2);
-    assert_eq!(tick.contribution.lateral_mode, Some(LateralMode::RolloutCenterline));
-    assert_eq!(tick.contribution.target_speed_kt, Some(0.0));
-}
-
-#[test]
-fn stopped_rollout_holds_runway_but_accepts_ground_taxi_handoff() {
-    let (cfg, pilot) = make_pilot();
-    let mut profile = PatternFlyProfile::new(cfg, pilot.runway_frame.clone());
-    profile.phase = FlightPhase::Rollout;
-    let rolling = AircraftState {
-        runway_x_ft: Some(3000.0),
-        runway_y_ft: Some(0.0),
-        gs_kt: 12.0,
-        on_ground: true,
-        ..AircraftState::synthetic_default()
-    };
-    profile.contribute(&rolling, 0.2);
-    assert!(!profile.accepts_ground_handoff(), "still rolling");
-
-    let stopped = AircraftState { gs_kt: 0.0, ..rolling };
-    let tick = profile.contribute(&stopped, 0.2);
-    // pattern_fly keeps the brakes on rather than releasing to idle on
-    // the runway, but must not deadlock engage_park.
-    assert!(tick.hand_off.is_none());
-    assert_eq!(profile.phase, FlightPhase::Rollout);
-    assert!(profile.accepts_ground_handoff());
-}
-
-#[test]
-fn stopped_after_missed_exit_accepts_ground_taxi_handoff() {
-    let (cfg, pilot) = make_pilot();
-    let runway_length = pilot.runway_frame.runway.length_ft;
-    let mut profile = PatternFlyProfile::new(cfg, pilot.runway_frame.clone());
-    profile.phase = FlightPhase::Rollout;
-    profile.set_preferred_exit(Some(RunwayExitPlan {
-        taxiway_name: "B".to_string(),
-        stationing_ft: 3000.0,
-        path_runway_ft: vec![Vec2::new(3000.0, 0.0), Vec2::new(2950.0, 100.0)],
-    })).unwrap();
-    // Braked to a stop short of the runway end after missing B.
-    let x = runway_length - 250.0;
-    let stopped = AircraftState {
-        runway_x_ft: Some(x),
-        runway_y_ft: Some(0.0),
-        position_ft: pilot.runway_frame.to_world_frame(Vec2::new(x, 0.0)),
-        gs_kt: 0.0,
-        on_ground: true,
-        ..AircraftState::synthetic_default()
-    };
-    profile.contribute(&stopped, 0.2);
-    assert_eq!(profile.phase, FlightPhase::Rollout);
-    assert!(profile.accepts_ground_handoff());
-}
-
-#[test]
-fn exit_final_leg_keeps_creeping_until_node_captured() {
-    let (cfg, pilot) = make_pilot();
-    let mut profile = PatternFlyProfile::new(cfg, pilot.runway_frame.clone());
-    profile.phase = FlightPhase::Rollout;
-    profile.set_preferred_exit(Some(RunwayExitPlan {
-        taxiway_name: "E".to_string(),
-        stationing_ft: 3000.0,
-        path_runway_ft: vec![Vec2::new(3000.0, 0.0), Vec2::new(3000.0, -100.0)],
-    })).unwrap();
-    let at = |x: f64, y: f64, gs: f64| AircraftState {
-        runway_x_ft: Some(x),
-        runway_y_ft: Some(y),
-        position_ft: pilot.runway_frame.to_world_frame(Vec2::new(x, y)),
-        gs_kt: gs,
-        on_ground: true,
-        ..AircraftState::synthetic_default()
-    };
-    profile.contribute(&at(2995.0, 0.0, 5.0), 0.2);
-    assert_eq!(profile.phase, FlightPhase::RunwayExit);
-    // Stopped 12 ft short of the final node, outside its 8 ft capture
-    // radius: guidance must still ask for forward motion.
-    let tick = profile.contribute(&at(3000.0, -88.0, 0.0), 0.2);
-    assert_eq!(profile.phase, FlightPhase::RunwayExit);
-    let speed = tick.contribution.target_speed_kt.unwrap();
-    assert!(speed >= 2.0, "target speed {speed} would stall short of the node");
-    // Once captured it stops and releases.
-    let tick = profile.contribute(&at(3000.0, -95.0, 0.5), 0.2);
-    assert_eq!(profile.phase, FlightPhase::TaxiClear);
-    assert!(tick.hand_off.is_some());
-}
-
-#[test]
-fn go_around_trigger_is_dropped_after_touchdown() {
-    let (cfg, pilot) = make_pilot();
-    let mut profile = PatternFlyProfile::new(cfg, pilot.runway_frame.clone());
-    profile.phase = FlightPhase::Rollout;
-    profile.set_preferred_exit(Some(RunwayExitPlan {
-        taxiway_name: "E".to_string(),
-        stationing_ft: 3000.0,
-        path_runway_ft: vec![Vec2::new(3000.0, 0.0), Vec2::new(3000.0, -100.0)],
-    })).unwrap();
-    let state = AircraftState {
-        runway_x_ft: Some(2995.0),
-        runway_y_ft: Some(0.0),
-        position_ft: pilot.runway_frame.to_world_frame(Vec2::new(2995.0, 0.0)),
-        gs_kt: 5.0,
-        on_ground: true,
-        ..AircraftState::synthetic_default()
-    };
-    profile.contribute(&state, 0.2);
-    assert_eq!(profile.phase, FlightPhase::RunwayExit);
-    assert!(profile.is_post_landing());
-
-    profile.go_around();
-    profile.contribute(&state, 0.2);
-    assert_eq!(profile.phase, FlightPhase::RunwayExit);
-    assert!(!profile.force_go_around_trigger, "stale trigger must not latch");
-}
-
-#[test]
-fn preferred_exit_cannot_change_once_turning_off() {
-    let (cfg, pilot) = make_pilot();
-    let mut profile = PatternFlyProfile::new(cfg, pilot.runway_frame.clone());
-    profile.phase = FlightPhase::Rollout;
-    let plan = |name: &str, x: f64| RunwayExitPlan {
-        taxiway_name: name.to_string(),
-        stationing_ft: x,
-        path_runway_ft: vec![Vec2::new(x, 0.0), Vec2::new(x, -100.0)],
-    };
-    profile.set_preferred_exit(Some(plan("E", 3000.0))).unwrap();
-    // Before the turn, the choice can still change.
-    profile.set_preferred_exit(Some(plan("E", 3000.0))).unwrap();
-    let state = AircraftState {
-        runway_x_ft: Some(2995.0),
-        runway_y_ft: Some(0.0),
-        position_ft: pilot.runway_frame.to_world_frame(Vec2::new(2995.0, 0.0)),
-        gs_kt: 5.0,
-        on_ground: true,
-        ..AircraftState::synthetic_default()
-    };
-    profile.contribute(&state, 0.2);
-    assert_eq!(profile.phase, FlightPhase::RunwayExit);
-    let err = profile.set_preferred_exit(Some(plan("F", 4000.0))).unwrap_err();
-    assert!(err.contains("E"), "{err}");
-    assert!(profile.set_preferred_exit(None).is_err());
-    assert_eq!(profile.preferred_exit.as_ref().unwrap().taxiway_name, "E");
-}
-
-#[test]
 fn altitude_hold_end_to_end_climb_through_pilot() {
     let (_, mut pilot) = make_pilot();
-    pilot.engage_profile(Box::new(AltitudeHoldProfile::new(2000.0)));
-    pilot.engage_profile(Box::new(SpeedHoldProfile::new(80.0)));
+    pilot.engage_profile(Box::new(AltitudeHoldProfile::new(2000.0))).unwrap();
+    pilot.engage_profile(Box::new(SpeedHoldProfile::new(80.0))).unwrap();
     let raw = xplane_pilot::sim::simple_dynamics::DynamicsState {
         position_ft: Vec2::ZERO,
         altitude_ft: 1387.0,
@@ -778,6 +548,7 @@ fn altitude_hold_end_to_end_climb_through_pilot() {
         vertical_speed_ft_s: 0.0,
         flap_index: 0,
         gear_down: true,
+        parking_brake: 0.0,
     };
     // Run enough ticks for TECS to integrate up toward its climb
     // authority — the old regime switch floored throttle at 0.7
@@ -918,26 +689,31 @@ fn taxi_profile_enters_pose_phase_after_last_leg_when_pose_is_set() {
     let mut p = TaxiProfile::new(legs, names).with_final_pose(pose);
     p.current_idx = 3; // jump past all legs to exercise pose phase
 
-    // Far from target, heading mismatched → approach phase.
-    let approach_state = taxi_state(Vec2::new(1000.0, 1970.0), 0.0, 3.0);
-    let tick = p.contribute(&approach_state, 0.2);
-    assert_eq!(
-        tick.contribution.lateral_mode,
-        Some(LateralMode::TaxiPose),
-        "expected TaxiPose mode"
-    );
-    assert!(tick.contribution.target_waypoint.is_some());
-    assert_eq!(tick.contribution.target_heading_deg, Some(90.0));
+    // Behind the spot on its heading line → roll in along that line,
+    // faster than creep while aligned.
+    let roll_in = taxi_state(Vec2::new(940.0, 2000.0), 90.0, 3.0);
+    let tick = p.contribute(&roll_in, 0.2);
+    assert_eq!(tick.contribution.lateral_mode, Some(LateralMode::TaxiFollow));
+    let path = tick.contribution.target_path.expect("roll-in follows the heading line");
+    assert_abs_diff_eq!(path.end_ft.x, 1000.0, epsilon = 1e-9);
+    assert_abs_diff_eq!(path.start_ft.y, 2000.0, epsilon = 1e-9);
     let spd = tick.contribution.target_speed_kt.unwrap();
-    assert!(spd > p.pose_creep_speed_kt, "approach should command > creep: {}", spd);
+    assert!(spd > p.pose_creep_speed_kt, "aligned roll-in should beat creep: {}", spd);
 
-    // Near target, heading still off → align phase: creep forward so
-    // the nose wheel has something to steer against. A stationary
-    // aircraft won't pivot on live X-Plane even with full differential
-    // braking + rudder.
-    let align_state = taxi_state(Vec2::new(1000.0, 1995.0), 0.0, 2.0);
-    let tick = p.contribute(&align_state, 0.2);
+    // Spot still ahead but heading well off → creep while turning on: a
+    // stationary aircraft won't pivot on live X-Plane.
+    let turning = taxi_state(Vec2::new(985.0, 1995.0), 0.0, 2.0);
+    let tick = p.contribute(&turning, 0.2);
     assert_eq!(tick.contribution.target_speed_kt, Some(p.pose_creep_speed_kt));
+    assert!(!p.finished);
+
+    // Passed the spot without settling → re-approach via a lead-in point
+    // back along the pose heading.
+    let passed = taxi_state(Vec2::new(1005.0, 2012.0), 0.0, 2.0);
+    let tick = p.contribute(&passed, 0.2);
+    assert_eq!(tick.contribution.lateral_mode, Some(LateralMode::TaxiPose));
+    let lead_in = tick.contribution.target_waypoint.unwrap().position_ft;
+    assert!(lead_in.x < 950.0 && (lead_in.y - 2000.0).abs() < 1e-6, "lead-in {lead_in:?}");
     assert!(!p.finished);
 
     // Within both position and heading tolerance → done.
@@ -962,4 +738,26 @@ fn taxi_profile_ramps_speed_to_zero_on_final_leg_and_finishes() {
     let tick = p.contribute(&at_end, 0.2);
     assert!(p.finished);
     assert_eq!(tick.contribution.target_speed_kt, Some(0.0));
+}
+
+#[test]
+fn settled_go_around_reenters_the_pattern_instead_of_handing_off() {
+    let (cfg, pilot) = make_pilot();
+    let mut profile = PatternFlyProfile::new(cfg.clone(), pilot.runway_frame.clone());
+    profile.phase = FlightPhase::GoAround;
+    let settled = AircraftState {
+        alt_msl_ft: cfg.pattern_altitude_msl_ft(),
+        vs_fpm: 0.0,
+        runway_x_ft: Some(6000.0),
+        runway_y_ft: Some(0.0),
+        on_ground: false,
+        ..AircraftState::synthetic_default()
+    };
+    profile.extend_leg(PatternLeg::Downwind, 3000.0, ExtendMode::Add).unwrap();
+    profile.execute_touch_and_go();
+    let tick = profile.contribute(&settled, 0.2);
+    assert!(tick.hand_off.is_none(), "pattern_fly keeps flying");
+    assert_eq!(profile.phase, FlightPhase::Crosswind);
+    assert_eq!(profile.leg_extensions.downwind_ft, cfg.pattern.default_extension_ft, "extension from the abandoned circuit dropped");
+    assert!(!profile.touch_and_go_trigger, "armed touch-and-go dropped");
 }

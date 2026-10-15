@@ -61,6 +61,18 @@ impl SafetyMonitor {
         Self { config }
     }
 
+    /// Still airborne past this runway station means the landing is going
+    /// long enough that there may not be room to stop: go around. That's
+    /// where less than `go_around_min_runway_remaining_ft` is left ahead,
+    /// but never within 500 ft of the aim point (on a short runway the
+    /// approach itself is the margin).
+    pub fn long_landing_limit_x_ft(&self) -> f64 {
+        let runway = &self.config.airport.runway;
+        let aim_x = runway.touchdown_x_ft();
+        let remaining_ft = self.config.post_landing.go_around_min_runway_remaining_ft;
+        (runway.length_ft - remaining_ft).max(aim_x + 500.0)
+    }
+
     pub fn evaluate(&self, state: &AircraftState, phase: FlightPhase) -> SafetyStatus {
         let bank_limit_deg = self.bank_limit_deg(phase);
         if state.on_ground {
@@ -87,6 +99,18 @@ impl SafetyMonitor {
                 state.vs_fpm, landing_agl_ft
             );
             return SafetyStatus { request_go_around: true, reason: Some(reason), bank_limit_deg };
+        }
+        if matches!(phase, FlightPhase::Final | FlightPhase::Roundout | FlightPhase::Flare) {
+            if let Some(x) = state.runway_x_ft {
+                let limit_x = self.long_landing_limit_x_ft();
+                if x > limit_x {
+                    let reason = format!(
+                        "long_landing x={:.0}ft limit={:.0}ft agl={:.0}ft",
+                        x, limit_x, landing_agl_ft
+                    );
+                    return SafetyStatus { request_go_around: true, reason: Some(reason), bank_limit_deg };
+                }
+            }
         }
         if phase == FlightPhase::Final
             && landing_agl_ft < 50.0

@@ -6,31 +6,39 @@
 //! profiles; axis-ownership conflicts auto-displace older profiles.
 //!
 //! When a profile needs to swap itself for different profiles mid-tick (e.g.
-//! `PatternFlyProfile` replacing itself with three single-axis holds after a
-//! go-around settles), it returns a `hand_off` request and `PilotCore`
+//! `PatternFlyProfile` handing the ground roll to `LandingRolloutProfile`
+//! at touchdown), it returns a `hand_off` request and `PilotCore`
 //! applies the swap after all contributions are collected. That avoids
 //! reentrant `&mut` borrows on the pilot from inside one of its profiles.
 
+use std::any::Any;
+
 use crate::config::ConfigBundle;
+use crate::core::landing_rollout::{
+    touchdown_debounce, touchdown_handoff, LandingPlanHolder, LandingRolloutProfile,
+};
+pub use crate::core::landing_rollout::{ArrivalPlan, RunwayExitPlan};
 use crate::core::mode_manager::{
-    ModeManager, ModeManagerUpdate, PatternClearances, PatternTriggers,
+    ModeManager, ModeManagerUpdate, PatternClearances, PatternTriggers, BASE_TO_FINAL_FRACTION,
 };
 use crate::core::safety_monitor::SafetyMonitor;
-use crate::guidance::lateral::L1PathFollower;
+use crate::core::spatial::{LabeledLeg, SpatialOverlay};
+use crate::guidance::lateral::{leg_projection, L1PathFollower};
 use crate::guidance::pattern_manager::{
     build_pattern_geometry, glidepath_target_altitude_ft_default, PatternGeometry,
 };
 use crate::guidance::route_manager::RouteManager;
 use crate::guidance::runway_geometry::RunwayFrame;
 use crate::types::{
-    clamp, wrap_degrees_180, wrap_degrees_360, AircraftState, FlightPhase, Glidepath,
-    GuidanceTargets, LateralMode, StraightLeg, TrafficSide, Vec2, VerticalMode, Waypoint,
+    clamp, heading_to_vector, vector_to_heading, wrap_degrees_180, wrap_degrees_360, AircraftState,
+    FlightPhase, Glidepath, GuidanceTargets, LateralMode, StraightLeg, TrafficSide, Vec2,
+    VerticalMode, Waypoint,
 };
 
-/// Limit how far below the aircraft a newly captured glidepath may command.
-/// The moving cap yields a controlled intercept instead of an instantaneous
-/// dive when joining final above the nominal 3-degree path.
-const MAX_GLIDEPATH_CAPTURE_ERROR_FT: f64 = 25.0;
+/// Pose-target pivot radius: outside it a taxi steers toward the target
+/// position, inside it it turns to the target heading. A taxi only
+/// settles on its pose inside it.
+pub const POSE_PIVOT_RADIUS_FT: f64 = 15.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Axis {
@@ -116,6 +124,9 @@ pub struct ProfileContribution {
     pub gear_down: Option<bool>,
     pub brakes: Option<f64>,
     pub tecs_phase_override: Option<FlightPhase>,
+    /// Parking brake ratio to hold (written to the sim's parking-brake
+    /// dataref). `None` leaves it alone.
+    pub parking_brake: Option<f64>,
 }
 
 /// Returned by each profile's `contribute()`.
@@ -144,7 +155,20 @@ pub struct TransitionHint {
     pub eta_s: Option<f64>,
 }
 
-pub trait GuidanceProfile: Send {
+/// Lets `PilotCore::with_profile` recover a profile's concrete type from a
+/// `Box<dyn GuidanceProfile>` safely. Blanket-implemented for every
+/// `'static` type, so profiles get it for free.
+pub trait AsAny {
+    fn as_any(&self) -> &dyn Any;
+    fn as_any_mut(&mut self) -> &mut dyn Any;
+}
+
+impl<T: Any> AsAny for T {
+    fn as_any(&self) -> &dyn Any { self }
+    fn as_any_mut(&mut self) -> &mut dyn Any { self }
+}
+
+pub trait GuidanceProfile: Send + AsAny {
     fn name(&self) -> &'static str;
     fn owns(&self) -> AxisSet;
     fn contribute(&mut self, state: &AircraftState, dt: f64) -> ProfileTick;
@@ -190,6 +214,27 @@ pub trait GuidanceProfile: Send {
     /// until the predicate fires. Default `None` for profiles without a
     /// phase machine. Surfaced on `StatusSnapshot::transition_hint`.
     fn next_transition_hint(&self, _state: &AircraftState) -> Option<TransitionHint> {
+        None
+    }
+
+    /// Whether another profile may displace (or a tool may disengage)
+    /// this one right now. `PilotCore::engage_profiles` asks every
+    /// profile it would displace and refuses the whole engage if any
+    /// returns `Err(reason)`. A profile handing *itself* off via
+    /// `ProfileTick::hand_off` is not asked. Default: always preemptible.
+    fn preemption(&self) -> Result<(), String> {
+        Ok(())
+    }
+
+    /// Read-only geometry for the TUI spatial view: the runway, pattern
+    /// legs, ground route and terminal pose this profile is flying
+    /// against. Only called while the view is visible. Default: nothing.
+    fn spatial_overlay(&self) -> Option<SpatialOverlay> {
+        None
+    }
+
+    /// The landing's exit/arrival plan, for profiles that carry one.
+    fn landing_plan_mut(&mut self) -> Option<&mut dyn LandingPlanHolder> {
         None
     }
 }
@@ -413,30 +458,6 @@ pub fn build_rotate_guidance(
     }
 }
 
-/// Decide whether a three-axis landing profile should release control to
-/// the idle trio after touchdown. Fires on the first tick of `TaxiClear`
-/// (the nominal exit) or once the aircraft has stopped in any post-
-/// landing phase (catch-all: aircraft braked to a stop on the runway
-/// without finding an exit). Returns the replacement profiles when a
-/// hand-off should happen, `None` otherwise.
-///
-/// Shared between `PatternFlyProfile` and `DeadStickLandingProfile` —
-/// both run the same Final → Roundout → Flare → Rollout flow and need
-/// the same hand-off semantics.
-pub(crate) fn post_landing_handoff(
-    phase: FlightPhase,
-    previous_phase: FlightPhase,
-    _gs_kt: f64,
-) -> Option<Vec<Box<dyn GuidanceProfile>>> {
-    let first_tick_taxi_clear =
-        phase == FlightPhase::TaxiClear && previous_phase != FlightPhase::TaxiClear;
-    if first_tick_taxi_clear {
-        Some(idle_profile_trio(0.0))
-    } else {
-        None
-    }
-}
-
 pub(crate) fn guidance_to_contribution(g: GuidanceTargets) -> ProfileContribution {
     ProfileContribution {
         lateral_mode: Some(g.lateral_mode),
@@ -455,6 +476,7 @@ pub(crate) fn guidance_to_contribution(g: GuidanceTargets) -> ProfileContributio
         gear_down: g.gear_down,
         brakes: Some(g.brakes),
         tecs_phase_override: g.tecs_phase_override,
+        parking_brake: g.parking_brake,
     }
 }
 
@@ -525,6 +547,12 @@ impl GuidanceProfile for TakeoffProfile {
     fn name(&self) -> &'static str { "takeoff" }
     fn owns(&self) -> AxisSet {
         AxisSet::ALL
+    }
+    fn spatial_overlay(&self) -> Option<SpatialOverlay> {
+        Some(SpatialOverlay {
+            runway: Some(self.runway_frame.runway.clone()),
+            ..Default::default()
+        })
     }
     fn pattern_metadata(&self) -> Option<PatternMetadata> {
         Some(PatternMetadata {
@@ -724,16 +752,6 @@ pub struct PatternLegExtensions {
     pub downwind_ft: f64,
 }
 
-/// Resolved geometry for an autonomous runway exit.
-#[derive(Debug, Clone, PartialEq)]
-pub struct RunwayExitPlan {
-    pub taxiway_name: String,
-    /// Along-runway station of the graph node on the runway centerline.
-    pub stationing_ft: f64,
-    /// Ordered runway-frame taxi-network points, beginning on the runway
-    /// centerline and ending at the first node outside the active zone.
-    pub path_runway_ft: Vec<Vec2>,
-}
 
 pub struct PatternFlyProfile {
     pub config: ConfigBundle,
@@ -750,25 +768,14 @@ pub struct PatternFlyProfile {
     pub lateral_guidance: L1PathFollower,
     pub pattern: PatternGeometry,
     pub route_manager: RouteManager,
-    /// When set on a tick, PilotCore should swap pattern_fly out for these
-    /// three single-axis holds.
-    handoff_request: Option<Vec<Box<dyn GuidanceProfile>>>,
-    /// LLM-set preferred runway-exit taxiway for post-landing rollout.
-    /// The rollout logic aims the brake profile to reach turnoff speed by
-    /// the time the aircraft reaches this taxiway's stationing; when the
-    /// wheels are past the hold-short line the profile auto-hands off to
-    /// idle and stops the aircraft clear of the runway. `None` = remain
-    /// on the runway centerline and stop.
+    /// LLM-set preferred runway exit, carried into the
+    /// `LandingRolloutProfile` that takes over at touchdown. `None` =
+    /// brake to a stop on the runway centerline.
     pub preferred_exit: Option<RunwayExitPlan>,
-    exit_committed: bool,
-    exit_leg_idx: usize,
-    exit_path_complete: bool,
-    exit_missed: bool,
-    /// Set each tick when the aircraft has come to a stop in Rollout with
-    /// no exit left to fly (none chosen, or the chosen one was missed).
-    /// pattern_fly keeps holding the brakes rather than releasing to idle
-    /// on the runway, but a ground taxi profile may displace it.
-    holding_on_runway: bool,
+    /// Taxi-to-parking plan to run after the exit (from `plan_arrival`).
+    pub arrival: Option<ArrivalPlan>,
+    /// Continuous ground contact since touchdown (debounces the hand-off).
+    ground_contact_s: f64,
 }
 
 impl PatternFlyProfile {
@@ -803,63 +810,13 @@ impl PatternFlyProfile {
             last_go_around_reason: None,
             config,
             runway_frame,
-            handoff_request: None,
             preferred_exit: None,
-            exit_committed: false,
-            exit_leg_idx: 0,
-            exit_path_complete: false,
-            exit_missed: false,
-            holding_on_runway: false,
+            arrival: None,
+            ground_contact_s: 0.0,
         }
     }
 
     pub fn go_around(&mut self) { self.force_go_around_trigger = true; }
-
-    /// Record (or clear) the preferred runway-exit taxiway for the
-    /// post-landing rollout. `None` keeps the aircraft on centerline.
-    /// Refused once the aircraft has turned onto the current exit: the
-    /// replacement would steer back toward runway heading from a position
-    /// already on the connector.
-    pub fn set_preferred_exit(&mut self, exit: Option<RunwayExitPlan>) -> Result<(), String> {
-        if self.exit_in_progress() {
-            let name = self
-                .preferred_exit
-                .as_ref()
-                .map(|e| e.taxiway_name.as_str())
-                .unwrap_or("?");
-            return Err(format!(
-                "already turning off the runway onto {name}; the exit can't be changed until it completes"
-            ));
-        }
-        self.preferred_exit = exit;
-        self.exit_committed = false;
-        self.exit_leg_idx = 0;
-        self.exit_path_complete = false;
-        self.exit_missed = false;
-        self.holding_on_runway = false;
-        Ok(())
-    }
-
-    /// True while the aircraft is following a committed exit connector.
-    fn exit_in_progress(&self) -> bool {
-        self.preferred_exit.is_some() && self.exit_committed && !self.exit_missed
-    }
-
-    /// Whether a ground taxi profile (engage_park) may take over: either
-    /// the selected exit has been flown to completion, or the aircraft is
-    /// stopped on the runway with no exit left to fly.
-    pub fn accepts_ground_handoff(&self) -> bool {
-        self.holding_on_runway || self.phase == FlightPhase::TaxiClear
-    }
-
-    /// True once the aircraft is on the ground after landing, where a
-    /// go-around is no longer meaningful.
-    pub fn is_post_landing(&self) -> bool {
-        matches!(
-            self.phase,
-            FlightPhase::Rollout | FlightPhase::RunwayExit | FlightPhase::TaxiClear
-        )
-    }
 
     pub fn execute_touch_and_go(&mut self) { self.touch_and_go_trigger = true; }
 
@@ -946,148 +903,6 @@ impl PatternFlyProfile {
         alt_err < 100.0 && state.vs_fpm.abs() < 200.0
     }
 
-    fn runway_exit_leg(&self) -> Option<StraightLeg> {
-        let exit = self.preferred_exit.as_ref()?;
-        let start = *exit.path_runway_ft.get(self.exit_leg_idx)?;
-        let end = *exit.path_runway_ft.get(self.exit_leg_idx + 1)?;
-        Some(StraightLeg {
-            start_ft: self.runway_frame.to_world_frame(start),
-            end_ft: self.runway_frame.to_world_frame(end),
-        })
-    }
-
-    fn update_runway_exit_progress(&mut self, state: &AircraftState) {
-        const INTERSECTION_CAPTURE_FT: f64 = 20.0;
-        const MISSED_EXIT_FT: f64 = 60.0;
-        const LEG_CAPTURE_FT: f64 = 8.0;
-
-        let Some(exit) = self.preferred_exit.as_ref() else { return };
-        let Some(runway_x) = state.runway_x_ft else { return };
-        if exit.path_runway_ft.len() < 2 {
-            self.exit_missed = true;
-            return;
-        }
-
-        if !self.exit_committed && !self.exit_missed {
-            if runway_x > exit.stationing_ft + MISSED_EXIT_FT {
-                self.exit_missed = true;
-                return;
-            }
-            if runway_x >= exit.stationing_ft - INTERSECTION_CAPTURE_FT
-                && state.gs_kt <= self.config.post_landing.turnoff_speed_kt + 5.0
-            {
-                self.exit_committed = true;
-                self.exit_leg_idx = 0;
-            }
-        }
-        if !self.exit_committed || self.exit_path_complete {
-            return;
-        }
-
-        while let Some(leg) = self.runway_exit_leg() {
-            let to_end = leg.end_ft - leg.start_ft;
-            let leg_len = to_end.length().max(1.0);
-            let along = (state.position_ft - leg.start_ft).dot(to_end * (1.0 / leg_len));
-            let reached = state.position_ft.distance_to(leg.end_ft) <= LEG_CAPTURE_FT;
-            if !reached && along <= leg_len {
-                break;
-            }
-            self.exit_leg_idx += 1;
-            let leg_count = exit.path_runway_ft.len() - 1;
-            if self.exit_leg_idx >= leg_count {
-                self.exit_path_complete = true;
-                break;
-            }
-        }
-    }
-
-    fn rollout_guidance(&self, state: &AircraftState, _phase: FlightPhase) -> GuidanceTargets {
-        const SLOWDOWN_LEAD_FT: f64 = 300.0;
-        const FINAL_STOP_RAMP_FT: f64 = 60.0;
-        const EXIT_SPEED_KT: f64 = 5.0;
-        // Keep creeping until the last node is captured. A pure
-        // distance-proportional ramp drops below the speed controller's
-        // deadband several feet out, and rolling friction can then stop
-        // the aircraft outside LEG_CAPTURE_FT so the path never completes.
-        const EXIT_CREEP_SPEED_KT: f64 = 2.0;
-
-        if let Some(exit) = &self.preferred_exit {
-            let runway_x = state.runway_x_ft.unwrap_or(f64::NEG_INFINITY);
-            if self.exit_committed {
-                let path = self.runway_exit_leg().or_else(|| {
-                    let points = &exit.path_runway_ft;
-                    let start = *points.get(points.len().checked_sub(2)?)?;
-                    let end = *points.last()?;
-                    Some(StraightLeg {
-                        start_ft: self.runway_frame.to_world_frame(start),
-                        end_ft: self.runway_frame.to_world_frame(end),
-                    })
-                });
-                let target_speed = if self.exit_path_complete {
-                    0.0
-                } else if self.exit_leg_idx + 2 >= exit.path_runway_ft.len() {
-                    let distance = exit
-                        .path_runway_ft
-                        .last()
-                        .map(|point| {
-                            state
-                                .position_ft
-                                .distance_to(self.runway_frame.to_world_frame(*point))
-                        })
-                        .unwrap_or(0.0);
-                    (distance / FINAL_STOP_RAMP_FT * EXIT_SPEED_KT)
-                        .clamp(EXIT_CREEP_SPEED_KT, EXIT_SPEED_KT)
-                } else {
-                    EXIT_SPEED_KT
-                };
-                return GuidanceTargets {
-                    lateral_mode: LateralMode::TaxiFollow,
-                    vertical_mode: VerticalMode::Taxi,
-                    target_path: path,
-                    target_speed_kt: Some(target_speed),
-                    target_pitch_deg: Some(0.0),
-                    throttle_limit: Some((0.0, 1.0)),
-                    ..Default::default()
-                };
-            }
-
-            let distance_to_exit = exit.stationing_ft - runway_x;
-            let target_speed = if self.exit_missed {
-                let distance_to_end = self.runway_frame.runway.length_ft - runway_x;
-                if distance_to_end <= SLOWDOWN_LEAD_FT {
-                    0.0
-                } else {
-                    self.config.post_landing.turnoff_speed_kt
-                }
-            } else if distance_to_exit <= SLOWDOWN_LEAD_FT {
-                EXIT_SPEED_KT
-            } else {
-                self.config.post_landing.turnoff_speed_kt
-            };
-            return GuidanceTargets {
-                lateral_mode: LateralMode::RolloutCenterline,
-                vertical_mode: VerticalMode::Taxi,
-                target_bank_deg: Some(0.0),
-                target_heading_deg: Some(self.runway_frame.runway.course_deg),
-                target_pitch_deg: Some(0.0),
-                target_speed_kt: Some(target_speed),
-                throttle_limit: Some((0.0, 1.0)),
-                ..Default::default()
-            };
-        }
-
-        GuidanceTargets {
-            lateral_mode: LateralMode::RolloutCenterline,
-            vertical_mode: VerticalMode::PitchHold,
-            target_bank_deg: Some(0.0),
-            target_heading_deg: Some(self.runway_frame.runway.course_deg),
-            target_pitch_deg: Some(0.0),
-            throttle_limit: Some((0.0, 0.0)),
-            brakes: 0.75,
-            ..Default::default()
-        }
-    }
-
     /// Build guidance for the current phase.
     pub fn guidance_for_phase(&mut self, state: &AircraftState, phase: FlightPhase) -> GuidanceTargets {
         let bank_limit = self.safety_monitor.bank_limit_deg(phase);
@@ -1106,22 +921,6 @@ impl PatternFlyProfile {
             | FlightPhase::Final => self.pattern_phase_guidance(state, bank_limit, phase),
             FlightPhase::Roundout => self.roundout_guidance(state, bank_limit),
             FlightPhase::Flare => self.flare_guidance(state, bank_limit),
-            FlightPhase::Rollout | FlightPhase::RunwayExit => {
-                self.rollout_guidance(state, phase)
-            }
-            FlightPhase::TaxiClear => GuidanceTargets {
-                lateral_mode: LateralMode::RolloutCenterline,
-                vertical_mode: VerticalMode::PitchHold,
-                target_bank_deg: Some(0.0),
-                target_heading_deg: Some(self.runway_frame.runway.course_deg),
-                target_pitch_deg: Some(0.0),
-                throttle_limit: Some((0.0, 0.0)),
-                // Full brake on arrival — we're clear of the runway and
-                // need to stop. Hand-off to idle happens in `contribute()`
-                // so the LLM takes over with a stopped aircraft.
-                brakes: 0.75,
-                ..Default::default()
-            },
             _ => GuidanceTargets {
                 lateral_mode: LateralMode::BankHold,
                 vertical_mode: VerticalMode::PitchHold,
@@ -1312,8 +1111,12 @@ impl PatternFlyProfile {
                 );
                 let downwind_y_abs = self.pattern.downwind_y_ft.abs();
                 let y_abs = state.runway_y_ft.unwrap_or(self.pattern.downwind_y_ft).abs();
+                // Reach the glidepath height where the turn to final
+                // happens, not at the extended centerline, or final starts
+                // a few hundred feet high.
                 let frac = if downwind_y_abs > 1.0 {
-                    (1.0 - y_abs / downwind_y_abs).clamp(0.0, 1.0)
+                    ((1.0 - y_abs / downwind_y_abs) / BASE_TO_FINAL_FRACTION)
+                        .clamp(0.0, 1.0)
                 } else {
                     1.0
                 };
@@ -1335,16 +1138,15 @@ impl PatternFlyProfile {
                     state.runway_x_ft.unwrap_or(-3000.0),
                     field_elev_ft,
                 );
-                let target_altitude = glidepath_alt.max(
-                    state.alt_msl_ft - MAX_GLIDEPATH_CAPTURE_ERROR_FT,
-                );
+                // PilotCore's glidepath tracking turns this into a capped
+                // capture target and a power ceiling when high.
                 let glidepath = Glidepath {
                     slope_deg: final_slope,
                     threshold_crossing_height_ft: 0.0,
                     aimpoint_ft_from_threshold: self.runway_frame.touchdown_runway_x_ft(),
                 };
                 (
-                    target_altitude,
+                    glidepath_alt,
                     self.config.performance.final_speed_kt,
                     VerticalMode::GlidepathTrack,
                     Some(glidepath),
@@ -1402,7 +1204,8 @@ impl PatternFlyProfile {
             target_track_deg: Some(desired_track),
             target_pitch_deg: Some(pitch_cmd),
             target_speed_kt: Some(self.config.performance.vref_kt),
-            throttle_limit: Some((0.0, 0.2)),
+            // Power to idle in the roundout, as a pilot would.
+            throttle_limit: Some((0.0, 0.0)),
             ..Default::default()
         }
     }
@@ -1427,13 +1230,41 @@ impl PatternFlyProfile {
     }
 }
 
+impl LandingPlanHolder for PatternFlyProfile {
+    fn runway_frame(&self) -> &RunwayFrame {
+        &self.runway_frame
+    }
+
+    fn preferred_exit(&self) -> Option<&RunwayExitPlan> {
+        self.preferred_exit.as_ref()
+    }
+
+    fn arrival(&self) -> Option<&ArrivalPlan> {
+        self.arrival.as_ref()
+    }
+
+    fn set_landing_plan(
+        &mut self,
+        exit: Option<RunwayExitPlan>,
+        arrival: Option<ArrivalPlan>,
+    ) -> Result<(), String> {
+        self.preferred_exit = exit;
+        self.arrival = arrival;
+        Ok(())
+    }
+}
+
 impl GuidanceProfile for PatternFlyProfile {
+    fn landing_plan_mut(&mut self) -> Option<&mut dyn LandingPlanHolder> {
+        Some(self)
+    }
+
     fn name(&self) -> &'static str { "pattern_fly" }
     fn owns(&self) -> AxisSet {
         AxisSet::ALL
     }
 
-    fn contribute(&mut self, state: &AircraftState, _dt: f64) -> ProfileTick {
+    fn contribute(&mut self, state: &AircraftState, dt: f64) -> ProfileTick {
         // Dynamic leg rebuild on triggers: the subsequent leg must start
         // at the aircraft's *current* runway-frame position, not at a
         // stale precomputed point, or "extend then turn X" would leave
@@ -1455,16 +1286,6 @@ impl GuidanceProfile for PatternFlyProfile {
             }
         }
 
-        if matches!(self.phase, FlightPhase::Rollout | FlightPhase::RunwayExit) {
-            self.update_runway_exit_progress(state);
-        }
-        // A go-around after touchdown would firewall the throttle on the
-        // runway or a taxiway. The tool rejects it; drop any trigger that
-        // was armed before touchdown so it can't latch.
-        if self.is_post_landing() {
-            self.force_go_around_trigger = false;
-        }
-
         self.route_manager.advance_if_needed(state.position_ft);
         let safety = self.safety_monitor.evaluate(state, self.phase);
         let previous_phase = self.phase;
@@ -1481,19 +1302,22 @@ impl GuidanceProfile for PatternFlyProfile {
             stay_in_pattern: true,
             touch_and_go: self.touch_and_go_trigger,
         });
-        // A selected exit carries authoritative active-zone geometry.
-        // Once committed, graph progress—not an arbitrary lateral offset—
-        // owns RunwayExit/TaxiClear sequencing. This prevents handoff in
-        // the middle of a multi-edge connector.
-        if self.exit_in_progress()
-            && matches!(previous_phase, FlightPhase::Rollout | FlightPhase::RunwayExit)
-            && self.phase != FlightPhase::GoAround
-        {
-            self.phase = if self.exit_path_complete && state.gs_kt <= 1.0 {
-                FlightPhase::TaxiClear
-            } else {
-                FlightPhase::RunwayExit
-            };
+        // Touchdown: everything on the ground belongs to
+        // LandingRolloutProfile. Hand off now and let it fly this tick, so
+        // there's no frame of airborne guidance on the runway. A go-around
+        // trigger armed before touchdown dies with this profile.
+        // Debounced: the flare continues until the wheels have stayed down
+        // for TOUCHDOWN_SETTLE_S, so a bounce stays with this profile.
+        self.phase = touchdown_debounce(self.phase, state.on_ground, dt, &mut self.ground_contact_s);
+        if self.phase == FlightPhase::Rollout {
+            let rollout = LandingRolloutProfile::new(
+                self.config.clone(),
+                self.runway_frame.clone(),
+                self.preferred_exit.take(),
+            )
+            .with_go_around_reason(self.last_go_around_reason.clone())
+            .with_arrival(self.arrival.take());
+            return touchdown_handoff(rollout, state, dt);
         }
         // Consume one-shot triggers when their corresponding transition
         // has been taken (or is no longer applicable because the phase
@@ -1525,40 +1349,26 @@ impl GuidanceProfile for PatternFlyProfile {
                 });
             }
         }
-        self.holding_on_runway = self.phase == FlightPhase::Rollout
-            && state.gs_kt <= 1.0
-            && (self.preferred_exit.is_none() || self.exit_missed);
+        // Go-around complete (back at pattern altitude): re-enter the
+        // pattern for another approach, as a pilot would at a
+        // non-towered field. ATC vectors or other plans are the LLM's to
+        // apply by engaging something else.
+        if self.phase == FlightPhase::GoAround && self.go_around_climb_settled(state) {
+            self.phase = FlightPhase::Crosswind;
+            // A new circuit: drop the abandoned approach's leg extensions,
+            // pending turn triggers and any armed touch-and-go.
+            self.leg_extensions = PatternLegExtensions {
+                crosswind_ft: 0.0,
+                downwind_ft: self.config.pattern.default_extension_ft,
+            };
+            self.triggers = PatternTriggers::default();
+            self.touch_and_go_trigger = false;
+            self.rebuild_pattern();
+        }
         let guidance = self.guidance_for_phase(state, self.phase);
         let guidance = self.safety_monitor.apply_limits(guidance, self.phase);
 
-        let mut hand_off: Option<Vec<Box<dyn GuidanceProfile>>> = None;
-        if self.phase == FlightPhase::GoAround && self.go_around_climb_settled(state) {
-            hand_off = Some(vec![
-                Box::new(HeadingHoldProfile::new(
-                    self.runway_frame.runway.course_deg,
-                    self.config.limits.max_bank_enroute_deg,
-                    None,
-                ).unwrap()),
-                Box::new(AltitudeHoldProfile::new(self.config.pattern_altitude_msl_ft())),
-                Box::new(SpeedHoldProfile::new(self.config.performance.vy_kt)),
-            ]);
-        }
-        // Post-landing hand-off: release pattern_fly to idle once the
-        // aircraft is clear or stopped. PilotCore::last_known_phase
-        // preserves the phase value for downstream readers
-        // (`pilot.phase()`) after the hand-off, so scenario tests still
-        // see Rollout / TaxiClear.
-        if let Some(replacement) = post_landing_handoff(self.phase, previous_phase, state.gs_kt) {
-            hand_off = Some(replacement);
-        }
-        if let Some(queued) = self.handoff_request.take() {
-            hand_off = Some(queued);
-        }
-
-        ProfileTick {
-            contribution: guidance_to_contribution(guidance),
-            hand_off,
-        }
+        ProfileTick::contribution_only(guidance_to_contribution(guidance))
     }
 
     fn pattern_metadata(&self) -> Option<PatternMetadata> {
@@ -1568,6 +1378,38 @@ impl GuidanceProfile for PatternFlyProfile {
             runway_id: self.runway_frame.runway.id.clone(),
             field_elevation_ft: Some(self.config.airport.field_elevation_ft),
             phase: self.phase,
+        })
+    }
+
+    fn spatial_overlay(&self) -> Option<SpatialOverlay> {
+        let p = &self.pattern;
+        let pattern_legs = vec![
+            LabeledLeg::new("ENTRY", p.entry_leg),
+            LabeledLeg::new("DWN", p.downwind_leg),
+            LabeledLeg::new("BASE", p.base_leg),
+            LabeledLeg::new("FINAL", p.final_leg),
+        ];
+        let active_pattern_leg = match self.phase {
+            FlightPhase::PatternEntry => Some(0),
+            FlightPhase::Downwind => Some(1),
+            FlightPhase::Base => Some(2),
+            FlightPhase::Final => Some(3),
+            _ => None,
+        };
+        let (route, target_label) = match &self.preferred_exit {
+            Some(exit) => (
+                exit_route_legs(&self.runway_frame, exit),
+                Some(exit.taxiway_name.clone()),
+            ),
+            None => (Vec::new(), None),
+        };
+        Some(SpatialOverlay {
+            runway: Some(self.runway_frame.runway.clone()),
+            pattern_legs,
+            active_pattern_leg,
+            route,
+            target_label,
+            ..Default::default()
         })
     }
 
@@ -1598,7 +1440,10 @@ impl GuidanceProfile for PatternFlyProfile {
             }),
             FlightPhase::Rotate => Some(TransitionHint {
                 next_phase: FlightPhase::InitialClimb,
-                condition_text: "wheels off and AGL ≥ 20 ft".to_string(),
+                condition_text: format!(
+                    "wheels off and AGL ≥ {:.0} ft",
+                    self.config.phase_gates.rotate_agl_ft
+                ),
                 eta_s: None,
             }),
             FlightPhase::InitialClimb => {
@@ -1634,10 +1479,13 @@ impl GuidanceProfile for PatternFlyProfile {
                 let path_len = path.length().max(1.0);
                 let rel = state.position_ft - leg.start_ft;
                 let along = rel.dot(path.normalized()).clamp(0.0, path_len);
-                let remaining_ft = (path_len * 0.65 - along).max(0.0);
+                let remaining_ft = (path_len * BASE_TO_FINAL_FRACTION - along).max(0.0);
                 Some(TransitionHint {
                     next_phase: FlightPhase::Final,
-                    condition_text: "established on final / 65% along base".to_string(),
+                    condition_text: format!(
+                        "established on final / {:.0}% along base",
+                        BASE_TO_FINAL_FRACTION * 100.0
+                    ),
                     eta_s: eta_from(remaining_ft),
                 })
             }
@@ -1677,30 +1525,10 @@ impl GuidanceProfile for PatternFlyProfile {
                 condition_text: "wheels on the ground".to_string(),
                 eta_s: None,
             }),
-            FlightPhase::Rollout => Some(TransitionHint {
-                next_phase: FlightPhase::RunwayExit,
-                condition_text: if self.holding_on_runway {
-                    "stopped on runway, holding brakes; choose an exit ahead or engage_park".to_string()
-                } else if let Some(exit) = self.preferred_exit.as_ref().filter(|_| !self.exit_missed) {
-                    format!("reach {} intersection at {:.0} ft", exit.taxiway_name, exit.stationing_ft)
-                } else {
-                    "off centerline (>75 ft) or stopped past end".to_string()
-                },
-                eta_s: None,
-            }),
-            FlightPhase::RunwayExit => Some(TransitionHint {
-                next_phase: FlightPhase::TaxiClear,
-                condition_text: if let Some(exit) = &self.preferred_exit {
-                    format!("follow {} to active-zone boundary and stop", exit.taxiway_name)
-                } else {
-                    "stopped, off runway".to_string()
-                },
-                eta_s: None,
-            }),
             FlightPhase::GoAround => Some(TransitionHint {
-                next_phase: FlightPhase::Downwind,
+                next_phase: FlightPhase::Crosswind,
                 condition_text: format!(
-                    "climb to pattern alt {:.0} ft, then re-engage holds",
+                    "climb on runway heading to pattern alt {:.0} ft, then turn crosswind and fly the pattern again",
                     self.config.pattern_altitude_msl_ft()
                 ),
                 eta_s: None,
@@ -1790,21 +1618,24 @@ pub struct TaxiProfile {
     /// fundamentally the wrong objective. `None` = old behaviour (set
     /// `finished = true` when past the last leg, aircraft coasts to stop).
     pub final_pose: Option<crate::types::TaxiPose>,
-    /// Pose-target entry radius. Inside this distance we stop chasing
-    /// position and start pivoting to heading.
-    pub pose_pivot_radius_ft: f64,
-    /// Position tolerance for declaring the pose reached.
-    pub pose_position_tol_ft: f64,
     /// Heading tolerance (degrees) for declaring the pose reached.
     pub pose_heading_tol_deg: f64,
     /// Creep speed used while pivoting to target heading — the nose wheel
     /// needs some forward motion to bite, so we can't sit at 0 kt while
     /// the heading still needs to rotate.
     pub pose_creep_speed_kt: f64,
+    /// Nose-wheel turn radius (ft) for placing pose lead-in points.
+    pub pose_turn_radius_ft: f64,
+    /// Re-approach point back along the pose heading, set when the
+    /// aircraft passes the spot without settling on it.
+    pose_lead_in: Option<Vec2>,
     /// Dedup'd, display-ready route summary ("A→B→C"). Built once at
     /// construction from `taxiway_names` because `mode_line_suffix` runs
     /// every tick.
     route_summary: Option<String>,
+    /// Where this taxi is going (e.g. a parking spot name), shown in the
+    /// mode line / status so the LLM can tell taxis apart.
+    pub destination: Option<String>,
 }
 
 impl TaxiProfile {
@@ -1838,11 +1669,15 @@ impl TaxiProfile {
             turn_lookahead_ft: 180.0,
             final_stop_distance_ft: 60.0,
             final_pose: None,
-            pose_pivot_radius_ft: 15.0,
-            pose_position_tol_ft: 20.0,
-            pose_heading_tol_deg: 20.0,
+            // Position tolerance must sit inside the pivot radius: the
+            // pose only counts as reached once the aircraft has switched
+            // from steering toward the spot to turning onto its heading.
+            pose_heading_tol_deg: 8.0,
             pose_creep_speed_kt: 2.0,
+            pose_turn_radius_ft: crate::config::GroundHandlingConfig::default().min_turn_radius_ft(),
+            pose_lead_in: None,
             route_summary,
+            destination: None,
         }
     }
 
@@ -1864,9 +1699,59 @@ impl TaxiProfile {
         }
     }
 
+    /// Set the terminal pose: after the last leg, steer onto it and stop.
+    /// The route should arrive roughly along the pose heading (see
+    /// `pose_lead_in_point`); a nose-wheel aircraft can't turn in place.
     pub fn with_final_pose(mut self, pose: crate::types::TaxiPose) -> Self {
         self.final_pose = Some(pose);
         self
+    }
+
+    /// Where a route coming from `from` should hand over to the pose
+    /// phase: back along the pose heading, far enough for a nose wheel
+    /// turning at `turn_radius_ft` to swing onto the heading (the arc's
+    /// tangent length) plus a straight run to settle. `None` when the
+    /// approach is already about aligned. Never more than most of the
+    /// distance from `from`.
+    pub fn pose_lead_in_point(
+        from: Vec2,
+        pose: crate::types::TaxiPose,
+        turn_radius_ft: f64,
+    ) -> Option<Vec2> {
+        const ALIGNED_DEG: f64 = 10.0;
+        const SETTLE_FT: f64 = 20.0;
+        let to_pose = pose.position_ft - from;
+        let turn_deg = wrap_degrees_180(vector_to_heading(to_pose) - pose.heading_deg).abs();
+        if turn_deg <= ALIGNED_DEG || to_pose.length() < 1.0 {
+            return None;
+        }
+        let tangent_ft = turn_radius_ft * (turn_deg.min(170.0) / 2.0).to_radians().tan();
+        let lead_in_ft = (SETTLE_FT + tangent_ft).min(0.8 * to_pose.length());
+        Some(pose.position_ft - heading_to_vector(pose.heading_deg, lead_in_ft))
+    }
+
+    /// Taxi to a parking spot: label it and set the parking brake there
+    /// (unlike a hold-short line, where the next step is line-up).
+    pub fn parking_at(mut self, spot_name: impl Into<String>) -> Self {
+        self.destination = Some(spot_name.into());
+        self
+    }
+
+    /// On the pose heading, inside the pivot radius, and at the spot
+    /// along the heading (within the couple of feet the aircraft coasts
+    /// while braking): creeping on would only overshoot.
+    fn pose_settled(&self, state: &AircraftState, pose: crate::types::TaxiPose) -> bool {
+        const COAST_FT: f64 = 2.0;
+        let aligned =
+            wrap_degrees_180(pose.heading_deg - state.heading_deg).abs() <= self.pose_heading_tol_deg;
+        aligned
+            && (pose.position_ft - state.position_ft).length() < POSE_PIVOT_RADIUS_FT
+            && Self::spot_ahead_ft(state, pose) <= COAST_FT
+    }
+
+    /// Pose reached: settled on it and essentially stopped.
+    fn pose_reached(&self, state: &AircraftState, pose: crate::types::TaxiPose) -> bool {
+        self.pose_settled(state, pose) && state.gs_kt <= self.pose_creep_speed_kt + 0.5
     }
 
     fn route_summary(&self) -> Option<&str> {
@@ -1885,18 +1770,8 @@ impl TaxiProfile {
         // Also advance if past the endpoint along-track: a sideways
         // overshoot can leave Euclidean distance > threshold even
         // though the aircraft has crossed the leg end.
-        let to_end = current.end_ft - current.start_ft;
-        let leg_len = to_end.length();
-        let passed = if leg_len > 1.0 {
-            let inv = 1.0 / leg_len;
-            let dir_x = to_end.x * inv;
-            let dir_y = to_end.y * inv;
-            let delta = state.position_ft - current.end_ft;
-            let along = delta.x * dir_x + delta.y * dir_y;
-            along > 0.0
-        } else {
-            false
-        };
+        let (along, _, leg_len) = leg_projection(state, current);
+        let passed = (current.end_ft - current.start_ft).length() > 1.0 && along > leg_len;
         if dist_to_end < self.leg_advance_distance_ft || passed {
             // Always increment. If that pushes us past the last leg, the
             // contribute path checks for a pose target; absent one, it
@@ -2001,46 +1876,80 @@ impl TaxiProfile {
             .map(String::as_str)
     }
 
-    /// Pose-phase target speed. Three regimes:
+    /// How far ahead the spot is along its own heading (negative once
+    /// passed).
+    fn spot_ahead_ft(state: &AircraftState, pose: crate::types::TaxiPose) -> f64 {
+        (pose.position_ft - state.position_ft).dot(heading_to_vector(pose.heading_deg, 1.0))
+    }
+
+    fn pose_regime(&self, state: &AircraftState, pose: crate::types::TaxiPose) -> PoseRegime {
+        if self.pose_settled(state, pose) {
+            PoseRegime::Settled
+        } else if self.pose_lead_in.is_some() {
+            PoseRegime::Reapproach
+        } else {
+            PoseRegime::RollIn
+        }
+    }
+
+    /// Start or finish a re-approach. Passing the spot without settling
+    /// on it (still turning, or wide) sets a lead-in point a full turn's
+    /// width back along the pose heading; the aircraft swings round to it
+    /// (turning onto the pose heading as it nears it) and rolls in again.
+    /// It's done once the aircraft is back there and heading roughly
+    /// along the pose.
+    fn update_pose_lead_in(&mut self, state: &AircraftState, pose: crate::types::TaxiPose) {
+        let back_ft = 20.0 + 4.0 * self.pose_turn_radius_ft;
+        let ahead_ft = Self::spot_ahead_ft(state, pose);
+        match self.pose_lead_in {
+            None if ahead_ft <= 0.0 && !self.pose_settled(state, pose) => {
+                self.pose_lead_in =
+                    Some(pose.position_ft - heading_to_vector(pose.heading_deg, back_ft));
+            }
+            Some(_) => {
+                let roughly_along =
+                    wrap_degrees_180(pose.heading_deg - state.heading_deg).abs() <= 45.0;
+                if ahead_ft >= 0.5 * back_ft && roughly_along {
+                    self.pose_lead_in = None;
+                }
+            }
+            None => {}
+        }
+    }
+
+    /// Pose-phase target speed:
     ///
-    /// - **Parked** (both tolerances met): 0.
-    /// - **Align** (inside `pose_pivot_radius_ft`, heading not yet in
-    ///   tolerance): `pose_creep_speed_kt`. A C172's nose-wheel steering
-    ///   has no yaw authority at zero ground speed, and live X-Plane's
-    ///   differential braking alone will not rotate a stationary
-    ///   aircraft — so we hold a slow creep to let the nose wheel bite.
-    ///   If we overshoot the position tolerance we'll re-enter the
-    ///   approach regime below and re-approach.
-    /// - **Approach** (farther): ramps with distance up to cruise, BUT
-    ///   throttled by how badly the aircraft is off the bearing to the
-    ///   target. At ≥ 45° off we creep; at ≥ 20° we use turn speed.
-    ///   Without this, a fast-moving aircraft whose heading is way off
-    ///   the target bearing will orbit the pose instead of converging —
-    ///   exactly the failure mode the scenario test caught.
+    /// - **Settled**: 0.
+    /// - **Roll-in**: creep while turning onto the heading (a C172's nose
+    ///   wheel has no yaw authority at a standstill, so it needs some
+    ///   motion), then a speed that tapers to creep at the spot.
+    /// - **Re-approach**: throttled by how far the aircraft is off the
+    ///   bearing to the lead-in point, so it turns before it accelerates.
     fn pose_target_speed(&self, state: &AircraftState, pose: crate::types::TaxiPose) -> f64 {
-        let to_target = pose.position_ft - state.position_ft;
-        let d = to_target.length();
-        let target_hdg_err = wrap_degrees_180(pose.heading_deg - state.heading_deg).abs();
-        if d < self.pose_position_tol_ft && target_hdg_err < self.pose_heading_tol_deg {
-            return 0.0;
+        match self.pose_regime(state, pose) {
+            PoseRegime::Settled => 0.0,
+            PoseRegime::RollIn => {
+                let hdg_err = wrap_degrees_180(pose.heading_deg - state.heading_deg).abs();
+                if hdg_err > 15.0 {
+                    self.pose_creep_speed_kt
+                } else {
+                    // Down to creep for the last 20 ft so it stops near the spot.
+                    let ahead_ft = Self::spot_ahead_ft(state, pose);
+                    (self.pose_creep_speed_kt + 0.1 * (ahead_ft - 20.0).max(0.0))
+                        .min(self.turn_speed_kt)
+                }
+            }
+            PoseRegime::Reapproach => {
+                let to_target = self.pose_lead_in.unwrap_or(pose.position_ft) - state.position_ft;
+                let off_bearing =
+                    wrap_degrees_180(vector_to_heading(to_target) - state.heading_deg).abs();
+                if off_bearing > 45.0 {
+                    self.pose_creep_speed_kt
+                } else {
+                    self.turn_speed_kt
+                }
+            }
         }
-        if d < self.pose_pivot_radius_ft {
-            return self.pose_creep_speed_kt;
-        }
-        let bearing_to_target = crate::types::vector_to_heading(to_target);
-        let approach_hdg_err =
-            wrap_degrees_180(bearing_to_target - state.heading_deg).abs();
-        if approach_hdg_err > 45.0 {
-            return self.pose_creep_speed_kt;
-        }
-        if approach_hdg_err > 20.0 {
-            return self.turn_speed_kt;
-        }
-        // Well-aligned with the approach direction — ramp with distance
-        // from turn_speed at the pivot radius up to cruise.
-        let ramp_slope = 0.25;
-        (self.turn_speed_kt + (d - self.pose_pivot_radius_ft) * ramp_slope)
-            .min(self.cruise_speed_kt)
     }
 
     fn contribute_pose(
@@ -2048,26 +1957,65 @@ impl TaxiProfile {
         state: &AircraftState,
         pose: crate::types::TaxiPose,
     ) -> ProfileTick {
-        let d = (pose.position_ft - state.position_ft).length();
-        let hdg_err = wrap_degrees_180(pose.heading_deg - state.heading_deg).abs();
-        if d < self.pose_position_tol_ft && hdg_err < self.pose_heading_tol_deg {
+        self.update_pose_lead_in(state, pose);
+        if self.pose_reached(state, pose) {
             self.finished = true;
         }
         let target_speed = self.pose_target_speed(state, pose);
-        ProfileTick::contribution_only(ProfileContribution {
-            lateral_mode: Some(LateralMode::TaxiPose),
+        let common = ProfileContribution {
             vertical_mode: Some(VerticalMode::Taxi),
-            target_waypoint: Some(crate::types::Waypoint {
-                name: "hold_short".to_string(),
-                position_ft: pose.position_ft,
-                altitude_ft: None,
-            }),
-            target_heading_deg: Some(pose.heading_deg),
             target_speed_kt: Some(target_speed),
             target_pitch_deg: Some(0.0),
             throttle_limit: Some((0.0, 1.0)),
             ..Default::default()
-        })
+        };
+        let contribution = match self.pose_lead_in {
+            // Swing round toward the lead-in point.
+            Some(lead_in) => ProfileContribution {
+                lateral_mode: Some(LateralMode::TaxiPose),
+                target_waypoint: Some(crate::types::Waypoint {
+                    name: self.destination.clone().unwrap_or_else(|| "hold_short".to_string()),
+                    position_ft: lead_in,
+                    altitude_ft: None,
+                }),
+                target_heading_deg: Some(pose.heading_deg),
+                ..common
+            },
+            // Roll in along the line through the spot on its heading.
+            None => {
+                let back_ft = Self::spot_ahead_ft(state, pose).max(0.0) + 50.0;
+                ProfileContribution {
+                    lateral_mode: Some(LateralMode::TaxiFollow),
+                    target_path: Some(StraightLeg {
+                        start_ft: pose.position_ft - heading_to_vector(pose.heading_deg, back_ft),
+                        end_ft: pose.position_ft,
+                    }),
+                    ..common
+                }
+            }
+        };
+        ProfileTick::contribution_only(contribution)
+    }
+}
+
+/// What the pose phase is doing this tick.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PoseRegime {
+    /// On the pose (or stopped abeam it, aligned): hold.
+    Settled,
+    /// Following the line through the spot on its heading.
+    RollIn,
+    /// Passed the spot unsettled; swinging round to a lead-in point.
+    Reapproach,
+}
+
+impl PoseRegime {
+    fn label(self) -> &'static str {
+        match self {
+            PoseRegime::Settled => "settled",
+            PoseRegime::RollIn => "roll-in",
+            PoseRegime::Reapproach => "re-approach",
+        }
     }
 }
 
@@ -2096,6 +2044,20 @@ impl GuidanceProfile for TaxiProfile {
         // Normal line-following path.
         let leg = self.current_leg();
         let target_speed = self.target_speed_kt(state);
+        // Parked at a pose target (a parking spot): set the parking brake,
+        // as a pilot would on arrival. It stays set while this profile
+        // remains engaged; the next taxi releases it.
+        let parked = self.finished && self.final_pose.is_some() && self.destination.is_some();
+        if parked {
+            return ProfileTick::contribution_only(ProfileContribution {
+                lateral_mode: Some(LateralMode::TaxiFollow),
+                vertical_mode: Some(VerticalMode::PitchHold),
+                target_pitch_deg: Some(0.0),
+                throttle_limit: Some((0.0, 0.0)),
+                parking_brake: Some(1.0),
+                ..Default::default()
+            });
+        }
         ProfileTick::contribution_only(ProfileContribution {
             lateral_mode: Some(LateralMode::TaxiFollow),
             vertical_mode: Some(VerticalMode::Taxi),
@@ -2111,6 +2073,32 @@ impl GuidanceProfile for TaxiProfile {
         self.finished
     }
 
+    fn spatial_overlay(&self) -> Option<SpatialOverlay> {
+        let route = self
+            .legs_ft
+            .iter()
+            .enumerate()
+            .map(|(i, leg)| {
+                let name = self.taxiway_names.get(i).map(String::as_str).unwrap_or("");
+                let label = if name.starts_with('(') { "" } else { name };
+                LabeledLeg::new(label, *leg)
+            })
+            .collect();
+        let target_label = self.destination.clone().or_else(|| {
+            self.final_pose.map(|_| match self.mode {
+                TaxiProfileMode::LineUp => "LINE UP".to_string(),
+                TaxiProfileMode::Taxi => "HOLD SHORT".to_string(),
+            })
+        });
+        Some(SpatialOverlay {
+            route,
+            route_active_idx: Some(self.current_idx.min(self.legs_ft.len())),
+            target_pose: self.final_pose,
+            target_label,
+            ..Default::default()
+        })
+    }
+
     fn mode_line_suffix(&self, state: &AircraftState) -> Option<String> {
         let route = self.route_summary();
         let total_remaining = self.remaining_distance_ft(state);
@@ -2119,10 +2107,8 @@ impl GuidanceProfile for TaxiProfile {
             let d = (pose.position_ft - state.position_ft).length();
             let phase = if self.finished {
                 "parked"
-            } else if d < self.pose_pivot_radius_ft {
-                "align"
             } else {
-                "approach"
+                self.pose_regime(state, pose).label()
             };
             format!("{phase} · {:.0}ft", d)
         } else if let Some(leg) = self.current_leg() {
@@ -2144,9 +2130,13 @@ impl GuidanceProfile for TaxiProfile {
         } else {
             "finished".to_string()
         };
-        Some(match route {
+        let body = match route {
             Some(r) => format!("via {r} · {tail}"),
             None => tail,
+        };
+        Some(match &self.destination {
+            Some(dest) => format!("→ {dest} {body}"),
+            None => body,
         })
     }
 
@@ -2157,10 +2147,8 @@ impl GuidanceProfile for TaxiProfile {
             let hdg_err = wrap_degrees_180(pose.heading_deg - state.heading_deg);
             let phase = if self.finished {
                 "parked"
-            } else if d < self.pose_pivot_radius_ft {
-                "align"
             } else {
-                "approach"
+                self.pose_regime(state, pose).label()
             };
             return Some(format!(
                 "taxi pose [{}] d {:.0}ft hdg-err {:+.0}° target {:.0}kt",
@@ -2199,4 +2187,21 @@ impl GuidanceProfile for TaxiProfile {
             self.target_speed_kt(state),
         ))
     }
+}
+
+/// World-frame legs of a runway-exit connector, each labelled with the
+/// exit's taxiway name. Shared by `pattern_fly` (planned exit) and
+/// `landing_rollout` (exit being flown).
+pub(crate) fn exit_route_legs(frame: &RunwayFrame, exit: &RunwayExitPlan) -> Vec<LabeledLeg> {
+    (0..exit.path_runway_ft.len().saturating_sub(1))
+        .filter_map(|i| exit_leg(frame, exit, i))
+        .map(|leg| LabeledLeg::new(exit.taxiway_name.clone(), leg))
+        .collect()
+}
+
+/// World-frame leg `leg_idx` of an exit connector.
+pub(crate) fn exit_leg(frame: &RunwayFrame, exit: &RunwayExitPlan, leg_idx: usize) -> Option<StraightLeg> {
+    let start = *exit.path_runway_ft.get(leg_idx)?;
+    let end = *exit.path_runway_ft.get(leg_idx + 1)?;
+    Some(StraightLeg { start_ft: frame.to_world_frame(start), end_ft: frame.to_world_frame(end) })
 }
