@@ -13,7 +13,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 # for scripted / non-interactive runs (otherwise the process blocks on
 # the TUI).
 cargo run --release --                                # default: --backend xplane, TUI on
-cargo run --release -- --headless --atc-message "..." # scripted / agent invocation
+cargo run --release -- --headless --operator-message "..." --atc-message "..." # scripted / agent invocation (sent in argv order)
 cargo run --release -- --pilot-llm-model gpt-5.4-mini-2026-03-17
 
 # Offline deterministic simulation (no X-Plane, no OpenAI key).

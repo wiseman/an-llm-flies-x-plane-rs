@@ -77,7 +77,7 @@ fn selected_exit_drives_rollout_clear_of_runway() {
             Vec2::new(2950.0, 100.0),
             Vec2::new(2920.0, 140.0),
         ],
-    }));
+    })).unwrap();
     let mut pilot = PilotCore::new(config);
     pilot.engage_profile(Box::new(profile));
 

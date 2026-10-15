@@ -525,7 +525,7 @@ fn selected_runway_exit_slows_without_leaving_centerline_early() {
         taxiway_name: "A5".to_string(),
         stationing_ft: 3000.0,
         path_runway_ft: vec![Vec2::new(3000.0, 0.0), Vec2::new(2950.0, 100.0)],
-    }));
+    })).unwrap();
     let state = AircraftState {
         runway_x_ft: Some(2800.0),
         runway_y_ft: Some(0.0),
@@ -554,7 +554,7 @@ fn selected_runway_exit_commits_to_exact_graph_leg_at_intersection() {
             Vec2::new(2950.0, -100.0),
             Vec2::new(2920.0, -140.0),
         ],
-    }));
+    })).unwrap();
     let state = AircraftState {
         runway_x_ft: Some(2990.0),
         runway_y_ft: Some(0.0),
@@ -587,7 +587,7 @@ fn missed_runway_exit_never_commands_a_cutback() {
         taxiway_name: "B".to_string(),
         stationing_ft: 3000.0,
         path_runway_ft: vec![Vec2::new(3000.0, 0.0), Vec2::new(2950.0, 100.0)],
-    }));
+    })).unwrap();
     let missed = AircraftState {
         runway_x_ft: Some(3070.0),
         runway_y_ft: Some(0.0),
@@ -617,20 +617,142 @@ fn missed_runway_exit_never_commands_a_cutback() {
 }
 
 #[test]
-fn stopped_rollout_does_not_release_control_on_the_runway() {
+fn stopped_rollout_holds_runway_but_accepts_ground_taxi_handoff() {
     let (cfg, pilot) = make_pilot();
     let mut profile = PatternFlyProfile::new(cfg, pilot.runway_frame.clone());
     profile.phase = FlightPhase::Rollout;
-    let state = AircraftState {
+    let rolling = AircraftState {
         runway_x_ft: Some(3000.0),
         runway_y_ft: Some(0.0),
+        gs_kt: 12.0,
+        on_ground: true,
+        ..AircraftState::synthetic_default()
+    };
+    profile.contribute(&rolling, 0.2);
+    assert!(!profile.accepts_ground_handoff(), "still rolling");
+
+    let stopped = AircraftState { gs_kt: 0.0, ..rolling };
+    let tick = profile.contribute(&stopped, 0.2);
+    // pattern_fly keeps the brakes on rather than releasing to idle on
+    // the runway, but must not deadlock engage_park.
+    assert!(tick.hand_off.is_none());
+    assert_eq!(profile.phase, FlightPhase::Rollout);
+    assert!(profile.accepts_ground_handoff());
+}
+
+#[test]
+fn stopped_after_missed_exit_accepts_ground_taxi_handoff() {
+    let (cfg, pilot) = make_pilot();
+    let runway_length = pilot.runway_frame.runway.length_ft;
+    let mut profile = PatternFlyProfile::new(cfg, pilot.runway_frame.clone());
+    profile.phase = FlightPhase::Rollout;
+    profile.set_preferred_exit(Some(RunwayExitPlan {
+        taxiway_name: "B".to_string(),
+        stationing_ft: 3000.0,
+        path_runway_ft: vec![Vec2::new(3000.0, 0.0), Vec2::new(2950.0, 100.0)],
+    })).unwrap();
+    // Braked to a stop short of the runway end after missing B.
+    let x = runway_length - 250.0;
+    let stopped = AircraftState {
+        runway_x_ft: Some(x),
+        runway_y_ft: Some(0.0),
+        position_ft: pilot.runway_frame.to_world_frame(Vec2::new(x, 0.0)),
         gs_kt: 0.0,
         on_ground: true,
         ..AircraftState::synthetic_default()
     };
-    let tick = profile.contribute(&state, 0.2);
-    assert!(tick.hand_off.is_none());
+    profile.contribute(&stopped, 0.2);
     assert_eq!(profile.phase, FlightPhase::Rollout);
+    assert!(profile.accepts_ground_handoff());
+}
+
+#[test]
+fn exit_final_leg_keeps_creeping_until_node_captured() {
+    let (cfg, pilot) = make_pilot();
+    let mut profile = PatternFlyProfile::new(cfg, pilot.runway_frame.clone());
+    profile.phase = FlightPhase::Rollout;
+    profile.set_preferred_exit(Some(RunwayExitPlan {
+        taxiway_name: "E".to_string(),
+        stationing_ft: 3000.0,
+        path_runway_ft: vec![Vec2::new(3000.0, 0.0), Vec2::new(3000.0, -100.0)],
+    })).unwrap();
+    let at = |x: f64, y: f64, gs: f64| AircraftState {
+        runway_x_ft: Some(x),
+        runway_y_ft: Some(y),
+        position_ft: pilot.runway_frame.to_world_frame(Vec2::new(x, y)),
+        gs_kt: gs,
+        on_ground: true,
+        ..AircraftState::synthetic_default()
+    };
+    profile.contribute(&at(2995.0, 0.0, 5.0), 0.2);
+    assert_eq!(profile.phase, FlightPhase::RunwayExit);
+    // Stopped 12 ft short of the final node, outside its 8 ft capture
+    // radius: guidance must still ask for forward motion.
+    let tick = profile.contribute(&at(3000.0, -88.0, 0.0), 0.2);
+    assert_eq!(profile.phase, FlightPhase::RunwayExit);
+    let speed = tick.contribution.target_speed_kt.unwrap();
+    assert!(speed >= 2.0, "target speed {speed} would stall short of the node");
+    // Once captured it stops and releases.
+    let tick = profile.contribute(&at(3000.0, -95.0, 0.5), 0.2);
+    assert_eq!(profile.phase, FlightPhase::TaxiClear);
+    assert!(tick.hand_off.is_some());
+}
+
+#[test]
+fn go_around_trigger_is_dropped_after_touchdown() {
+    let (cfg, pilot) = make_pilot();
+    let mut profile = PatternFlyProfile::new(cfg, pilot.runway_frame.clone());
+    profile.phase = FlightPhase::Rollout;
+    profile.set_preferred_exit(Some(RunwayExitPlan {
+        taxiway_name: "E".to_string(),
+        stationing_ft: 3000.0,
+        path_runway_ft: vec![Vec2::new(3000.0, 0.0), Vec2::new(3000.0, -100.0)],
+    })).unwrap();
+    let state = AircraftState {
+        runway_x_ft: Some(2995.0),
+        runway_y_ft: Some(0.0),
+        position_ft: pilot.runway_frame.to_world_frame(Vec2::new(2995.0, 0.0)),
+        gs_kt: 5.0,
+        on_ground: true,
+        ..AircraftState::synthetic_default()
+    };
+    profile.contribute(&state, 0.2);
+    assert_eq!(profile.phase, FlightPhase::RunwayExit);
+    assert!(profile.is_post_landing());
+
+    profile.go_around();
+    profile.contribute(&state, 0.2);
+    assert_eq!(profile.phase, FlightPhase::RunwayExit);
+    assert!(!profile.force_go_around_trigger, "stale trigger must not latch");
+}
+
+#[test]
+fn preferred_exit_cannot_change_once_turning_off() {
+    let (cfg, pilot) = make_pilot();
+    let mut profile = PatternFlyProfile::new(cfg, pilot.runway_frame.clone());
+    profile.phase = FlightPhase::Rollout;
+    let plan = |name: &str, x: f64| RunwayExitPlan {
+        taxiway_name: name.to_string(),
+        stationing_ft: x,
+        path_runway_ft: vec![Vec2::new(x, 0.0), Vec2::new(x, -100.0)],
+    };
+    profile.set_preferred_exit(Some(plan("E", 3000.0))).unwrap();
+    // Before the turn, the choice can still change.
+    profile.set_preferred_exit(Some(plan("E", 3000.0))).unwrap();
+    let state = AircraftState {
+        runway_x_ft: Some(2995.0),
+        runway_y_ft: Some(0.0),
+        position_ft: pilot.runway_frame.to_world_frame(Vec2::new(2995.0, 0.0)),
+        gs_kt: 5.0,
+        on_ground: true,
+        ..AircraftState::synthetic_default()
+    };
+    profile.contribute(&state, 0.2);
+    assert_eq!(profile.phase, FlightPhase::RunwayExit);
+    let err = profile.set_preferred_exit(Some(plan("F", 4000.0))).unwrap_err();
+    assert!(err.contains("E"), "{err}");
+    assert!(profile.set_preferred_exit(None).is_err());
+    assert_eq!(profile.preferred_exit.as_ref().unwrap().taxiway_name, "E");
 }
 
 #[test]

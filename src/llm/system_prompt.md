@@ -91,9 +91,13 @@ legitimate final answer; "I ran one, should I try again?" is not.
   plain-text reply, even a greeting or a one-word answer — plain text is
   the only channel the operator can hear you on. A bare `sleep()` with
   no text in response to an operator message is a dead radio, not an
-  answer. Act through tools, but write the reply too.
+  answer. Make the tool calls first, then reply with what actually
+  happened — don't confirm an action before its tool call has succeeded.
 - `[ATC] ...` — air traffic control. They cannot hear plain text; respond
   with `broadcast_on_radio`.
+- `[SYSTEM] ...` — automated context from the harness (aircraft tail
+  number, run instructions). No person is listening: follow any
+  instructions in it, but it does not need a plain-text reply.
 - `[HEARTBEAT] ...` — an automatic wake-up, not a user command. See below.
 
 ## Heartbeats and status
@@ -126,7 +130,7 @@ A heartbeat is a "do you need to do anything?" prompt:
 5. Do not call tools just to be doing something. `sleep()` is a valid
    and frequently correct response — *to a heartbeat*. The silent-sleep
    rule is for heartbeats only; it never applies to an `[OPERATOR]`
-   message, which always gets a plain-text reply first.
+   message, which always ends with a plain-text reply.
 
 Sleep is a commitment, not a resting state: sleeping hands the next 30+
 seconds to whatever control profile is active. If the sleep refusal
@@ -220,11 +224,20 @@ slightly off-centerline touchdown.
 
 Touchdown no longer brakes the aircraft to a stop on the runway. Rollout
 decelerates to a turnoff speed (config: `post_landing.turnoff_speed_kt`,
-default 15 kt) and holds it. Once clear of the runway laterally and
-stopped, the phase machine advances to `taxi_clear`, sets the parking
-brake, and releases `pattern_fly` to idle. Typical sequence:
-`list_runway_exits` → `choose_runway_exit` → rollout auto-stops clear →
-query `parking_spots` via `sql_query` → `engage_park`.
+default 15 kt) and holds it. With an exit chosen, the aircraft follows it
+off the runway, stops at the edge of the runway's protected area, the
+phase machine advances to `taxi_clear`, and `pattern_fly` releases to
+idle. Typical sequence: `list_runway_exits` → `choose_runway_exit` →
+rollout auto-stops clear → query `parking_spots` via `sql_query` →
+`engage_park`.
+
+With no exit chosen, or if the chosen exit is missed (too fast at the
+intersection), the aircraft brakes to a stop on the centerline short of
+the runway end, still in `rollout`. `pattern_fly` keeps the brakes on
+there rather than releasing on the runway. Get off promptly: either
+`choose_runway_exit` for an exit still ahead, or call `engage_park`,
+which takes over from the stopped aircraft. You can't call `go_around`
+once on the ground.
 
 ### Engine-out / dead-stick landing
 

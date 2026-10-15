@@ -12,7 +12,9 @@ use tempfile::TempDir;
 
 use xplane_pilot::config::load_default_config_bundle;
 use xplane_pilot::core::mission_manager::{PilotCore, StatusSnapshot};
-use xplane_pilot::core::profiles::{HeadingHoldProfile, PatternFlyProfile, TakeoffProfile};
+use xplane_pilot::core::profiles::{
+    GuidanceProfile, HeadingHoldProfile, PatternFlyProfile, TakeoffProfile,
+};
 use xplane_pilot::llm::tools::{dispatch_tool, ToolBridge, ToolContext};
 use xplane_pilot::sim::xplane_bridge::GeoReference;
 use xplane_pilot::types::{AircraftState, Vec2};
@@ -1743,6 +1745,123 @@ fn engage_park_rejects_while_pattern_controls_runway_exit() {
     let names = ctx.pilot.lock().list_profile_names();
     assert!(!names.contains(&"taxi".to_string()), "profiles = {:?}", names);
     assert!(names.contains(&"pattern_fly".to_string()));
+}
+
+/// A pattern_fly profile on runway 36 that has finished its rollout and is
+/// sitting stopped on the centerline with no exit selected.
+fn pattern_fly_stopped_on_runway() -> PatternFlyProfile {
+    let mut p = PatternFlyProfile::new(
+        load_default_config_bundle(),
+        xplane_pilot::guidance::runway_geometry::RunwayFrame::new(
+            xplane_pilot::types::Runway {
+                id: Some("36".to_string()),
+                threshold_ft: Vec2::new(0.0, 0.0),
+                course_deg: 360.0,
+                length_ft: 5000.0,
+                touchdown_zone_ft: 1200.0,
+                displaced_threshold_ft: 0.0,
+                traffic_side: xplane_pilot::types::TrafficSide::Left,
+            },
+        ),
+    );
+    p.phase = xplane_pilot::types::FlightPhase::Rollout;
+    let stopped = AircraftState {
+        runway_x_ft: Some(3000.0),
+        runway_y_ft: Some(0.0),
+        position_ft: Vec2::new(0.0, 3000.0),
+        gs_kt: 0.0,
+        on_ground: true,
+        ..AircraftState::synthetic_default()
+    };
+    p.contribute(&stopped, 0.2);
+    assert!(p.accepts_ground_handoff());
+    p
+}
+
+#[test]
+fn engage_park_takes_over_when_stopped_on_runway_without_exit() {
+    let dir = TempDir::new().unwrap();
+    build_park_fixture_parquet(dir.path());
+    let (ctx, _bridge) = make_ctx_with_parquet(dir.path());
+    ctx.pilot.lock().engage_profile(Box::new(pattern_fly_stopped_on_runway()));
+
+    let r = dispatch(
+            "engage_park",
+            json!({
+                "airport_ident": "KTEST",
+                "parking_name": "Gate A4",
+                "via_taxiways": [],
+                "start_lat": 37.000500,
+                "start_lon": -122.002000,
+            }),
+        &ctx);
+    assert!(!r.starts_with("error"), "got: {}", r);
+    let names = ctx.pilot.lock().list_profile_names();
+    assert!(names.contains(&"taxi".to_string()), "profiles = {:?}", names);
+    assert!(!names.contains(&"pattern_fly".to_string()), "profiles = {:?}", names);
+}
+
+#[test]
+fn go_around_rejected_after_touchdown() {
+    let (ctx, _bridge) = make_ctx_with_parquet(TempDir::new().unwrap().path());
+    ctx.pilot.lock().engage_profile(Box::new(pattern_fly_stopped_on_runway()));
+    let r = dispatch("go_around", json!({}), &ctx);
+    assert!(r.starts_with("error"), "got: {}", r);
+    assert!(r.contains("ground"), "got: {}", r);
+}
+
+#[test]
+fn choose_runway_exit_picks_intersection_past_touchdown() {
+    // Parallel taxiway A meets runway 09 near the threshold (~150 ft) and
+    // again near the far end (~2200 ft). The near-threshold junction is
+    // before the touchdown point, so the exit must resolve to the far one.
+    let dir = TempDir::new().unwrap();
+    let extra = vec![
+        "1 0 0 0 KEXIT KEXIT Test Exit Airport\n\
+         100 22.86 1 0 0.25 0 2 0 \
+         09 37.000100 -121.997500 0.00 0 0 0 0 0 \
+         27 37.000100 -121.987500 0.00 0 0 0 0 0\n\
+         1201 37.000100 -121.997000 both 1\n\
+         1201 37.000300 -121.997000 both 2\n\
+         1201 37.000100 -121.990000 both 3\n\
+         1201 37.000300 -121.990000 both 4\n\
+         1201 37.000300 -121.993500 both 5\n\
+         1202 1 2 twoway taxiway_E A\n\
+         1204 arrival 09\n\
+         1202 3 4 twoway taxiway_E A\n\
+         1204 arrival 09\n\
+         1202 2 5 twoway taxiway_E A\n\
+         1202 5 4 twoway taxiway_E A\n"
+            .to_string(),
+    ];
+    build_fake_parquet(dir.path(), &extra);
+    let (ctx, _bridge) = make_ctx_with_parquet(dir.path());
+    dispatch(
+        "engage_pattern_fly",
+        json!({
+            "airport_ident": "KEXIT",
+            "runway_ident": "09",
+            "side": "left",
+            "start_phase": "pattern_entry",
+        }),
+        &ctx,
+    );
+    let listed = dispatch(
+        "list_runway_exits",
+        json!({"airport_ident": "KEXIT", "runway_ident": "09"}),
+        &ctx,
+    );
+    assert_eq!(listed.matches("  A\t").count(), 2, "both junctions listed:\n{}", listed);
+
+    let r = dispatch("choose_runway_exit", json!({"taxiway_name": "A"}), &ctx);
+    assert!(!r.starts_with("error"), "got: {}", r);
+    let st: f64 = r
+        .split("intersection at ")
+        .nth(1)
+        .and_then(|rest| rest.split(' ').next())
+        .and_then(|n| n.parse().ok())
+        .unwrap_or_else(|| panic!("no stationing in {r}"));
+    assert!(st > 2000.0, "picked the near-threshold junction: {r}");
 }
 
 #[test]

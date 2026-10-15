@@ -45,6 +45,7 @@ pilot:
   engage_profile: idle
   atc_messages:
     - "[atc] Cessna 1234, Whiteman Ground, cleared to taxi to Ramp Parking via Alpha."
+  operator_messages:
     - "You just cleared runway 12 onto taxiway Alpha at KWHP. Engine is running, parking brake is off. Your clearance is to taxi to 'Ramp Parking' — call engage_park(airport_ident='KWHP', parking_name='Ramp Parking') to begin taxiing."
   extra_args:
     - --pilot-llm-model

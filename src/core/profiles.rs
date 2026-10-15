@@ -764,6 +764,11 @@ pub struct PatternFlyProfile {
     exit_leg_idx: usize,
     exit_path_complete: bool,
     exit_missed: bool,
+    /// Set each tick when the aircraft has come to a stop in Rollout with
+    /// no exit left to fly (none chosen, or the chosen one was missed).
+    /// pattern_fly keeps holding the brakes rather than releasing to idle
+    /// on the runway, but a ground taxi profile may displace it.
+    holding_on_runway: bool,
 }
 
 impl PatternFlyProfile {
@@ -804,6 +809,7 @@ impl PatternFlyProfile {
             exit_leg_idx: 0,
             exit_path_complete: false,
             exit_missed: false,
+            holding_on_runway: false,
         }
     }
 
@@ -811,13 +817,50 @@ impl PatternFlyProfile {
 
     /// Record (or clear) the preferred runway-exit taxiway for the
     /// post-landing rollout. `None` keeps the aircraft on centerline.
-    pub fn set_preferred_exit(&mut self, exit: Option<RunwayExitPlan>) {
+    /// Refused once the aircraft has turned onto the current exit: the
+    /// replacement would steer back toward runway heading from a position
+    /// already on the connector.
+    pub fn set_preferred_exit(&mut self, exit: Option<RunwayExitPlan>) -> Result<(), String> {
+        if self.exit_in_progress() {
+            let name = self
+                .preferred_exit
+                .as_ref()
+                .map(|e| e.taxiway_name.as_str())
+                .unwrap_or("?");
+            return Err(format!(
+                "already turning off the runway onto {name}; the exit can't be changed until it completes"
+            ));
+        }
         self.preferred_exit = exit;
         self.exit_committed = false;
         self.exit_leg_idx = 0;
         self.exit_path_complete = false;
         self.exit_missed = false;
+        self.holding_on_runway = false;
+        Ok(())
     }
+
+    /// True while the aircraft is following a committed exit connector.
+    fn exit_in_progress(&self) -> bool {
+        self.preferred_exit.is_some() && self.exit_committed && !self.exit_missed
+    }
+
+    /// Whether a ground taxi profile (engage_park) may take over: either
+    /// the selected exit has been flown to completion, or the aircraft is
+    /// stopped on the runway with no exit left to fly.
+    pub fn accepts_ground_handoff(&self) -> bool {
+        self.holding_on_runway || self.phase == FlightPhase::TaxiClear
+    }
+
+    /// True once the aircraft is on the ground after landing, where a
+    /// go-around is no longer meaningful.
+    pub fn is_post_landing(&self) -> bool {
+        matches!(
+            self.phase,
+            FlightPhase::Rollout | FlightPhase::RunwayExit | FlightPhase::TaxiClear
+        )
+    }
+
     pub fn execute_touch_and_go(&mut self) { self.touch_and_go_trigger = true; }
 
     /// Fire the one-shot trigger for a given turn. Once set, the next
@@ -962,6 +1005,11 @@ impl PatternFlyProfile {
         const SLOWDOWN_LEAD_FT: f64 = 300.0;
         const FINAL_STOP_RAMP_FT: f64 = 60.0;
         const EXIT_SPEED_KT: f64 = 5.0;
+        // Keep creeping until the last node is captured. A pure
+        // distance-proportional ramp drops below the speed controller's
+        // deadband several feet out, and rolling friction can then stop
+        // the aircraft outside LEG_CAPTURE_FT so the path never completes.
+        const EXIT_CREEP_SPEED_KT: f64 = 2.0;
 
         if let Some(exit) = &self.preferred_exit {
             let runway_x = state.runway_x_ft.unwrap_or(f64::NEG_INFINITY);
@@ -987,7 +1035,8 @@ impl PatternFlyProfile {
                                 .distance_to(self.runway_frame.to_world_frame(*point))
                         })
                         .unwrap_or(0.0);
-                    (distance / FINAL_STOP_RAMP_FT * EXIT_SPEED_KT).clamp(0.0, EXIT_SPEED_KT)
+                    (distance / FINAL_STOP_RAMP_FT * EXIT_SPEED_KT)
+                        .clamp(EXIT_CREEP_SPEED_KT, EXIT_SPEED_KT)
                 } else {
                     EXIT_SPEED_KT
                 };
@@ -1409,6 +1458,12 @@ impl GuidanceProfile for PatternFlyProfile {
         if matches!(self.phase, FlightPhase::Rollout | FlightPhase::RunwayExit) {
             self.update_runway_exit_progress(state);
         }
+        // A go-around after touchdown would firewall the throttle on the
+        // runway or a taxiway. The tool rejects it; drop any trigger that
+        // was armed before touchdown so it can't latch.
+        if self.is_post_landing() {
+            self.force_go_around_trigger = false;
+        }
 
         self.route_manager.advance_if_needed(state.position_ft);
         let safety = self.safety_monitor.evaluate(state, self.phase);
@@ -1430,10 +1485,9 @@ impl GuidanceProfile for PatternFlyProfile {
         // Once committed, graph progress—not an arbitrary lateral offset—
         // owns RunwayExit/TaxiClear sequencing. This prevents handoff in
         // the middle of a multi-edge connector.
-        if self.preferred_exit.is_some()
+        if self.exit_in_progress()
             && matches!(previous_phase, FlightPhase::Rollout | FlightPhase::RunwayExit)
-            && self.exit_committed
-            && !self.exit_missed
+            && self.phase != FlightPhase::GoAround
         {
             self.phase = if self.exit_path_complete && state.gs_kt <= 1.0 {
                 FlightPhase::TaxiClear
@@ -1471,6 +1525,9 @@ impl GuidanceProfile for PatternFlyProfile {
                 });
             }
         }
+        self.holding_on_runway = self.phase == FlightPhase::Rollout
+            && state.gs_kt <= 1.0
+            && (self.preferred_exit.is_none() || self.exit_missed);
         let guidance = self.guidance_for_phase(state, self.phase);
         let guidance = self.safety_monitor.apply_limits(guidance, self.phase);
 
@@ -1622,7 +1679,9 @@ impl GuidanceProfile for PatternFlyProfile {
             }),
             FlightPhase::Rollout => Some(TransitionHint {
                 next_phase: FlightPhase::RunwayExit,
-                condition_text: if let Some(exit) = &self.preferred_exit {
+                condition_text: if self.holding_on_runway {
+                    "stopped on runway, holding brakes; choose an exit ahead or engage_park".to_string()
+                } else if let Some(exit) = self.preferred_exit.as_ref().filter(|_| !self.exit_missed) {
                     format!("reach {} intersection at {:.0} ft", exit.taxiway_name, exit.stationing_ft)
                 } else {
                     "off centerline (>75 ft) or stopped past end".to_string()

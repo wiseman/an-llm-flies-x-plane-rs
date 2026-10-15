@@ -1576,8 +1576,15 @@ pub fn tool_set_pattern_clearance(ctx: &ToolContext, args: &Map<String, Value>) 
 }
 
 pub fn tool_go_around(ctx: &ToolContext, _args: &Map<String, Value>) -> String {
-    match with_pattern_profile(ctx, |p| p.go_around()) {
-        Some(_) => "go_around triggered".to_string(),
+    match with_pattern_profile(ctx, |p| {
+        if p.is_post_landing() {
+            return Err(());
+        }
+        p.go_around();
+        Ok(())
+    }) {
+        Some(Ok(())) => "go_around triggered".to_string(),
+        Some(Err(())) => "error: already on the ground after landing; a go-around is no longer possible (arm execute_touch_and_go before touchdown instead)".to_string(),
         None => "error: pattern_fly profile is not active; call engage_pattern_fly first".to_string(),
     }
 }
@@ -2320,8 +2327,8 @@ pub fn tool_plan_park_route(ctx: &ToolContext, args: &Map<String, Value>) -> Str
 }
 
 pub fn tool_engage_park(ctx: &ToolContext, args: &Map<String, Value>) -> String {
-    if ctx.pilot.lock().has_profile("pattern_fly") {
-        return "error: pattern_fly is still controlling landing rollout/runway exit; wait until it reaches the active-zone boundary, stops, and releases before calling engage_park".to_string();
+    if with_pattern_profile(ctx, |p| p.accepts_ground_handoff()) == Some(false) {
+        return "error: pattern_fly is still controlling landing rollout/runway exit; wait until it stops (on the runway with no exit to fly, or at the end of the chosen exit) before calling engage_park".to_string();
     }
     let bridge = match ctx.bridge.as_ref() {
         Some(b) => b.clone(),
@@ -2480,6 +2487,7 @@ pub fn tool_choose_runway_exit(ctx: &ToolContext, args: &Map<String, Value>) -> 
 
     // Resolve the selected taxi edge into stationing and runway side now;
     // PatternFlyProfile needs both to fly the exit autonomously.
+    let mut chosen_stationing_ft = None;
     let exit_plan = if let Some(name) = &taxiway {
         let (airport, runway) = {
             let cfg = ctx.config.lock();
@@ -2492,13 +2500,32 @@ pub fn tool_choose_runway_exit(ctx: &ToolContext, args: &Map<String, Value>) -> 
             Ok(v) => v,
             Err(e) => return format!("error: cannot resolve runway exit geometry: {e}"),
         };
-        let Some(exit) = detail.exits.iter().find(|exit| exit.name == *name) else {
-            let valid: Vec<String> = detail.exits.iter().map(|exit| exit.name.clone()).collect();
+        let matches: Vec<&RunwayExitCandidate> =
+            detail.exits.iter().filter(|exit| exit.name == *name).collect();
+        if matches.is_empty() {
+            let mut valid: Vec<String> = detail.exits.iter().map(|exit| exit.name.clone()).collect();
+            valid.sort();
+            valid.dedup();
             return format!(
                 "error: unknown exit {:?} at {} runway {}; valid: {:?}",
                 name, airport, runway, valid
             );
-        };
+        }
+        // A taxiway can meet the runway more than once. Take the first
+        // intersection that is still ahead of both the aircraft and the
+        // touchdown aim point; if every one is behind, take the farthest.
+        let touchdown_x = with_pattern_profile(ctx, |p| p.runway_frame.touchdown_runway_x_ft());
+        let earliest_x = [touchdown_x, aircraft_stationing_ft(ctx, &detail)]
+            .into_iter()
+            .flatten()
+            .fold(f64::NEG_INFINITY, f64::max);
+        let exit = matches
+            .iter()
+            .find(|exit| exit.stationing_ft >= earliest_x)
+            .or(matches.last())
+            .copied()
+            .expect("matches is non-empty");
+        chosen_stationing_ft = Some(exit.stationing_ft);
         Some(RunwayExitPlan {
             taxiway_name: name.clone(),
             stationing_ft: exit.stationing_ft,
@@ -2510,10 +2537,14 @@ pub fn tool_choose_runway_exit(ctx: &ToolContext, args: &Map<String, Value>) -> 
 
     let display = taxiway
         .as_deref()
-        .map(|t| format!("preferred runway exit set to {:?}", t))
+        .map(|t| match chosen_stationing_ft {
+            Some(st) => format!("preferred runway exit set to {:?} (intersection at {:.0} ft)", t, st),
+            None => format!("preferred runway exit set to {:?}", t),
+        })
         .unwrap_or_else(|| "preferred runway exit cleared".to_string());
     match with_pattern_profile(ctx, |p| p.set_preferred_exit(exit_plan)) {
-        Some(_) => display,
+        Some(Ok(())) => display,
+        Some(Err(e)) => format!("error: {e}"),
         None => "error: pattern_fly profile is not active; call engage_pattern_fly first".to_string(),
     }
 }
@@ -2552,12 +2583,14 @@ fn runway_exits_detail(
     let conn = guard.as_ref().unwrap();
 
     let forms = taxi_route::runway_query_forms(runway);
-    let thresh: Result<(f64, f64, f64, f64), _> = conn.query_row(
+    type RunwayRow = (f64, f64, f64, f64, f64, f64, f64, f64);
+    let thresh: Result<RunwayRow, _> = conn.query_row(
         "SELECT \
              CASE WHEN le_ident = ? OR le_ident = ? THEN le_latitude_deg  ELSE he_latitude_deg  END, \
              CASE WHEN le_ident = ? OR le_ident = ? THEN le_longitude_deg ELSE he_longitude_deg END, \
              CASE WHEN le_ident = ? OR le_ident = ? THEN le_heading_degT  ELSE he_heading_degT  END, \
-             length_ft \
+             length_ft, \
+             le_latitude_deg, le_longitude_deg, he_latitude_deg, he_longitude_deg \
          FROM runways \
          WHERE airport_ident = ? \
            AND (le_ident = ? OR le_ident = ? OR he_ident = ? OR he_ident = ?) \
@@ -2570,9 +2603,14 @@ fn runway_exits_detail(
             airport,
             forms[0].as_str(), forms[1].as_str(), forms[0].as_str(), forms[1].as_str(),
         ],
-        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        |r| {
+            Ok((
+                r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?,
+                r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?,
+            ))
+        },
     );
-    let (thr_lat, thr_lon, course, length_ft) = match thresh {
+    let (thr_lat, thr_lon, course, length_ft, le_lat, le_lon, he_lat, he_lon) = match thresh {
         Ok(v) => v,
         Err(e) => return Err(format!("runway {:?} not found at {}: {}", runway, airport, e)),
     };
@@ -2588,25 +2626,8 @@ fn runway_exits_detail(
         Ok(g) => g,
         Err(e) => return Err(e.to_string()),
     };
-    let mut names: Vec<String> = graph
-        .edges
-        .iter()
-        .filter(|edge| {
-            edge.category != "runway"
-                && !edge.name.is_empty()
-                && taxi_route::edge_conflicts_with_runway(edge, runway)
-        })
-        .map(|edge| edge.name.clone())
-        .collect();
-    names.sort();
-    names.dedup();
-
     let mut exits = Vec::new();
-    for name in names {
-        let Ok(path) = taxi_route::resolve_runway_exit_path(conn, &graph, airport, runway, &name)
-        else {
-            continue;
-        };
+    for path in taxi_route::runway_exit_paths(&graph, runway, (le_lat, le_lon), (he_lat, he_lon)) {
         let path_runway_ft: Vec<Vec2> = path
             .nodes
             .iter()
@@ -2620,7 +2641,7 @@ fn runway_exits_detail(
             continue;
         }
         exits.push(RunwayExitCandidate {
-            name,
+            name: path.taxiway_name,
             stationing_ft: first.x,
             path_runway_ft,
         });
@@ -2636,6 +2657,16 @@ fn runway_exits_detail(
         forward,
         exits,
     })
+}
+
+/// The aircraft's current position projected onto the runway centerline,
+/// in feet from the landing threshold. `None` without a live bridge.
+fn aircraft_stationing_ft(ctx: &ToolContext, detail: &RunwayExitInfo) -> Option<f64> {
+    let b = ctx.bridge.as_deref()?;
+    let lat = b.get_dataref_value(LATITUDE_DEG.name)?;
+    let lon = b.get_dataref_value(LONGITUDE_DEG.name)?;
+    let p = geodetic_offset_ft(lat, lon, detail.georef);
+    Some(p.x * detail.forward.x + p.y * detail.forward.y)
 }
 
 pub fn tool_list_runway_exits(ctx: &ToolContext, args: &Map<String, Value>) -> String {
@@ -2663,12 +2694,7 @@ pub fn tool_list_runway_exits(ctx: &ToolContext, args: &Map<String, Value>) -> S
     // aircraft is right now. Without this the LLM has no signal for
     // which exits are ahead vs already passed, and has been observed
     // picking exits that were already behind the aircraft.
-    let current_st = ctx.bridge.as_deref().and_then(|b| {
-        let lat = b.get_dataref_value(LATITUDE_DEG.name)?;
-        let lon = b.get_dataref_value(LONGITUDE_DEG.name)?;
-        let p = geodetic_offset_ft(lat, lon, detail.georef);
-        Some(p.x * detail.forward.x + p.y * detail.forward.y)
-    });
+    let current_st = aircraft_stationing_ft(ctx, &detail);
 
     let mut out = format!(
         "exits for {} runway {} (length {:.0} ft, threshold at 0):\n",
@@ -3090,7 +3116,7 @@ pub fn tool_schemas(include_mission_complete: bool) -> Vec<ToolDef> {
         ),
         schema(
             "engage_pattern_fly",
-            "Engage the deterministic mission pilot anchored at a specific runway; owns all three axes and runs the full phase machine (takeoff_roll → rotate → climb → pattern legs → flare → rollout → taxi_clear). Preconditions: runway must exist in apt.dat; if you don't know which runway you're on, call get_status + the closest-runway sql_query first. Pick start_phase to match the aircraft's CURRENT physical state — the phase machine auto-advances when the aircraft reaches each leg's trigger altitude/position, so skipping ahead (e.g. start_phase='crosswind' while still climbing on upwind) forces an immediate premature turn. When start_phase='takeoff_roll' the same position guards as engage_takeoff apply (parking brake released, on centerline within 100 ft, inside the along-track length, heading within 15° of course, ground speed < 3 kt, ≥1000 ft usable runway ahead); override=true bypasses the centerline/along-track/heading checks for off-field, bush, or taxiway departures (brake/GS/length guards still apply). Completes by driving the phase machine; state-change heartbeats fire on every phase transition. After landing, pattern_fly auto-releases to idle once the aircraft is stopped (in `rollout`, `runway_exit`, or `taxi_clear`) — at that point engage_park to taxi to a parking spot. There is no `completed: pattern_fly` heartbeat; the release shows up as pattern_fly disappearing from active_profiles. start_phase picks: 'takeoff_roll' (on the ground), 'initial_climb' (just airborne below pattern altitude — right choice when handing off from engage_takeoff), 'pattern_entry' (joining from cruise, not aligned with a specific leg), 'crosswind'/'downwind'/'base'/'final' only when physically established on that leg. Typical calls: engage_pattern_fly(airport_ident='KSEA', runway_ident='16L', side='left', start_phase='takeoff_roll') for a ground takeoff; same args with start_phase='initial_climb' when handing off from engage_takeoff; same args with start_phase='pattern_entry' when joining mid-flight from cruise.",
+            "Engage the deterministic mission pilot anchored at a specific runway; owns all three axes and runs the full phase machine (takeoff_roll → rotate → climb → pattern legs → flare → rollout → taxi_clear). Preconditions: runway must exist in apt.dat; if you don't know which runway you're on, call get_status + the closest-runway sql_query first. Pick start_phase to match the aircraft's CURRENT physical state — the phase machine auto-advances when the aircraft reaches each leg's trigger altitude/position, so skipping ahead (e.g. start_phase='crosswind' while still climbing on upwind) forces an immediate premature turn. When start_phase='takeoff_roll' the same position guards as engage_takeoff apply (parking brake released, on centerline within 100 ft, inside the along-track length, heading within 15° of course, ground speed < 3 kt, ≥1000 ft usable runway ahead); override=true bypasses the centerline/along-track/heading checks for off-field, bush, or taxiway departures (brake/GS/length guards still apply). Completes by driving the phase machine; state-change heartbeats fire on every phase transition. After landing with a chosen runway exit, pattern_fly follows the exit, stops clear of the runway, and auto-releases to idle (`taxi_clear`). With no exit chosen or a missed exit, it brakes to a stop on the runway centerline and keeps holding there in `rollout`; engage_park takes over from that point. There is no `completed: pattern_fly` heartbeat; the release shows up as pattern_fly disappearing from active_profiles. start_phase picks: 'takeoff_roll' (on the ground), 'initial_climb' (just airborne below pattern altitude — right choice when handing off from engage_takeoff), 'pattern_entry' (joining from cruise, not aligned with a specific leg), 'crosswind'/'downwind'/'base'/'final' only when physically established on that leg. Typical calls: engage_pattern_fly(airport_ident='KSEA', runway_ident='16L', side='left', start_phase='takeoff_roll') for a ground takeoff; same args with start_phase='initial_climb' when handing off from engage_takeoff; same args with start_phase='pattern_entry' when joining mid-flight from cruise.",
             json!({
                 "airport_ident": {"type": "string", "description": "ICAO airport code (e.g. 'KSEA')."},
                 "runway_ident": {"type": "string", "description": "Runway end identifier (e.g. '16L', '34R')."},
@@ -3182,7 +3208,7 @@ pub fn tool_schemas(include_mission_complete: bool) -> Vec<ToolDef> {
         ),
         schema(
             "go_around",
-            "Command an immediate go-around. Preconditions: pattern_fly must be active. Completes by driving pattern_fly into a climb to pattern altitude; a state-change heartbeat fires on the phase transition.",
+            "Command an immediate go-around. Preconditions: pattern_fly must be active and the aircraft not yet on the ground after landing (rejected in rollout / runway exit). Completes by driving pattern_fly into a climb to pattern altitude; a state-change heartbeat fires on the phase transition.",
             json!({}),
             &[],
         ),
@@ -3323,7 +3349,7 @@ pub fn tool_schemas(include_mission_complete: bool) -> Vec<ToolDef> {
         ),
         schema(
             "engage_park",
-            "Taxi to a parking spot and stop with the nose aligned to the spot's painted heading. INBOUND counterpart to engage_taxi — this is the tool for getting from a completed post-landing runway exit (or any other ground position) to parking. Do not call engage_taxi with the runway you just landed on as a workaround for parking; that route doesn't exist by design. Plans a taxi route to the taxi-network node nearest the 1300 parking spot, appends a short lead-in leg to the spot's exact lat/lon, and drives to a final pose at the spot's heading. Auto-releases the parking brake if set. Preconditions: parking spot must exist in apt.dat and pattern_fly must have finished the runway exit, stopped, and released; calling during rollout is rejected so parking guidance cannot cut across the runway environment. Completes by stopping at the spot aligned to the painted heading with parking brake set. Find candidates with sql_query against parking_spots (filter by airport_ident; match `categories` against aircraft class, e.g. LIKE '%props%' for a single-engine piston, or operation_type='general_aviation' for a GA ramp).",
+            "Taxi to a parking spot and stop with the nose aligned to the spot's painted heading. INBOUND counterpart to engage_taxi — this is the tool for getting from a completed post-landing runway exit (or any other ground position) to parking. Do not call engage_taxi with the runway you just landed on as a workaround for parking; that route doesn't exist by design. Plans a taxi route to the taxi-network node nearest the 1300 parking spot, appends a short lead-in leg to the spot's exact lat/lon, and drives to a final pose at the spot's heading. Auto-releases the parking brake if set. Preconditions: parking spot must exist in apt.dat, and if pattern_fly is still active the aircraft must be stopped — either on the runway centerline with no exit left to fly, or at the end of a completed runway exit; calling while rolling out or partway through an exit is rejected so parking guidance cannot cut across the runway environment. Completes by stopping at the spot aligned to the painted heading with parking brake set. Find candidates with sql_query against parking_spots (filter by airport_ident; match `categories` against aircraft class, e.g. LIKE '%props%' for a single-engine piston, or operation_type='general_aviation' for a GA ramp).",
             json!({
                 "airport_ident": {
                     "type": "string",
@@ -3379,7 +3405,7 @@ pub fn tool_schemas(include_mission_complete: bool) -> Vec<ToolDef> {
         ),
         schema(
             "choose_runway_exit",
-            "Record a preferred runway-exit taxiway for the post-landing rollout. The rollout controller slows on centerline, follows the exit's actual apt.dat taxi-network geometry, and stops at the first node beyond the runway active zone before pattern_fly releases. Pass null to clear any prior preference. Preconditions: pattern_fly should be active; call on final or any time before touchdown. Completes immediately — the rollout logic uses the preference on the next landing. If the selected exit is missed, the aircraft remains on centerline and stops at the runway end instead of cutting back toward it.",
+            "Record a preferred runway-exit taxiway for the post-landing rollout. The rollout controller slows on centerline, follows the exit's actual apt.dat taxi-network geometry, and stops at the first node beyond the runway active zone before pattern_fly releases. Pass null to clear any prior preference. If the taxiway meets the runway more than once, the first intersection past both the touchdown point and the aircraft is used; the reply gives its stationing. Preconditions: pattern_fly should be active; call on final or any time before touchdown, or after stopping on the runway to pick an exit still ahead. Rejected once the aircraft has started turning onto an exit. Completes immediately. If the selected exit is missed, the aircraft remains on centerline and brakes to a stop short of the runway end instead of cutting back toward it.",
             json!({
                 "taxiway_name": {
                     "type": ["string", "null"],
@@ -3390,7 +3416,7 @@ pub fn tool_schemas(include_mission_complete: bool) -> Vec<ToolDef> {
         ),
         schema(
             "list_runway_exits",
-            "List the taxiway exits for a landing runway: each candidate taxiway name plus its approximate stationing in feet from the landing threshold, so you can pick an exit appropriate for your rollout distance. Uses the 1204 active-zone annotations attached to taxi_edges. Completes immediately. Next: choose_runway_exit.",
+            "List the taxiway exits for a landing runway: each candidate taxiway name plus its approximate stationing in feet from the landing threshold (a taxiway that meets the runway more than once is listed once per intersection), so you can pick an exit appropriate for your rollout distance. Uses the 1204 active-zone annotations attached to taxi_edges. Completes immediately. Next: choose_runway_exit.",
             json!({
                 "airport_ident": {
                     "type": "string",

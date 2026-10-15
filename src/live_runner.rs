@@ -11,7 +11,7 @@ use crossbeam_channel::Sender;
 use crate::bus::{LogKind, SimBus};
 use crate::config::{AirportConfig, ConfigBundle};
 use crate::core::mission_manager::PilotCore;
-use crate::llm::conversation::IncomingMessage;
+use crate::llm::conversation::{IncomingMessage, IncomingSource};
 use crate::sim::xplane_bridge::{BootstrapSample, M_TO_FT};
 use crate::types::{AircraftState, FlightPhase, Runway};
 
@@ -425,8 +425,9 @@ pub struct LiveRunConfig {
     /// `thinking.budget_tokens` derived from the level; Gemini as
     /// `thinkingConfig.thinkingBudget`. `None` omits the knob.
     pub llm_reasoning_effort: Option<String>,
-    pub atc_messages: Vec<String>,
-    pub operator_messages: Vec<String>,
+    /// `--atc-message` / `--operator-message` values, interleaved in the
+    /// order they appeared on the command line.
+    pub startup_messages: Vec<IncomingMessage>,
     pub interactive: bool,
     pub control_hz: f64,
     pub status_interval_s: f64,
@@ -529,16 +530,19 @@ pub fn run_live_xplane(base_config: ConfigBundle, runtime: LiveRunConfig) -> Res
         // in conversation history without bloating every recurring
         // status payload.
         bus.push_log_kind(LogKind::System, format!("aircraft_tail={}", tail));
-        let _ = input_tx.send(IncomingMessage::operator(format!(
+        let _ = input_tx.send(IncomingMessage::system(format!(
             "initial status: aircraft tail number {}",
             tail
         )));
     }
-    for msg in &runtime.atc_messages {
-        let _ = input_tx.send(IncomingMessage::atc(msg.clone()));
-    }
-    for msg in &runtime.operator_messages {
-        let _ = input_tx.send(IncomingMessage::operator(msg.clone()));
+    // Startup messages arrive in command-line order. ATC lines are echoed
+    // to the radio pane by the LLM worker; operator lines are echoed here,
+    // matching what the TUI does for typed input.
+    for msg in &runtime.startup_messages {
+        if msg.source == IncomingSource::Operator {
+            bus.push_log_kind(LogKind::Operator, msg.text.clone());
+        }
+        let _ = input_tx.send(msg.clone());
     }
 
     // Per-session transcript file alongside the .log/.csv/.kml

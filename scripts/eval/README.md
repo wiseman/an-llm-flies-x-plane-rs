@@ -112,6 +112,8 @@ pilot:
   engage_profile: idle            # --engage-profile
   atc_messages:                   # one --atc-message per entry
     - "Cessna 1234 short final 12, cleared to land."
+  operator_messages:              # one --operator-message per entry
+    - "After landing, taxi to Ramp Parking."
   extra_args:                     # pass-through to sim-pilot
     - --pilot-llm-model
     - gpt-5.4-mini-2026-03-17
@@ -133,8 +135,11 @@ termination:
    See the X-Plane
    [Flight Initialization API](https://developer.x-plane.com/article/flight-initialization-api/)
    for schema.
-3. Write one or more `atc_messages` that provide the pilot with context
-   it needs — the harness does not otherwise prompt the LLM.
+3. Write `atc_messages` (things ATC says, answered on the radio) and/or
+   `operator_messages` (instructions and context from the human operator,
+   answered in plain text) — the harness does not otherwise prompt the
+   LLM. The two lists are sent in the order their keys appear under
+   `pilot:`.
 4. Run it. Read `report.json` + `state_trace.csv` + `sim_pilot.log` to
    assess what happened.
 

@@ -85,6 +85,10 @@ impl PilotMode {
 pub enum IncomingSource {
     Operator,
     Atc,
+    /// Automated context injected by the harness (tail number at startup,
+    /// eval run instructions). Not a person, so it is tagged separately
+    /// from `Operator` and doesn't demand a spoken reply.
+    System,
     Heartbeat,
     ModeSwitch(PilotMode),
 }
@@ -94,6 +98,7 @@ impl IncomingSource {
         match self {
             IncomingSource::Operator => "OPERATOR",
             IncomingSource::Atc => "ATC",
+            IncomingSource::System => "SYSTEM",
             IncomingSource::Heartbeat => "HEARTBEAT",
             IncomingSource::ModeSwitch(_) => "MODE_SWITCH",
         }
@@ -112,6 +117,9 @@ impl IncomingMessage {
     }
     pub fn atc(text: impl Into<String>) -> Self {
         Self { source: IncomingSource::Atc, text: text.into() }
+    }
+    pub fn system(text: impl Into<String>) -> Self {
+        Self { source: IncomingSource::System, text: text.into() }
     }
     pub fn heartbeat(text: impl Into<String>) -> Self {
         Self { source: IncomingSource::Heartbeat, text: text.into() }
@@ -159,6 +167,10 @@ impl Conversation {
     pub fn append_atc_message(&mut self, text: &str) {
         self.rotating
             .push(Message::user_text(format!("[ATC] {}", text)));
+    }
+    pub fn append_system_message(&mut self, text: &str) {
+        self.rotating
+            .push(Message::user_text(format!("[SYSTEM] {}", text)));
     }
     pub fn append_heartbeat_message(&mut self, text: &str) {
         self.rotating
@@ -333,6 +345,10 @@ fn handle_message(
 ) -> anyhow::Result<()> {
     match &message.source {
         IncomingSource::Operator => conv.append_operator_message(&message.text),
+        IncomingSource::System => {
+            conv.append_system_message(&message.text);
+            emit_log_kind(bus, LogKind::System, &message.text);
+        }
         IncomingSource::Heartbeat => {
             conv.append_heartbeat_message(&message.text);
             emit_log_kind(bus, LogKind::Heartbeat, &message.text);

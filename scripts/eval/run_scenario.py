@@ -357,8 +357,15 @@ def spawn_pilot(
     engage = scenario.pilot.get("engage_profile")
     if engage:
         args += ["--engage-profile", engage]
-    for msg in scenario.pilot.get("atc_messages") or []:
-        args += ["--atc-message", msg]
+    # Startup messages go out in the order their keys appear in the
+    # scenario's `pilot:` mapping (YAML mappings load in document order),
+    # and sim-pilot keeps command-line order when queueing them.
+    message_flags = {"atc_messages": "--atc-message", "operator_messages": "--operator-message"}
+    for key, value in scenario.pilot.items():
+        flag = message_flags.get(key)
+        if flag:
+            for msg in value or []:
+                args += [flag, msg]
     args += list(scenario.pilot.get("extra_args") or [])
 
     env = os.environ.copy()

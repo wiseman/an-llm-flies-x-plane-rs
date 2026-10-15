@@ -29,8 +29,8 @@ pub const RADIO_MAX_LINES: usize = 200;
 /// and in `snapshot()` / `log_tail()` return values.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LogKind {
-    /// Operator input submitted from the TUI (or --atc-message when routed
-    /// as operator). Shown prominently.
+    /// Operator input: typed or canned in the TUI, or passed at startup
+    /// with --operator-message. Shown prominently.
     Operator,
     /// Final assistant text from the LLM. Shown prominently.
     Llm,

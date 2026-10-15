@@ -5,13 +5,13 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context, Result};
 use chrono::Local;
-use clap::{Parser, ValueEnum};
+use clap::{ArgMatches, CommandFactory, FromArgMatches, Parser, ValueEnum};
 
 use xplane_pilot::config::load_default_config_bundle;
 use xplane_pilot::data::{apt_dat, parquet as data_parquet};
 use xplane_pilot::live_runner::{run_live_xplane, LiveRunConfig};
 use xplane_pilot::llm::backend::LlmProvider;
-use xplane_pilot::llm::conversation::PilotMode;
+use xplane_pilot::llm::conversation::{IncomingMessage, PilotMode};
 use xplane_pilot::sim::{
     logging::write_scenario_log_csv, plotting::write_scenario_plots, scenario::ScenarioRunner,
 };
@@ -71,17 +71,19 @@ struct Cli {
     #[arg(long = "pilot-llm-reasoning-effort")]
     pilot_llm_reasoning_effort: Option<String>,
 
-    /// ATC message sent through the LLM at startup. Repeat for multiple messages.
+    /// ATC message sent through the LLM at startup. Repeat for multiple
+    /// messages; interleaves with --operator-message in command-line order.
     #[arg(long = "atc-message")]
     atc_message: Vec<String>,
 
-    /// Operator message sent through the LLM at startup. Repeat for multiple messages.
+    /// Operator message sent through the LLM at startup. Repeat for multiple
+    /// messages; interleaves with --atc-message in command-line order.
     #[arg(long = "operator-message")]
     operator_message: Vec<String>,
 
     /// Skip the TUI. The session runs headless, logging to stdout and
-    /// reading any startup messages from `--atc-message`. Useful for
-    /// scripted or non-interactive runs.
+    /// reading any startup messages from `--atc-message` and
+    /// `--operator-message`. Useful for scripted or non-interactive runs.
     #[arg(long)]
     headless: bool,
 
@@ -273,11 +275,35 @@ fn load_dotenv(path: &Path) {
     }
 }
 
+/// `--atc-message` and `--operator-message` values, interleaved in the
+/// order they appeared on the command line so scripted scenarios can rely
+/// on e.g. operator context arriving before an ATC clearance.
+fn ordered_startup_messages(matches: &ArgMatches) -> Vec<IncomingMessage> {
+    type MakeMessage = fn(String) -> IncomingMessage;
+    let sources: [(&str, MakeMessage); 2] = [
+        ("atc_message", |t| IncomingMessage::atc(t)),
+        ("operator_message", |t| IncomingMessage::operator(t)),
+    ];
+    let mut indexed: Vec<(usize, IncomingMessage)> = Vec::new();
+    for (id, make) in sources {
+        let (Some(indices), Some(values)) =
+            (matches.indices_of(id), matches.get_many::<String>(id))
+        else {
+            continue;
+        };
+        indexed.extend(indices.zip(values).map(|(i, v)| (i, make(v.clone()))));
+    }
+    indexed.sort_by_key(|(i, _)| *i);
+    indexed.into_iter().map(|(_, msg)| msg).collect()
+}
+
 fn main() -> Result<()> {
     // Best-effort .env loader so OPENAI_API_KEY can live in a gitignored file.
     load_dotenv(Path::new(".env"));
 
-    let args = Cli::parse();
+    let matches = Cli::command().get_matches();
+    let startup_messages = ordered_startup_messages(&matches);
+    let args = Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
     let config = load_default_config_bundle();
     match args.backend {
         Backend::Xplane => {
@@ -324,8 +350,7 @@ fn main() -> Result<()> {
                     llm_provider,
                     llm_model,
                     llm_reasoning_effort: args.pilot_llm_reasoning_effort,
-                    atc_messages: args.atc_message,
-                    operator_messages: args.operator_message,
+                    startup_messages,
                     interactive: !args.headless,
                     control_hz: args.control_hz,
                     status_interval_s: args.status_interval_s,
@@ -374,4 +399,34 @@ fn main() -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use xplane_pilot::llm::conversation::IncomingSource;
+
+    #[test]
+    fn startup_messages_keep_command_line_order() {
+        let matches = Cli::command().get_matches_from([
+            "sim_pilot",
+            "--operator-message",
+            "you're at KWHP rwy 12",
+            "--atc-message",
+            "cleared for takeoff",
+            "--operator-message",
+            "then fly the pattern",
+        ]);
+        let msgs = ordered_startup_messages(&matches);
+        let got: Vec<(IncomingSource, &str)> =
+            msgs.iter().map(|m| (m.source.clone(), m.text.as_str())).collect();
+        assert_eq!(
+            got,
+            [
+                (IncomingSource::Operator, "you're at KWHP rwy 12"),
+                (IncomingSource::Atc, "cleared for takeoff"),
+                (IncomingSource::Operator, "then fly the pattern"),
+            ]
+        );
+    }
 }

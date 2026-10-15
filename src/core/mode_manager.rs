@@ -123,16 +123,22 @@ impl ModeManager {
                 phase
             }
             FlightPhase::InitialClimb => {
+                // Altitude-latched, so a climb that has levelled off (or
+                // has noisy VS) still advances, but not while sinking: an
+                // aircraft losing altitude after takeoff stays on the
+                // runway heading instead of banking into the crosswind.
+                const MAX_SINK_FOR_CLIMB_GATE_FPM: f64 = -300.0;
+                let not_sinking = state.vs_fpm > MAX_SINK_FOR_CLIMB_GATE_FPM;
                 if stay_in_pattern {
                     let crosswind_turn_agl_ft =
                         (self.config.pattern.altitude_agl_ft - 300.0).max(400.0);
-                    let auto_ready = state.alt_agl_ft >= crosswind_turn_agl_ft;
+                    let auto_ready = state.alt_agl_ft >= crosswind_turn_agl_ft && not_sinking;
                     if triggers.turn_crosswind || (clearances.turn_crosswind && auto_ready) {
                         return FlightPhase::Crosswind;
                     }
                     return phase;
                 }
-                if state.alt_agl_ft >= 400.0 {
+                if state.alt_agl_ft >= 400.0 && not_sinking {
                     return FlightPhase::EnrouteClimb;
                 }
                 phase

@@ -9,7 +9,7 @@
 - `cargo check --lib`: fast compile check for library changes.
 - `cargo run --release --`: run the default deterministic offline scenario.
 - `cargo run --release -- --crosswind-kt 10 --log-csv output/flight.csv --plots-dir output/plots`: generate flight logs and plots for tuning.
-- `cargo run --release -- --backend xplane`: connect to a live X-Plane 12 session with the interactive TUI; requires the web API on port `8086` and `OPENAI_API_KEY`. Pass `--headless` for a scripted run that reads startup messages from `--atc-message`.
+- `cargo run --release -- --backend xplane`: connect to a live X-Plane 12 session with the interactive TUI; requires the web API on port `8086` and `OPENAI_API_KEY`. Pass `--headless` for a scripted run that reads startup messages from `--atc-message` and `--operator-message` (both repeatable, sent in command-line order).
 - `cargo test`: run the full test suite.
 - `cargo test --test test_scenario`: run the primary mission regression.
 - `cargo fmt` and `cargo clippy --all-targets --all-features`: format and lint before opening a PR.

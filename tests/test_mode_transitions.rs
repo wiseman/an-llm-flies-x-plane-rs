@@ -359,6 +359,24 @@ fn level_initial_climb_above_turn_altitude_still_turns_crosswind() {
 }
 
 #[test]
+fn sinking_initial_climb_above_turn_altitude_holds_runway_heading() {
+    let (_, mm, pattern, rm, safe) = fixtures();
+    let state = state_with(|s| {
+        s.alt_agl_ft = 900.0;
+        s.vs_fpm = -600.0;
+        s.on_ground = false;
+    });
+    assert_eq!(
+        update(&mm, FlightPhase::InitialClimb, &state, &rm, &pattern, &safe, false, false, true, false),
+        FlightPhase::InitialClimb
+    );
+    assert_eq!(
+        update(&mm, FlightPhase::InitialClimb, &state, &rm, &pattern, &safe, false, false, false, false),
+        FlightPhase::InitialClimb
+    );
+}
+
+#[test]
 fn level_aircraft_above_rotate_height_enters_initial_climb() {
     let (_, mm, pattern, rm, safe) = fixtures();
     let state = state_with(|s| {
