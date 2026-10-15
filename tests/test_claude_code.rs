@@ -145,12 +145,14 @@ fn stream_json_lines_parse_into_events() {
 /// A stand-in for `claude -p`: reads stream-json user messages, calls
 /// tools through the MCP server named in `--mcp-config`, and answers
 /// with canned assistant/result lines. Records argv and messages.
+/// Stands in for `claude -p` in stream-json mode. Like a real model that
+/// won't end its turn, it keeps polling after `sleep` until the worker
+/// sends an interrupt control request.
 const FAKE_CLAUDE: &str = r#"#!/usr/bin/env python3
-import json, sys, urllib.request
+import json, os, select, sys, urllib.request
 args = sys.argv[1:]
 log = open(sys.argv[0] + ".log", "a")
 log.write(json.dumps(args) + "\n"); log.flush()
-import os
 log.write("APIKEY " + str("ANTHROPIC_API_KEY" in os.environ) + "\n"); log.flush()
 url = json.loads(args[args.index("--mcp-config") + 1])["mcpServers"]["sim_pilot"]["url"]
 def call(name, arguments, rid):
@@ -158,18 +160,47 @@ def call(name, arguments, rid):
                        "params": {"name": name, "arguments": arguments}}).encode()
     req = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"})
     return json.loads(urllib.request.urlopen(req).read())
-print(json.dumps({"type": "system", "subtype": "init", "session_id": "fake-session"}), flush=True)
-for line in sys.stdin:
-    content = json.loads(line)["message"]["content"]
+def emit(v):
+    print(json.dumps(v), flush=True)
+buf = b""
+def read_msg(timeout):
+    global buf
+    while b"\n" not in buf:
+        if not select.select([0], [], [], timeout)[0]:
+            return None
+        chunk = os.read(0, 65536)
+        if not chunk:
+            sys.exit(0)
+        buf += chunk
+    line, buf = buf.split(b"\n", 1)
+    return json.loads(line)
+def result(subtype, turns, usage):
+    emit({"type": "result", "subtype": subtype, "is_error": subtype != "success", "num_turns": turns,
+          "total_cost_usd": 0.01, "usage": usage})
+emit({"type": "system", "subtype": "init", "session_id": "fake-session"})
+while True:
+    msg = read_msg(None)
+    if msg.get("type") == "control_request":
+        emit({"type": "control_response", "response": {"subtype": "success", "request_id": msg["request_id"]}})
+        continue
+    content = msg["message"]["content"]
     log.write("MSG " + json.dumps(content) + "\n"); log.flush()
     call("get_status", {}, 1)
-    print(json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": "Fake pilot, wilco."}]}}), flush=True)
+    emit({"type": "assistant", "message": {"content": [{"type": "text", "text": "Fake pilot, wilco."}]}})
     if "[OPERATOR]" in content:
         call("mission_complete", {"success": True, "summary": "fake claude ok"}, 2)
-    print(json.dumps({"type": "result", "subtype": "success", "is_error": False, "num_turns": 2,
-                      "total_cost_usd": 0.01,
-                      "usage": {"input_tokens": 5, "cache_read_input_tokens": 100,
-                                "cache_creation_input_tokens": 10, "output_tokens": 7}}), flush=True)
+        result("success", 2, {"input_tokens": 5, "cache_read_input_tokens": 100,
+                              "cache_creation_input_tokens": 10, "output_tokens": 7})
+        continue
+    call("sleep", {}, 3)
+    while True:
+        m = read_msg(0.1)
+        if m and m.get("type") == "control_request":
+            log.write("INTERRUPT\n"); log.flush()
+            emit({"type": "control_response", "response": {"subtype": "success", "request_id": m["request_id"]}})
+            result("error_during_execution", 1, {})
+            break
+        call("get_status", {}, 4)
 "#;
 
 #[test]
@@ -187,7 +218,12 @@ fn eval_run_through_claude_code_brain_completes_via_mcp_tools() {
     let mut cfg = make_eval_config(&tmp, "eval-claude-code");
     cfg.llm_provider = LlmProvider::ClaudeCode;
     cfg.llm_model = "opus".to_string();
-    cfg.startup_messages = vec![IncomingMessage::operator("Fly a lap and park.")];
+    // The ATC call's turn only ends when the worker interrupts it after
+    // `sleep`; the operator message must still get through.
+    cfg.startup_messages = vec![
+        IncomingMessage::atc("Skyhawk 2SP, Whiteman tower, runway 12."),
+        IncomingMessage::operator("Fly a lap and park."),
+    ];
 
     let result = run_eval_with_brain(
         load_default_config_bundle(),
@@ -200,7 +236,7 @@ fn eval_run_through_claude_code_brain_completes_via_mcp_tools() {
     assert_eq!(result.outcome.source, OutcomeSource::LlmReport);
     assert!(result.outcome.success);
     assert_eq!(result.outcome.summary, "fake claude ok");
-    assert_eq!(result.turn_count, 2, "num_turns from the result line");
+    assert_eq!(result.turn_count, 3, "num_turns from the result lines");
     assert_eq!(result.total_cached_tokens, 100);
     assert_eq!(result.total_input_tokens, 115);
     let tools: Vec<&str> = result.tool_stats.per_tool.iter().map(|(n, _)| n.as_str()).collect();
@@ -216,9 +252,58 @@ fn eval_run_through_claude_code_brain_completes_via_mcp_tools() {
     let tools_idx = argv.iter().position(|a| a == "--tools").unwrap();
     assert_eq!(argv[tools_idx + 1], "", "built-in tools disabled");
     assert!(fake_log.contains("APIKEY False"), "API key leaked to the child: {fake_log}");
-    assert!(fake_log.contains(r#"MSG "[OPERATOR] Fly a lap and park.\n\nActive profiles:"#), "{fake_log}");
+    let interrupt = fake_log.find("INTERRUPT").expect("worker interrupted the turn after sleep");
+    let operator = fake_log
+        .find(r#"MSG "[OPERATOR] Fly a lap and park.\n\nActive profiles:"#)
+        .expect("operator message delivered");
+    assert!(interrupt < operator, "{fake_log}");
 
     let log = std::fs::read_to_string(result.log_file.unwrap()).unwrap();
     assert!(log.contains("tool get_status ->"), "tool calls logged for the transcript");
     assert!(log.contains("Fake pilot, wilco."));
+}
+
+/// A controller that answers takeoff requests and stays silent otherwise.
+const FAKE_ATC: &str = r#"#!/usr/bin/env python3
+import json, sys
+print(json.dumps({"type": "system", "subtype": "init", "session_id": "fake-atc"}), flush=True)
+for line in sys.stdin:
+    content = json.loads(line)["message"]["content"]
+    reply = "Cessna 2SP, runway 12, cleared for takeoff." if "ready for departure" in content else "NONE"
+    print(json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": reply}]}}), flush=True)
+    print(json.dumps({"type": "result", "subtype": "success", "is_error": False, "num_turns": 1,
+                      "usage": {"input_tokens": 1, "output_tokens": 1}}), flush=True)
+"#;
+
+#[test]
+fn sim_atc_answers_radio_calls_and_stays_silent_on_none() {
+    use xplane_pilot::llm::conversation::IncomingSource;
+    use xplane_pilot::llm::sim_atc::{RadioCall, SimAtc};
+    let tmp = TempDir::new().unwrap();
+    let fake = tmp.path().join("fake-atc");
+    std::fs::write(&fake, FAKE_ATC).unwrap();
+    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::env::set_var("CLAUDE_CODE_BIN", &fake);
+
+    let (tx, rx) = crossbeam_channel::unbounded();
+    let atc = SimAtc::start("haiku", "Airport: KWHP.", tx, None).unwrap();
+    let call = |message: &str| RadioCall {
+        freq_mhz: Some(135.0),
+        message: message.to_string(),
+        status_json: "{}".to_string(),
+    };
+    atc.hear(call("Whiteman Tower, Cessna 2SP, runway 12, ready for departure."));
+    assert!(atc.composing());
+    let reply = rx.recv_timeout(std::time::Duration::from_secs(10)).expect("controller answered");
+    assert_eq!(reply.source, IncomingSource::Atc);
+    assert_eq!(reply.text, "Cessna 2SP, runway 12, cleared for takeoff.");
+
+    atc.hear(call("Runway 12, cleared for takeoff, Cessna 2SP."));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while atc.composing() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert!(!atc.composing());
+    assert!(rx.try_recv().is_err(), "a readback gets no answer");
+    atc.shutdown();
 }

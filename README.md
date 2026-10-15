@@ -67,6 +67,13 @@ point instead of thousands of feet long, and the post-landing
 `landing_rollout` / `plan_arrival` changes. New runs aren't directly
 comparable to this table.
 
+The offline sim has no ATC, so a model that waits for a clearance at a
+towered field waits forever. Pass `--sim-atc` to the `eval` binary to have
+a simulated controller (Claude Haiku 5.5 via Claude Code by default;
+`--sim-atc-model` to change it) answer the pilot's radio calls. The sim
+runs at real time while a call waits for its answer, and the default turn
+budget rises from 100 to 120 to cover the readbacks.
+
 ## Getting the binary
 
 ### Download a prebuilt binary

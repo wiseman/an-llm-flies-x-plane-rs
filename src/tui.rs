@@ -557,7 +557,11 @@ pub fn run_tui(
                                 if let Some(pump) = &heartbeat_pump {
                                     pump.record_user_input();
                                 }
-                                if source != "atc" {
+                                // Echo now: the pilot may be mid-turn and
+                                // only pick the message up seconds later.
+                                if source == "atc" {
+                                    bus.push_radio(format!("[atc] {payload}"));
+                                } else {
                                     bus.push_log_kind(LogKind::Operator, payload);
                                 }
                             }

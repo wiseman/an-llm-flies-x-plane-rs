@@ -104,6 +104,7 @@ pub fn make_eval_config(tmp: &TempDir, stem: &str) -> EvalConfig {
         output_dir: tmp.path().to_path_buf(),
         session_stem: stem.to_string(),
         verbose: false,
+        sim_atc_model: None,
     }
 }
 

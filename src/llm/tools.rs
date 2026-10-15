@@ -170,6 +170,9 @@ pub struct ToolContext {
     /// Taxi graphs by airport, loaded once: apt.dat doesn't change while
     /// running, and one arrival plan can need the same graph several times.
     pub taxi_graphs: Arc<PLMutex<HashMap<String, Arc<taxi_route::TaxiGraph>>>>,
+    /// Eval harness: a simulated controller that hears `broadcast_on_radio`
+    /// calls and answers them. `None` everywhere else.
+    pub sim_atc: Option<Arc<crate::llm::sim_atc::SimAtc>>,
 }
 
 impl ToolContext {
@@ -190,6 +193,7 @@ impl ToolContext {
             turn_counter: None,
             tool_counters: None,
             taxi_graphs: Default::default(),
+            sim_atc: None,
         }
     }
 }
@@ -1810,12 +1814,8 @@ pub fn tool_broadcast_on_radio(ctx: &ToolContext, args: &Map<String, Value>) -> 
         Ok(d) => d,
         Err(e) => return format!("error: {}", e),
     };
-    let freq_label = ctx
-        .bridge
-        .as_ref()
-        .and_then(|b| b.get_dataref_value(dref))
-        .map(|khz| format!("{:.3}", khz / 1000.0))
-        .unwrap_or_else(|| "---".to_string());
+    let freq_mhz = ctx.bridge.as_ref().and_then(|b| b.get_dataref_value(dref)).map(|khz| khz / 1000.0);
+    let freq_label = freq_mhz.map(|f| format!("{f:.3}")).unwrap_or_else(|| "---".to_string());
     let line = format!("[{} {}] {}", radio.to_uppercase(), freq_label, message);
     if let Some(bus) = &ctx.bus {
         bus.push_radio(line.clone());
@@ -1829,6 +1829,13 @@ pub fn tool_broadcast_on_radio(ctx: &ToolContext, args: &Map<String, Value>) -> 
             let excess = br.len() - 16;
             br.drain(..excess);
         }
+    }
+    if let Some(atc) = &ctx.sim_atc {
+        atc.hear(crate::llm::sim_atc::RadioCall {
+            freq_mhz,
+            message: message.clone(),
+            status_json: tool_get_status(ctx, &Map::new()),
+        });
     }
     format!("broadcast on {}: {}", radio, message)
 }

@@ -27,12 +27,16 @@ use crate::llm::tools::{tool_schemas, ToolContext};
 /// `mcp__{SERVER_NAME}__{tool}`.
 pub const SERVER_NAME: &str = "sim_pilot";
 
-/// Appended to `sleep` / `mission_complete` results. Our loop can't end
-/// Claude Code's turn the way the API loop does, so the model is told to.
+/// Appended to `sleep` / `mission_complete` results. The Claude Code
+/// worker also interrupts the turn (see `end_turn_requested`), since
+/// models don't reliably stop on their own.
 pub const END_TURN_NOTE: &str = "\n\nEnd your turn now: send no further tool calls or text.";
 
 pub struct McpServer {
     pub url: String,
+    /// Set when a turn-ending tool (`sleep`, `mission_complete`) runs, so
+    /// the worker can end Claude Code's turn the way the API loop does.
+    pub end_turn_requested: Arc<AtomicBool>,
     stop: Arc<AtomicBool>,
     handle: Option<JoinHandle<()>>,
 }
@@ -49,12 +53,14 @@ impl McpServer {
             .port();
         let stop = Arc::new(AtomicBool::new(false));
         let thread_stop = stop.clone();
+        let end_turn_requested = Arc::new(AtomicBool::new(false));
+        let end_turn = end_turn_requested.clone();
         let handle = std::thread::Builder::new()
             .name("mcp-server".into())
             .spawn(move || {
                 while !thread_stop.load(Ordering::Acquire) {
                     match server.recv_timeout(Duration::from_millis(200)) {
-                        Ok(Some(request)) => serve(request, &ctx, bus.as_ref()),
+                        Ok(Some(request)) => serve(request, &ctx, bus.as_ref(), &end_turn),
                         Ok(None) => continue,
                         Err(_) => return,
                     }
@@ -62,6 +68,7 @@ impl McpServer {
             })?;
         Ok(Self {
             url: format!("http://127.0.0.1:{port}/mcp"),
+            end_turn_requested,
             stop,
             handle: Some(handle),
         })
@@ -82,7 +89,12 @@ impl Drop for McpServer {
     }
 }
 
-fn serve(mut request: tiny_http::Request, ctx: &ToolContext, bus: Option<&SimBus>) {
+fn serve(
+    mut request: tiny_http::Request,
+    ctx: &ToolContext,
+    bus: Option<&SimBus>,
+    end_turn_requested: &AtomicBool,
+) {
     if *request.method() != tiny_http::Method::Post {
         let _ = request.respond(tiny_http::Response::empty(405));
         return;
@@ -92,9 +104,16 @@ fn serve(mut request: tiny_http::Request, ctx: &ToolContext, bus: Option<&SimBus
         let _ = request.respond(tiny_http::Response::empty(400));
         return;
     }
-    let response = match serde_json::from_str::<Value>(&body) {
-        Ok(message) => handle_jsonrpc(&message, ctx, bus),
-        Err(e) => Some(error_response(Value::Null, -32700, &format!("parse error: {e}"))),
+    let (response, ends_turn_call) = match serde_json::from_str::<Value>(&body) {
+        Ok(message) => {
+            let ends = message.get("method").and_then(Value::as_str) == Some("tools/call")
+                && message
+                    .pointer("/params/name")
+                    .and_then(Value::as_str)
+                    .is_some_and(ends_turn);
+            (handle_jsonrpc(&message, ctx, bus), ends)
+        }
+        Err(e) => (Some(error_response(Value::Null, -32700, &format!("parse error: {e}"))), false),
     };
     let _ = match response {
         // Notifications (no id) get no body.
@@ -105,6 +124,11 @@ fn serve(mut request: tiny_http::Request, ctx: &ToolContext, bus: Option<&SimBus
             request.respond(tiny_http::Response::from_string(v.to_string()).with_header(header))
         }
     };
+    // Only after the result is on its way, so the interrupt lands after
+    // Claude Code has it.
+    if ends_turn_call {
+        end_turn_requested.store(true, Ordering::Release);
+    }
 }
 
 /// Answer one JSON-RPC message; `None` for notifications.

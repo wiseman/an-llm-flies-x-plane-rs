@@ -2,6 +2,7 @@ pub mod anthropic;
 pub mod backend;
 pub mod brain;
 pub mod claude_code;
+pub mod sim_atc;
 pub mod conversation;
 pub mod gemini;
 pub mod mcp_server;

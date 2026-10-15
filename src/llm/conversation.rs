@@ -506,7 +506,8 @@ pub(crate) fn announce_incoming(message: &IncomingMessage, bus: Option<&SimBus>)
         IncomingSource::Operator => {}
         IncomingSource::System => emit_log_kind(bus, LogKind::System, &message.text),
         IncomingSource::Heartbeat => emit_log_kind(bus, LogKind::Heartbeat, &message.text),
-        IncomingSource::Atc => emit_radio(bus, &format!("[atc] {}", message.text)),
+        // Echoed to the radio pane when entered (TUI, startup messages).
+        IncomingSource::Atc => {}
         IncomingSource::ModeSwitch(mode) => emit_log_kind(
             bus,
             LogKind::Mode,
@@ -578,13 +579,6 @@ pub(crate) fn emit_log_kind(bus: Option<&SimBus>, kind: LogKind, text: &str) {
                 None => println!("{}", text),
             }
         }
-    }
-}
-
-fn emit_radio(bus: Option<&SimBus>, text: &str) {
-    match bus {
-        Some(b) => b.push_radio(text),
-        None => println!("{}", text),
     }
 }
 

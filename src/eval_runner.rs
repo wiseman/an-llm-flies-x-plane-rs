@@ -22,6 +22,7 @@ use crate::bus::{FileLog, LogKind, SimBus};
 use crate::config::{AirportConfig, ConfigBundle};
 use crate::core::mission_manager::PilotCore;
 use crate::data::parquet::{AIRPORTS_FILE, COMMS_FILE, PARKING_SPOTS_FILE, RUNWAYS_FILE};
+use crate::llm::sim_atc::SimAtc;
 use crate::live_runner::{Clock, HeartbeatPump, SimClock};
 use crate::llm::backend::{LlmProvider, ReasoningEffort};
 use crate::llm::brain::{PilotBrain, WorkerArgs};
@@ -175,6 +176,9 @@ pub struct EvalConfig {
     /// harness's headless behaviour; handy for watching a run in real
     /// time. The log file is always written regardless.
     pub verbose: bool,
+    /// Model for a simulated controller that answers the pilot's radio
+    /// calls (see `llm::sim_atc`). `None` = nobody answers.
+    pub sim_atc_model: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -222,6 +226,45 @@ pub struct ResolvedStart {
     pub parking_lat_deg: f64,
     pub parking_lon_deg: f64,
     pub parking_heading_deg: f64,
+}
+
+/// Runways and frequencies at the eval airport, for the simulated ATC.
+fn airport_brief(cfg: &EvalConfig) -> Result<String> {
+    use crate::llm::tools::open_apt_dat_parquet;
+    let cache = &cfg.apt_dat_cache_dir;
+    let conn = open_apt_dat_parquet(
+        &cache.join(AIRPORTS_FILE),
+        &cache.join(RUNWAYS_FILE),
+        &cache.join(COMMS_FILE),
+    )?;
+    let name: String = conn.query_row(
+        "SELECT name FROM airports WHERE ident = ? LIMIT 1",
+        [&cfg.airport],
+        |r| r.get(0),
+    )?;
+    let mut out = format!("Airport: {} ({name}).\nRunways:\n", cfg.airport);
+    let mut stmt = conn.prepare(
+        "SELECT le_ident, he_ident, length_ft FROM runways WHERE airport_ident = ? AND closed = 0",
+    )?;
+    let rows = stmt.query_map([&cfg.airport], |r| {
+        Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, Option<f64>>(2)?))
+    })?;
+    for row in rows {
+        let (le, he, len) = row?;
+        out.push_str(&format!("- {le}/{he}, {:.0} ft\n", len.unwrap_or(0.0)));
+    }
+    out.push_str("Frequencies:\n");
+    let mut stmt = conn.prepare(
+        "SELECT kind, freq_mhz, label FROM comms WHERE airport_ident = ? ORDER BY kind",
+    )?;
+    let rows = stmt.query_map([&cfg.airport], |r| {
+        Ok((r.get::<_, String>(0)?, r.get::<_, f64>(1)?, r.get::<_, Option<String>>(2)?))
+    })?;
+    for row in rows {
+        let (kind, freq, label) = row?;
+        out.push_str(&format!("- {kind} {freq:.3} {}\n", label.unwrap_or_default()));
+    }
+    Ok(out)
 }
 
 fn resolve_start(cfg: &EvalConfig) -> Result<ResolvedStart> {
@@ -361,6 +404,8 @@ fn build_eval_config_bundle(
 /// doesn't have to pass a dozen args to a helper. Ownership/shares:
 /// everything here is either `Arc`-cloned or `Copy`-cheap.
 struct ControlLoopCtx {
+    /// While it's composing an answer, the sim runs at 1x.
+    sim_atc: Option<Arc<SimAtc>>,
     dynamics: Arc<PLMutex<DynamicsState>>,
     model: SimpleAircraftModel,
     pilot: Arc<PLMutex<PilotCore>>,
@@ -534,6 +579,11 @@ fn run_control_loop(ctx: ControlLoopCtx) -> (MissionOutcome, f64, f64) {
         ctx.bridge.refresh_derived_datarefs(ctx.dt);
         ctx.sim_clock.advance_secs(ctx.dt);
         ctx.pump.check_and_emit();
+        // A radio call is waiting for the controller: real time, so its
+        // thinking reads as a radio delay of seconds, not minutes.
+        if ctx.sim_atc.as_ref().is_some_and(|a| a.composing()) {
+            thread::sleep(Duration::from_secs_f64(ctx.dt));
+        }
 
         // Update airborne tracking + auto-detection state.
         let (on_ground, alt_ft, gs_kt, phase_now, sim_time_s) = {
@@ -766,6 +816,15 @@ pub fn run_eval_with_brain(
     let turn_counter = Arc::new(AtomicUsize::new(0));
     let tool_counters = Arc::new(ToolCounters::default());
 
+    let sim_atc = match &cfg.sim_atc_model {
+        Some(model) => {
+            let brief = airport_brief(&cfg).context("describing the airport for the simulated ATC")?;
+            bus.push_log_kind(LogKind::System, format!("simulated ATC: claude-code / {model}"));
+            Some(SimAtc::start(model, &brief, input_tx.clone(), Some(bus.clone()))?)
+        }
+        None => None,
+    };
+
     let tool_ctx = Arc::new(ToolContext {
         pilot: pilot_arc.clone(),
         bridge: Some(tool_bridge),
@@ -779,6 +838,7 @@ pub fn run_eval_with_brain(
         turn_counter: Some(turn_counter.clone()),
         tool_counters: Some(tool_counters.clone()),
         taxi_graphs: Default::default(),
+        sim_atc: sim_atc.clone(),
     });
 
     // Prime `latest_snapshot` so the LLM's first `get_status` returns
@@ -799,6 +859,9 @@ pub fn run_eval_with_brain(
             LogKind::System,
             format!("[startup {}] {}", msg.source.tag(), msg.text),
         );
+        if msg.source == crate::llm::conversation::IncomingSource::Atc {
+            bus.push_radio(format!("[atc] {}", msg.text));
+        }
         input_tx.send(msg.clone()).ok();
     }
 
@@ -865,8 +928,12 @@ pub fn run_eval_with_brain(
         field_elevation_ft: resolved.field_elevation_ft,
         track_recorder: track_recorder.clone(),
         track_wall_start,
+        sim_atc: sim_atc.clone(),
     };
     let (outcome, max_alt_agl_ft, final_fuel_kg) = run_control_loop(ctrl_ctx);
+    if let Some(atc) = &sim_atc {
+        atc.shutdown();
+    }
     let wall_duration_s = wall_start.elapsed().as_secs_f64();
 
     // --- shutdown LLM worker ---

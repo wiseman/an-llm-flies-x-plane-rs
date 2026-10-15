@@ -509,8 +509,10 @@ pub fn run_live_xplane(base_config: ConfigBundle, runtime: LiveRunConfig) -> Res
     // to the radio pane by the LLM worker; operator lines are echoed here,
     // matching what the TUI does for typed input.
     for msg in &runtime.startup_messages {
-        if msg.source == IncomingSource::Operator {
-            bus.push_log_kind(LogKind::Operator, msg.text.clone());
+        match msg.source {
+            IncomingSource::Operator => bus.push_log_kind(LogKind::Operator, msg.text.clone()),
+            IncomingSource::Atc => bus.push_radio(format!("[atc] {}", msg.text)),
+            _ => {}
         }
         let _ = input_tx.send(msg.clone());
     }
@@ -595,6 +597,7 @@ pub fn run_live_xplane(base_config: ConfigBundle, runtime: LiveRunConfig) -> Res
         turn_counter: None,
         tool_counters: None,
         taxi_graphs: Default::default(),
+        sim_atc: None,
     });
 
     let llm_stop = Arc::new(AtomicBool::new(false));

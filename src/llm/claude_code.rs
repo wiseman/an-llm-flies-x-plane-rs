@@ -98,7 +98,7 @@ pub fn run_claude_code_loop(
 ) {
     let bus_ref = bus.as_ref();
     emit_log_kind(bus_ref, LogKind::Mode, &format!("pilot mode: {}", initial_mode.label()));
-    let mut session = match ClaudeSession::new(cfg, tool_context.clone(), initial_mode, bus.clone()) {
+    let mut session = match ClaudeSession::pilot(cfg, tool_context.clone(), initial_mode, bus.clone()) {
         Ok(s) => s,
         Err(e) => {
             emit_log_kind(bus_ref, LogKind::Error, &format!("[claude-code] can't start: {e:#}"));
@@ -212,11 +212,17 @@ pub fn parse_stream_line(line: &str) -> Vec<ClaudeEvent> {
     }
 }
 
-struct ClaudeSession {
+/// One long-lived `claude -p` stream-json process and its session id.
+/// The pilot's carries our tools over MCP and counts its turns and
+/// tokens; a plain one (the simulated ATC) has no tools and just talks.
+pub(crate) struct ClaudeSession {
     cfg: ClaudeCodeConfig,
-    tool_context: Arc<ToolContext>,
+    /// Log prefix, e.g. `[claude-code]`.
+    label: &'static str,
+    /// The pilot's tool context: turn counting and token log lines.
+    tool_context: Option<Arc<ToolContext>>,
     bus: Option<SimBus>,
-    mcp: McpServer,
+    mcp: Option<McpServer>,
     system_prompt: String,
     work_dir: PathBuf,
     child: Option<ClaudeChild>,
@@ -231,28 +237,47 @@ struct ClaudeChild {
 }
 
 impl ClaudeSession {
-    fn new(
+    fn pilot(
         cfg: &ClaudeCodeConfig,
         tool_context: Arc<ToolContext>,
         mode: PilotMode,
         bus: Option<SimBus>,
     ) -> Result<Self> {
         let mcp = McpServer::start(tool_context.clone(), bus.clone())?;
-        // An empty working directory: no project CLAUDE.md to discover.
-        let work_dir = std::env::temp_dir().join(format!("sim-pilot-claude-{}", std::process::id()));
-        std::fs::create_dir_all(&work_dir)
-            .with_context(|| format!("creating {}", work_dir.display()))?;
         emit_log_kind(
             bus.as_ref(),
             LogKind::System,
             &format!("[claude-code] tools served at {}", mcp.url),
         );
+        let system_prompt = format!("{}{}", mode.system_prompt(), CLAUDE_CODE_ADDENDUM);
+        let mut session = Self::plain(cfg, "[claude-code]", system_prompt, bus)?;
+        session.tool_context = Some(tool_context);
+        session.mcp = Some(mcp);
+        Ok(session)
+    }
+
+    /// A tool-less session with its own system prompt.
+    pub(crate) fn plain(
+        cfg: &ClaudeCodeConfig,
+        label: &'static str,
+        system_prompt: String,
+        bus: Option<SimBus>,
+    ) -> Result<Self> {
+        // An empty working directory: no project CLAUDE.md to discover.
+        let work_dir = std::env::temp_dir().join(format!(
+            "sim-pilot-claude-{}-{}",
+            std::process::id(),
+            label.trim_matches(|c| c == '[' || c == ']')
+        ));
+        std::fs::create_dir_all(&work_dir)
+            .with_context(|| format!("creating {}", work_dir.display()))?;
         Ok(Self {
             cfg: cfg.clone(),
-            tool_context,
+            label,
+            tool_context: None,
             bus,
-            mcp,
-            system_prompt: format!("{}{}", mode.system_prompt(), CLAUDE_CODE_ADDENDUM),
+            mcp: None,
+            system_prompt,
             work_dir,
             child: None,
             session_id: None,
@@ -276,14 +301,18 @@ impl ClaudeSession {
             "",
             "--setting-sources",
             "",
-            "--mcp-config",
-            &self.mcp.claude_config_json(),
             "--strict-mcp-config",
-            "--allowedTools",
-            &format!("mcp__{SERVER_NAME}__*"),
             "--permission-mode",
             "dontAsk",
         ]);
+        if let Some(mcp) = &self.mcp {
+            cmd.args([
+                "--mcp-config",
+                &mcp.claude_config_json(),
+                "--allowedTools",
+                &format!("mcp__{SERVER_NAME}__*"),
+            ]);
+        }
         if let Some(effort) = self.cfg.effort {
             cmd.args(["--effort", effort.as_str()]);
         }
@@ -317,10 +346,11 @@ impl ClaudeSession {
             let _ = tx.send(None);
         })?;
         let bus = self.bus.clone();
+        let label = self.label;
         std::thread::Builder::new().name("claude-stderr".into()).spawn(move || {
             for line in BufReader::new(stderr).lines().map_while(Result::ok) {
                 if !line.trim().is_empty() {
-                    emit_log_kind(bus.as_ref(), LogKind::Error, &format!("[claude-code] {line}"));
+                    emit_log_kind(bus.as_ref(), LogKind::Error, &format!("{label} {line}"));
                 }
             }
         })?;
@@ -328,7 +358,8 @@ impl ClaudeSession {
             self.bus.as_ref(),
             LogKind::System,
             &format!(
-                "[claude-code] started {} --model {}{}",
+                "{} started {} --model {}{}",
+                self.label,
                 self.cfg.binary.display(),
                 self.cfg.model,
                 self.session_id.as_deref().map(|id| format!(" --resume {id}")).unwrap_or_default()
@@ -338,7 +369,7 @@ impl ClaudeSession {
         Ok(())
     }
 
-    fn kill(&mut self) {
+    pub(crate) fn kill(&mut self) {
         if let Some(mut child) = self.child.take() {
             let _ = child.process.kill();
             let _ = child.process.wait();
@@ -346,8 +377,10 @@ impl ClaudeSession {
     }
 
     /// Send one user message and stream events until Claude Code finishes
-    /// the turn, the wall budget runs out, or `stop` is raised.
-    fn run_turn(&mut self, content: &str, deadline: Instant, stop: &AtomicBool) -> Result<()> {
+    /// the turn, the wall budget runs out, or `stop` is raised. Returns the
+    /// turn's assistant text. The pilot's text and thinking also go to the
+    /// log as they arrive.
+    pub(crate) fn run_turn(&mut self, content: &str, deadline: Instant, stop: &AtomicBool) -> Result<String> {
         if self.child.is_none() {
             self.spawn()?;
         }
@@ -364,10 +397,33 @@ impl ClaudeSession {
             }
         }
         let bus = self.bus.clone();
+        let is_pilot = self.tool_context.is_some();
+        let end_turn_requested = self.mcp.as_ref().map(|m| m.end_turn_requested.clone());
+        if let Some(flag) = &end_turn_requested {
+            flag.store(false, Ordering::Release);
+        }
+        let mut interrupted = false;
+        let mut text = String::new();
         loop {
             if stop.load(Ordering::Acquire) {
                 self.kill();
-                return Ok(());
+                return Ok(text);
+            }
+            // A turn-ending tool ran: end the turn here, as the API loop
+            // does. Models keep polling (sleep, get_status, sleep, ...)
+            // otherwise, and queued operator/ATC messages wait behind them.
+            if !interrupted && end_turn_requested.as_ref().is_some_and(|f| f.load(Ordering::Acquire)) {
+                interrupted = true;
+                let request = json!({
+                    "type": "control_request",
+                    "request_id": "end-turn",
+                    "request": { "subtype": "interrupt" },
+                });
+                let child = self.child.as_mut().expect("spawned");
+                if writeln!(child.stdin, "{request}").and_then(|_| child.stdin.flush()).is_err() {
+                    self.kill();
+                    return Ok(text);
+                }
             }
             if Instant::now() >= deadline {
                 self.kill();
@@ -390,22 +446,36 @@ impl ClaudeSession {
                                 bus.as_ref(),
                                 LogKind::System,
                                 &format!(
-                                    "[claude-code] session {session_id} auth={}",
+                                    "{} session {session_id} auth={}",
+                                    self.label,
                                     api_key_source.as_deref().unwrap_or("?")
                                 ),
                             );
                         }
                         self.session_id = Some(session_id);
                     }
-                    ClaudeEvent::Text(t) => emit_text_lines(bus.as_ref(), LogKind::Llm, t.lines()),
-                    ClaudeEvent::Thinking(t) => emit_text_lines(bus.as_ref(), LogKind::Thinking, t.lines()),
+                    ClaudeEvent::Text(t) => {
+                        if is_pilot {
+                            emit_text_lines(bus.as_ref(), LogKind::Llm, t.lines());
+                        }
+                        if !text.is_empty() {
+                            text.push('\n');
+                        }
+                        text.push_str(&t);
+                    }
+                    ClaudeEvent::Thinking(t) => {
+                        if is_pilot {
+                            emit_text_lines(bus.as_ref(), LogKind::Thinking, t.lines());
+                        }
+                    }
                     ClaudeEvent::Other => {}
                     ClaudeEvent::Result { usage, num_turns, cost_usd, is_error, error_text } => {
                         self.record_usage(&usage, num_turns, cost_usd);
-                        if is_error {
+                        // Our own interrupt ends the turn as an error.
+                        if is_error && !interrupted {
                             return Err(anyhow!("turn ended with an error: {}", error_text.unwrap_or_default()));
                         }
-                        return Ok(());
+                        return Ok(text);
                     }
                 }
             }
@@ -414,7 +484,10 @@ impl ClaudeSession {
 
     fn record_usage(&self, usage: &LlmUsage, num_turns: u64, cost_usd: Option<f64>) {
         self.cfg.stats.record(usage);
-        if let Some(counter) = self.tool_context.turn_counter.as_ref() {
+        // Only the pilot's turns and tokens count toward eval budgets and
+        // the `tokens` log line the transcript tool parses.
+        let Some(tool_context) = &self.tool_context else { return };
+        if let Some(counter) = tool_context.turn_counter.as_ref() {
             counter.fetch_add(num_turns.max(1) as usize, Ordering::Relaxed);
         }
         let extra = format!(

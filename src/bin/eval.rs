@@ -68,9 +68,11 @@ struct Cli {
     /// Stop the eval after this many LLM turns. Historical max
     /// observed on real runs is 123 — the default is tighter than
     /// that by design: successful eval flights should be efficient,
-    /// and an over-budget run is a signal worth catching.
-    #[arg(long, default_value_t = 100)]
-    max_turns: usize,
+    /// and an over-budget run is a signal worth catching. Defaults to
+    /// 100, or 120 with --sim-atc (each controller exchange costs the
+    /// pilot a readback and an action).
+    #[arg(long)]
+    max_turns: Option<usize>,
 
     /// Stop the eval after this many cumulative output tokens across
     /// all turns. Output tokens dominate cost; historical max observed
@@ -115,6 +117,16 @@ struct Cli {
     /// is written regardless of this flag.
     #[arg(long, short = 'v')]
     verbose: bool,
+
+    /// Simulate ATC: a Claude Code controller (on your subscription)
+    /// answers the pilot's radio calls at the airport. The sim runs at
+    /// 1x while a call waits for its answer.
+    #[arg(long)]
+    sim_atc: bool,
+
+    /// Model for --sim-atc.
+    #[arg(long, default_value = xplane_pilot::llm::sim_atc::DEFAULT_SIM_ATC_MODEL)]
+    sim_atc_model: String,
 }
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
@@ -206,6 +218,9 @@ fn main() -> Result<()> {
     println!("parking:      {:?}", args.parking);
     println!("llm:          {} / {}", provider.as_str(), model);
     println!("mode:         {}", pilot_mode.label());
+    if args.sim_atc {
+        println!("sim atc:      claude-code / {}", args.sim_atc_model);
+    }
     println!("prompt ({}): {}", source, text);
     println!();
 
@@ -219,7 +234,7 @@ fn main() -> Result<()> {
         llm_reasoning_effort: args.pilot_llm_reasoning_effort,
         startup_messages,
         pilot_mode,
-        max_turns: args.max_turns,
+        max_turns: args.max_turns.unwrap_or(if args.sim_atc { 120 } else { 100 }),
         max_output_tokens: args.max_output_tokens,
         max_sim_seconds: args.max_sim_seconds,
         dt: args.dt,
@@ -227,6 +242,7 @@ fn main() -> Result<()> {
         output_dir: session_dir,
         session_stem,
         verbose: args.verbose,
+        sim_atc_model: args.sim_atc.then_some(args.sim_atc_model),
     };
 
     let result = run_eval(base, cfg)?;
