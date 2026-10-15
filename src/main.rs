@@ -71,9 +71,13 @@ struct Cli {
     #[arg(long = "pilot-llm-reasoning-effort")]
     pilot_llm_reasoning_effort: Option<String>,
 
-    /// ATC/operator message sent through the LLM at startup. Repeat for multiple messages.
+    /// ATC message sent through the LLM at startup. Repeat for multiple messages.
     #[arg(long = "atc-message")]
     atc_message: Vec<String>,
+
+    /// Operator message sent through the LLM at startup. Repeat for multiple messages.
+    #[arg(long = "operator-message")]
+    operator_message: Vec<String>,
 
     /// Skip the TUI. The session runs headless, logging to stdout and
     /// reading any startup messages from `--atc-message`. Useful for
@@ -321,6 +325,7 @@ fn main() -> Result<()> {
                     llm_model,
                     llm_reasoning_effort: args.pilot_llm_reasoning_effort,
                     atc_messages: args.atc_message,
+                    operator_messages: args.operator_message,
                     interactive: !args.headless,
                     control_hz: args.control_hz,
                     status_interval_s: args.status_interval_s,

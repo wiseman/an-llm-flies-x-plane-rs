@@ -426,6 +426,7 @@ pub struct LiveRunConfig {
     /// `thinkingConfig.thinkingBudget`. `None` omits the knob.
     pub llm_reasoning_effort: Option<String>,
     pub atc_messages: Vec<String>,
+    pub operator_messages: Vec<String>,
     pub interactive: bool,
     pub control_hz: f64,
     pub status_interval_s: f64,
@@ -535,6 +536,9 @@ pub fn run_live_xplane(base_config: ConfigBundle, runtime: LiveRunConfig) -> Res
     }
     for msg in &runtime.atc_messages {
         let _ = input_tx.send(IncomingMessage::atc(msg.clone()));
+    }
+    for msg in &runtime.operator_messages {
+        let _ = input_tx.send(IncomingMessage::operator(msg.clone()));
     }
 
     // Per-session transcript file alongside the .log/.csv/.kml
