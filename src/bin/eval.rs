@@ -19,6 +19,7 @@ use xplane_pilot::data::{apt_dat, parquet as data_parquet};
 use xplane_pilot::eval_runner::{run_eval, EvalConfig};
 use xplane_pilot::llm::backend::LlmProvider;
 use xplane_pilot::llm::conversation::{IncomingMessage, PilotMode};
+use xplane_pilot::llm::tools::ToolSet;
 use xplane_pilot::tui::parse_input_source;
 
 #[derive(Parser, Debug)]
@@ -27,13 +28,24 @@ struct Cli {
     /// ICAO airport ident (e.g. KWHP). Used by the harness to locate
     /// the parking spot — the LLM itself starts cold and rediscovers
     /// the airport via sql_query tools.
-    #[arg(long)]
-    airport: String,
+    #[arg(long, required_unless_present = "scenario")]
+    airport: Option<String>,
 
     /// apt.dat parking spot name (e.g. "Ramp 7", "FBO Parking"). Must
     /// exist at `--airport`; parking names are not unique globally.
+    #[arg(long, required_unless_present = "scenario")]
+    parking: Option<String>,
+
+    /// A scripted scenario (evals/plan/*.yaml): start state, ATC calls
+    /// fired by time or condition, end condition, and checks scored over
+    /// the flown track. Replaces --airport/--parking/--initial-prompt.
     #[arg(long)]
-    parking: String,
+    scenario: Option<PathBuf>,
+
+    /// Pilot toolbox: `legacy` (pattern/hold tools) or `plan` (`fly(code)`
+    /// with the pilot vocabulary). Default: the scenario's, else legacy.
+    #[arg(long = "tool-set", value_enum)]
+    tool_set: Option<CliToolSet>,
 
     /// LLM vendor — mirrors the x-plane harness's flag name.
     #[arg(long = "pilot-llm-provider", value_enum, default_value_t = LlmProvider::OpenAi)]
@@ -62,8 +74,8 @@ struct Cli {
     /// Examples:
     ///   --initial-prompt "Take off, fly a left pattern, land, park."
     ///   --initial-prompt "[atc] Skyhawk 2SP, cleared for takeoff runway 12, left closed traffic"
-    #[arg(long = "initial-prompt")]
-    initial_prompt: String,
+    #[arg(long = "initial-prompt", required_unless_present = "scenario")]
+    initial_prompt: Option<String>,
 
     /// Stop the eval after this many LLM turns. Historical max
     /// observed on real runs is 123 — the default is tighter than
@@ -130,6 +142,12 @@ struct Cli {
 }
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
+enum CliToolSet {
+    Legacy,
+    Plan,
+}
+
+#[derive(Copy, Clone, Debug, ValueEnum)]
 enum CliPilotMode {
     Normal,
     Realistic,
@@ -188,16 +206,37 @@ fn main() -> Result<()> {
     let provider = args.pilot_llm_provider;
     let model = args
         .pilot_llm_model
+        .clone()
         .unwrap_or_else(|| provider.default_model().to_string());
     let pilot_mode: PilotMode = args.pilot_mode.into();
 
     let apt_dat_cache_dir =
-        resolve_apt_dat_cache(args.apt_dat_path, args.airspace_txt_path)?;
+        resolve_apt_dat_cache(args.apt_dat_path.clone(), args.airspace_txt_path.clone())?;
 
     let session_stem = format!("eval-{}", Local::now().format("%Y%m%d-%H%M%S"));
-    let session_dir = args.output_dir.join(&session_stem);
 
-    let (source, text) = parse_input_source(&args.initial_prompt);
+    let scenario = match &args.scenario {
+        Some(p) => Some(xplane_pilot::eval_scenario::load(p)?),
+        None => None,
+    };
+    let tool_set = match (args.tool_set, scenario.as_ref().and_then(|s| s.tool_set.as_deref())) {
+        (Some(CliToolSet::Plan), _) => ToolSet::Plan,
+        (Some(CliToolSet::Legacy), _) => ToolSet::Legacy,
+        (None, Some(t)) => ToolSet::parse(t).ok_or_else(|| anyhow!("scenario tool_set {t:?}: expected plan or legacy"))?,
+        (None, None) => ToolSet::Legacy,
+    };
+    // Scenario runs often start together (run_plan_scenarios.py), so the
+    // id keeps their directories apart.
+    let session_stem = match &scenario {
+        Some(s) => format!("{session_stem}-{}", s.id),
+        None => session_stem,
+    };
+    let session_dir = args.output_dir.join(&session_stem);
+    if let Some(s) = &scenario {
+        return run_scenario(args, s.clone(), tool_set, provider, model, pilot_mode, apt_dat_cache_dir, session_stem, session_dir);
+    }
+    let initial_prompt = args.initial_prompt.clone().unwrap_or_default();
+    let (source, text) = parse_input_source(&initial_prompt);
     let mission_complete_reminder = "When the aircraft reaches the end state described in the mission \
                                      above (parked at a gate, at altitude, holding short, whatever was \
                                      asked), call mission_complete(success=true, summary=...) instead of \
@@ -214,8 +253,8 @@ fn main() -> Result<()> {
 
     println!("eval session: {}", session_stem);
     println!("session dir:  {}", session_dir.display());
-    println!("airport:      {}", args.airport);
-    println!("parking:      {:?}", args.parking);
+    println!("airport:      {}", args.airport.as_deref().unwrap_or(""));
+    println!("parking:      {:?}", args.parking.as_deref().unwrap_or(""));
     println!("llm:          {} / {}", provider.as_str(), model);
     println!("mode:         {}", pilot_mode.label());
     if args.sim_atc {
@@ -226,8 +265,8 @@ fn main() -> Result<()> {
 
     let base = load_default_config_bundle();
     let cfg = EvalConfig {
-        airport: args.airport,
-        parking_spot: args.parking,
+        airport: args.airport.clone().unwrap_or_default(),
+        parking_spot: args.parking.clone().unwrap_or_default(),
         apt_dat_cache_dir,
         llm_provider: provider,
         llm_model: model,
@@ -242,11 +281,82 @@ fn main() -> Result<()> {
         output_dir: session_dir,
         session_stem,
         verbose: args.verbose,
-        sim_atc_model: args.sim_atc.then_some(args.sim_atc_model),
+        sim_atc_model: args.sim_atc.then_some(args.sim_atc_model.clone()),
+        tool_set,
+        scenario: None,
     };
 
     let result = run_eval(base, cfg)?;
+    report(&result)
+}
 
+#[allow(clippy::too_many_arguments)]
+fn run_scenario(
+    args: Cli,
+    scenario: xplane_pilot::eval_scenario::Scenario,
+    tool_set: ToolSet,
+    provider: LlmProvider,
+    model: String,
+    pilot_mode: PilotMode,
+    apt_dat_cache_dir: PathBuf,
+    session_stem: String,
+    session_dir: PathBuf,
+) -> Result<()> {
+    let parking = match &scenario.start {
+        xplane_pilot::eval_scenario::Start::Parked { parking } => parking.clone(),
+        _ => String::new(),
+    };
+    let mut startup_messages = Vec::new();
+    if let Some(b) = &scenario.briefing {
+        startup_messages.push(IncomingMessage::operator(b.clone()));
+    }
+    println!("eval session: {}", session_stem);
+    println!("session dir:  {}", session_dir.display());
+    println!("scenario:     {} {:?}", scenario.id, scenario.items);
+    println!("airport:      {}", scenario.airport);
+    println!("llm:          {} / {}", provider.as_str(), model);
+    println!("tool set:     {}", tool_set.label());
+    println!();
+    let cfg = EvalConfig {
+        airport: scenario.airport.clone(),
+        parking_spot: parking,
+        apt_dat_cache_dir,
+        llm_provider: provider,
+        llm_model: model,
+        llm_reasoning_effort: args.pilot_llm_reasoning_effort,
+        startup_messages,
+        pilot_mode,
+        max_turns: args.max_turns.unwrap_or(60),
+        max_output_tokens: args.max_output_tokens,
+        max_sim_seconds: scenario.max_sim_s.unwrap_or(args.max_sim_seconds),
+        dt: args.dt,
+        heartbeat_interval_s: args.heartbeat_interval,
+        output_dir: session_dir,
+        session_stem,
+        verbose: args.verbose,
+        sim_atc_model: args.sim_atc.then_some(args.sim_atc_model),
+        tool_set,
+        scenario: Some(scenario),
+    };
+    let result = run_eval(load_default_config_bundle(), cfg)?;
+    if !result.checks.is_empty() {
+        println!("---");
+        for c in &result.checks {
+            println!("{} {:<55} {}", if c.pass { "PASS" } else { "FAIL" }, c.check, c.detail);
+        }
+    }
+    if let Some(p) = &result.ground_svg {
+        println!("ground_svg:      {}", p.display());
+    }
+    let failed = result.checks.iter().filter(|c| !c.pass).count();
+    report(&result)?;
+    if failed > 0 {
+        return Err(anyhow!("{failed} of {} checks failed", result.checks.len()));
+    }
+    Ok(())
+}
+
+fn report(result: &xplane_pilot::eval_runner::EvalResult) -> Result<()> {
     println!("---");
     println!("outcome:         {:?}", result.outcome.source);
     println!("success:         {}", result.outcome.success);

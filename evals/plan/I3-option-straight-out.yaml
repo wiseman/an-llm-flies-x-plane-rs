@@ -1,0 +1,16 @@
+# Cleared for the option, straight-out departure on the go (I3)
+id: I3
+items: ["I3"]
+description: "Cleared for the option, straight-out departure on the go"
+airport: KVNY
+tool_set: plan
+start: {"airborne": {"runway": "16R", "along_ft": 4000, "right_ft": 6000, "alt_msl_ft": 1800, "heading_deg": 355.5, "ias_kt": 80}}
+briefing: "You are Cessna 172SP, callsign \"Skyhawk 2SP\", on a right downwind for runway 16R at Van Nuys (KVNY), at pattern altitude, doing touch-and-goes, talking to Van Nuys Tower on 119.3. The autopilot is holding heading, altitude and speed for now. Fly the tower's instructions."
+messages:
+  - {"at_s": 0, "atc": "Skyhawk 2SP, runway 16R cleared for the option, on the go straight-out departure approved."}
+max_sim_s: 900
+end_after_s: 600
+checks:
+  - {"check": "touch_and_go"}
+  - {"check": "reached", "label": "straight out south of the field, climbing", "cond": {"cond": "all", "conds": [{"cond": "side_of", "target": {"ref": "airport", "ident": "KVNY"}, "side_deg": 180}, {"cond": "within", "target": {"ref": "runway", "airport": "KVNY", "runway": "16R", "part": "extended_centerline"}, "distance_ft": 2500}, {"cond": "at_or_above", "altitude_ft": 1500}]}}
+  - {"check": "no_crash"}

@@ -584,6 +584,8 @@ impl XPlaneWebBridge {
             vertical_speed_ft_s: vh_ind / 60.0,
             flap_index: flap_ratio_to_setting(flap_ratio),
             gear_down,
+            // X-Plane flies its own sideslip; nothing reads this field.
+            sideslip_deg: 0.0,
             parking_brake: cache.get(PARKING_BRAKE_RATIO.name).copied().unwrap_or(0.0),
         })
     }

@@ -1,0 +1,17 @@
+# Go around, continue right traffic (J2)
+id: J2
+items: ["J2"]
+description: "Go around, continue right traffic"
+airport: KVNY
+tool_set: plan
+start: {"airborne": {"runway": "16R", "along_ft": 4000, "right_ft": 6000, "alt_msl_ft": 1800, "heading_deg": 355.5, "ias_kt": 80}}
+briefing: "You are Cessna 172SP, callsign \"Skyhawk 2SP\", on a right downwind for runway 16R at Van Nuys (KVNY), at pattern altitude, talking to Van Nuys Tower on 119.3. The autopilot is holding heading, altitude and speed for now. Fly the tower's instructions and land."
+messages:
+  - {"at_s": 0, "atc": "Skyhawk 2SP, Van Nuys Tower, runway 16R cleared to land."}
+  - {"when": {"cond": "all", "conds": [{"cond": "on_leg", "leg": "final"}, {"cond": "agl_below", "ft": 500}]}, "atc": "Skyhawk 2SP, go around, aircraft on the runway, continue right traffic runway 16R."}
+  - {"when": {"cond": "all", "conds": [{"cond": "on_leg", "leg": "downwind"}, {"cond": "elapsed", "s": 300}]}, "atc": "Skyhawk 2SP, runway 16R cleared to land."}
+max_sim_s: 1500
+checks:
+  - {"check": "reached", "label": "went around", "cond": {"cond": "on_leg", "leg": "upwind"}}
+  - {"check": "landed", "runway": "16R"}
+  - {"check": "no_crash"}

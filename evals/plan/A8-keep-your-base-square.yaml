@@ -1,0 +1,35 @@
+# "Keep your base square, you'll be following a Sport Cruiser now." (A8,
+# KVNY.) The Sport Cruiser is on right base 16R ahead of the downwind and
+# rolls out on a 1.2 mile final.
+id: A8
+items: [A8]
+description: Keep your base square, following a Sport Cruiser
+airport: KVNY
+tool_set: plan
+start:
+  airborne: {runway: 16R, along_ft: 4000, right_ft: 6000, alt_msl_ft: 1800, heading_deg: 355.5, ias_kt: 85}
+briefing: >
+  You are Cessna 172SP, callsign "Skyhawk 2SP", on a right downwind for
+  runway 16R at Van Nuys (KVNY), at pattern altitude, talking to Van Nuys
+  Tower on 119.3. The autopilot is holding heading, altitude and speed
+  for now. Fly the tower's instructions and land.
+traffic:
+  - id: t1
+    type: Sport Cruiser
+    callsign: N384SC
+    runway: 16R
+    speed_kt: 70
+    path:
+      - {along_ft: -7300, right_ft: 6000, alt_agl_ft: 750}
+      - {along_ft: -7300, right_ft: 0, alt_agl_ft: 600}
+      - {along_ft: 1200, right_ft: 0, alt_agl_ft: 0}
+      - {along_ft: 3000, right_ft: 0, alt_agl_ft: 0}
+messages:
+  - at_s: 0
+    atc: "Skyhawk 2SP, keep your base square, you'll be following a Sport Cruiser now, runway 16R cleared to land."
+max_sim_s: 1200
+checks:
+  - {check: square_base, runway: 16R}
+  - {check: separation}
+  - {check: landed, runway: 16R}
+  - {check: no_crash}

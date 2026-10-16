@@ -16,6 +16,14 @@ cargo run --release --                                # default: --backend xplan
 cargo run --release -- --headless --operator-message "..." --atc-message "..." # scripted / agent invocation (sent in argv order)
 cargo run --release -- --pilot-llm-model gpt-5.4-mini-2026-03-17
 
+# Plan tool set: the pilot writes plans in a Python pilot vocabulary via
+# fly(code) instead of the pattern/hold tools (research/pilot-api/DRAFT.md).
+cargo run --release -- --tool-set plan --pilot-llm-provider claude-code
+
+# Plan scenarios: scripted ATC against the simple sim, scored by checks.
+cargo run --release --bin eval -- --scenario evals/plan/B1-turn-base-at-the-118.yaml --pilot-llm-provider claude-code --pilot-llm-model claude-sonnet-5-5 -v
+uv run scripts/eval/run_plan_scenarios.py          # all of evals/plan, pass/fail table
+
 # Offline deterministic simulation (no X-Plane, no OpenAI key).
 cargo run --release -- --backend simple
 cargo run --release -- --backend simple --crosswind-kt 10 --log-csv output/flight.csv --plots-dir output/plots
@@ -53,6 +61,10 @@ Core principle: **the flight control loop is deterministic; the LLM never touche
 - Every profile must own every axis it touches; `engage_profile` enforces unique per-axis ownership.
 - A profile that mustn't be interrupted (e.g. a landing rollout still rolling) says so via `GuidanceProfile::preemption()`; never add ad-hoc "is X active?" guards in tool handlers. Hand-offs bypass the check (a profile replacing itself consents).
 - `contribute()` returns a `ProfileTick` with an optional `hand_off: Vec<Box<dyn GuidanceProfile>>`. This is how `PatternFlyProfile` and `DeadStickLandingProfile` hand the ground roll to `LandingRolloutProfile` at touchdown, and how `LandingRolloutProfile` hands off to idle or a planned taxi — the replacement happens *after* all profiles have ticked so no profile re-enters `PilotCore` mid-tick. (After a go-around, `PatternFlyProfile` climbs to pattern altitude and re-enters the pattern itself.)
+
+### Plans (the `plan` tool set)
+
+With `--tool-set plan` the LLM gets `fly(code)` instead of the pattern and hold tools. The code is Python in a pilot/ATC vocabulary (`src/plan/python/pilot.py`, documented in `src/llm/system_prompt_plan.md`) that *builds a plan*; it runs once per clearance in a `python3 -I` subprocess (`plan/python.rs`; imports and file access withheld, not a sandbox) and emits the JSON IR in `plan/ir.rs`. `plan/compile.rs` resolves references — runways from apt.dat, roads and landmarks from the hardcoded place lists in `config/places/*.yaml` (`plan/gazetteer.rs`) — and `core/plan_profile.rs::PlanProfile` flies it. It owns all axes, sequences steps, clamps altitude to `remain(...)` limits, and for pattern steps embeds a `PatternFlyProfile` whose turn gates (`clearances`/`triggers`) it drives from the plan's conditions (`plan/cond.rs`), so go-arounds and the rollout hand-off are unchanged. Profile events (`GuidanceProfile::take_events`: report due, constraint not met, step done) ride the status snapshot and wake the LLM through `HeartbeatPump`.
 
 ### Two execution backends
 

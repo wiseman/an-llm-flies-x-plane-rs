@@ -1,0 +1,27 @@
+# Forward slip (P24): about 850 ft above the glidepath on a 1.5 mile
+# final for 16R, cleared to land, and the instructor asks for a slip.
+# Getting down without gaining airspeed takes one (the autopilot slips on
+# its own when established and well high); it should come out before the
+# roundout and land in the first third.
+id: P24
+items: [P24]
+description: High on a 1.5 mile final, cleared to land
+airport: KVNY
+tool_set: plan
+start:
+  airborne: {runway: 16R, along_ft: -9114, right_ft: 0, alt_agl_ft: 1350, heading_deg: 175.5, ias_kt: 70}
+briefing: >
+  You are Cessna 172SP, callsign "Skyhawk 2SP", on a 1.5 mile final for
+  runway 16R at Van Nuys (KVNY), well above the glidepath, talking to Van
+  Nuys Tower on 119.3. The autopilot is holding heading, altitude and
+  speed for now.
+messages:
+  - at_s: 0
+    atc: "Skyhawk 2SP, runway 16R cleared to land."
+  - at_s: 0
+    operator: "We're high. Use a forward slip to get down without picking up speed, and land it."
+max_sim_s: 600
+checks:
+  - {check: forward_slip, runway: 16R}
+  - {check: landed, runway: 16R}
+  - {check: no_crash}

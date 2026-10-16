@@ -1,0 +1,17 @@
+# Right turn at the shoreline approved, cleared for takeoff (F1)
+id: F1
+items: ["F1"]
+description: "Right turn at the shoreline approved, cleared for takeoff"
+airport: KSMO
+tool_set: plan
+start: {"runway": {"runway": "21"}}
+briefing: "You are Cessna 172SP, callsign \"Skyhawk 2SP\", lined up on runway 21 at Santa Monica (KSMO), departing for the coast north-west, talking to Santa Monica Tower on 120.1. The engine is running and you're lined up, stopped. Fly the tower's instructions."
+messages:
+  - {"at_s": 0, "atc": "Skyhawk 2SP, Santa Monica Tower, runway 21, right turn at the shoreline approved, cleared for takeoff."}
+max_sim_s: 600
+end_after_s: 330
+checks:
+  - {"check": "heading_held", "heading_deg": 224, "tol_deg": 12, "until": {"cond": "crossing", "target": {"ref": "place", "name": "Shoreline"}}}
+  - {"check": "orbit", "dir": "right", "min_deg": 45}
+  - {"check": "no_low_turns"}
+  - {"check": "no_crash"}

@@ -86,8 +86,8 @@ impl SimpleToolBridge {
             let d = self.dynamics.lock();
             (d.throttle_pos, d.ias_kt, d.vertical_speed_ft_s, d.altitude_ft, d.on_ground)
         };
-        let flow_kg_s = FUEL_BURN_KG_PER_S_AT_FULL * throttle_pos.max(0.0);
-        let rpm = 600.0 + 2100.0 * throttle_pos.clamp(0.0, 1.0);
+        let flow_kg_s = fuel_flow_kg_s(throttle_pos);
+        let rpm = engine_rpm(throttle_pos);
         let mut v = self.values.lock();
         let fuel = v
             .get(FUEL_KG.name)
@@ -119,6 +119,14 @@ impl SimpleToolBridge {
     }
 }
 
+fn engine_rpm(throttle_pos: f64) -> f64 {
+    600.0 + 2100.0 * throttle_pos.clamp(0.0, 1.0)
+}
+
+fn fuel_flow_kg_s(throttle_pos: f64) -> f64 {
+    FUEL_BURN_KG_PER_S_AT_FULL * throttle_pos.max(0.0)
+}
+
 impl ToolBridge for SimpleToolBridge {
     fn georef(&self) -> GeoReference {
         self.georef
@@ -146,6 +154,11 @@ impl ToolBridge for SimpleToolBridge {
             n if n == Q_DEG_S.name => Some(d.q_rad_s.to_degrees()),
             n if n == R_DEG_S.name => Some(d.r_rad_s.to_degrees()),
             n if n == THROTTLE_ALL.name => Some(d.throttle_pos),
+            // From throttle on read, not per tick: an eval's sim is paused
+            // before its first tick while the pilot reads its first status,
+            // and an airborne start must not read as an engine failure.
+            n if n == ENGINE_RPM.name => Some(engine_rpm(d.throttle_pos)),
+            n if n == FUEL_FLOW_KG_SEC.name => Some(fuel_flow_kg_s(d.throttle_pos)),
             n if n == FLAP_HANDLE_DEPLOY_RATIO.name => {
                 Some(flap_setting_to_ratio(d.flap_index))
             }

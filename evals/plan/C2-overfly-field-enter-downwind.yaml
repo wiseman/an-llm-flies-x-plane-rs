@@ -1,0 +1,16 @@
+# Fly over the field, then enter right downwind (C2, P7)
+id: C2
+items: ["C2", "P7"]
+description: "Fly over the field, then enter right downwind"
+airport: KVNY
+tool_set: plan
+start: {"airborne": {"runway": "34L", "along_ft": 4000, "right_ft": -30380.6, "alt_msl_ft": 2500, "heading_deg": 90, "ias_kt": 95}}
+briefing: "You are Cessna 172SP, callsign \"Skyhawk 2SP\", about 5 miles west of Van Nuys (KVNY) at 2500 ft, inbound, talking to Van Nuys Tower on 119.3. The autopilot is holding heading, altitude and speed for now. Fly the tower's instructions and land."
+messages:
+  - {"at_s": 0, "atc": "Skyhawk 2SP, Van Nuys Tower, fly over the field at or above 2300, then enter right downwind runway 34L, cleared to land."}
+max_sim_s: 1200
+checks:
+  - {"check": "reached", "label": "over the field at or above 2300", "cond": {"cond": "all", "conds": [{"cond": "within", "target": {"ref": "runway", "airport": "KVNY", "runway": "34L", "part": "midfield"}, "distance_ft": 3000}, {"cond": "at_or_above", "altitude_ft": 2200}]}}
+  - {"check": "reached", "label": "flew the downwind", "cond": {"cond": "on_leg", "leg": "downwind"}}
+  - {"check": "landed", "runway": "34L"}
+  - {"check": "no_crash"}

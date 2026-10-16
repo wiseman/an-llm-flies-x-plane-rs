@@ -21,7 +21,7 @@ use serde_json::{json, Value};
 
 use crate::bus::SimBus;
 use crate::llm::conversation::{ends_turn, execute_tool_call};
-use crate::llm::tools::{tool_schemas, ToolContext};
+use crate::llm::tools::ToolContext;
 
 /// MCP server name; Claude Code exposes our tools as
 /// `mcp__{SERVER_NAME}__{tool}`.
@@ -147,7 +147,7 @@ pub fn handle_jsonrpc(message: &Value, ctx: &ToolContext, bus: Option<&SimBus>) 
         }),
         "ping" => json!({}),
         "tools/list" => {
-            let tools: Vec<Value> = tool_schemas(ctx.mission_complete_tx.is_some())
+            let tools: Vec<Value> = crate::llm::tools::tool_schemas_for(ctx.tool_set, ctx.mission_complete_tx.is_some())
                 .into_iter()
                 .map(|t| json!({ "name": t.name, "description": t.description, "inputSchema": t.parameters }))
                 .collect();

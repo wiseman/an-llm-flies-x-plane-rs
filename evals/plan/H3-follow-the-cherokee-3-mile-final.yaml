@@ -1,0 +1,35 @@
+# "Extend downwind, follow the Cherokee on a 3 mile final, report in
+# sight." (H3) The Cherokee (75 kt) passes abeam about 1.2 nm before the
+# 16R threshold, so the base turn comes well past the normal point.
+id: H3
+items: [H3]
+description: Extend downwind, follow the Cherokee on a 3 mile final, report in sight
+airport: KVNY
+tool_set: plan
+start:
+  airborne: {runway: 16R, along_ft: 4000, right_ft: 6000, alt_msl_ft: 1800, heading_deg: 355.5, ias_kt: 85}
+briefing: >
+  You are Cessna 172SP, callsign "Skyhawk 2SP", on a right downwind for
+  runway 16R at Van Nuys (KVNY), at pattern altitude, talking to Van Nuys
+  Tower on 119.3. The autopilot is holding heading, altitude and speed
+  for now. Fly the tower's instructions and land.
+traffic:
+  - id: t1
+    type: Cherokee
+    callsign: Cherokee 467
+    runway: 16R
+    speed_kt: 75
+    path:
+      - {along_ft: -18228, right_ft: 0, alt_agl_ft: 950}
+      - {along_ft: 1200, right_ft: 0, alt_agl_ft: 0}
+      - {along_ft: 3500, right_ft: 0, alt_agl_ft: 0}
+messages:
+  - at_s: 0
+    atc: "Skyhawk 2SP, extend downwind, follow the Cherokee on a 3 mile final, report traffic in sight, runway 16R cleared to land."
+max_sim_s: 1200
+checks:
+  - {check: radio, label: reported the traffic in sight once it was, any: ["in sight", "have the traffic", "traffic in view"], in_sight_of: t1}
+  - {check: separation}
+  - {check: landed, runway: 16R}
+  - {check: no_go_around}
+  - {check: no_crash}

@@ -146,6 +146,8 @@ pub struct ToolContext {
     pub bridge: Option<Arc<dyn ToolBridge>>,
     pub config: Arc<PLMutex<ConfigBundle>>,
     pub recent_broadcasts: Arc<PLMutex<Vec<String>>>,
+    /// Every transmission with its sim time, for eval checks.
+    pub radio_log: Arc<PLMutex<Vec<(f64, String)>>>,
     /// Directory holding the three apt.dat-derived parquet files
     /// (airports / runways / comms). Populated on startup by
     /// `data::parquet::resolve`; `None` only when no apt.dat was locatable.
@@ -173,7 +175,49 @@ pub struct ToolContext {
     /// Eval harness: a simulated controller that hears `broadcast_on_radio`
     /// calls and answers them. `None` everywhere else.
     pub sim_atc: Option<Arc<crate::llm::sim_atc::SimAtc>>,
+    /// Which tools the LLM gets (and which system prompt goes with them).
+    pub tool_set: ToolSet,
 }
+
+/// The LLM's toolbox. `Plan` swaps the pattern and hold tools for
+/// `fly(code)`, the pilot-vocabulary plan builder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ToolSet {
+    #[default]
+    Legacy,
+    Plan,
+}
+
+impl ToolSet {
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "legacy" => Some(ToolSet::Legacy),
+            "plan" => Some(ToolSet::Plan),
+            _ => None,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            ToolSet::Legacy => "legacy",
+            ToolSet::Plan => "plan",
+        }
+    }
+}
+
+/// Tools the plan tool set replaces with `fly`.
+pub const PLAN_HIDDEN_TOOLS: &[&str] = &[
+    "engage_heading_hold",
+    "engage_altitude_hold",
+    "engage_speed_hold",
+    "engage_cruise",
+    "engage_pattern_fly",
+    "extend_pattern_leg",
+    "execute_pattern_turn",
+    "set_pattern_clearance",
+    "join_pattern",
+    "execute_touch_and_go",
+];
 
 impl ToolContext {
     pub fn new(
@@ -185,6 +229,7 @@ impl ToolContext {
             bridge: None,
             config: Arc::new(PLMutex::new(config)),
             recent_broadcasts: Arc::new(PLMutex::new(Vec::new())),
+            radio_log: Arc::new(PLMutex::new(Vec::new())),
             apt_dat_cache_dir: None,
             bus: None,
             runway_conn: Arc::new(Mutex::new(None)),
@@ -194,6 +239,7 @@ impl ToolContext {
             tool_counters: None,
             taxi_graphs: Default::default(),
             sim_atc: None,
+            tool_set: ToolSet::Legacy,
         }
     }
 }
@@ -384,6 +430,12 @@ pub fn build_status_payload(
     if let Some(fuel) = build_fuel_payload(bridge) {
         obj.as_object_mut().unwrap().insert("fuel".into(), fuel);
     }
+    if let Some(plan) = &snapshot.plan_status {
+        obj.as_object_mut().unwrap().insert("plan".into(), plan.clone());
+    }
+    if !snapshot.traffic.is_empty() {
+        obj.as_object_mut().unwrap().insert("traffic".into(), json!(snapshot.traffic));
+    }
 
     // Airspace awareness is gated on (a) a live lat/lon (otherwise there's
     // no global position to query against) and (b) being airborne — on the
@@ -502,8 +554,18 @@ fn release_parking_brake_if_set(
 // ---------- individual tool handlers ----------
 
 pub fn tool_get_status(ctx: &ToolContext, _args: &Map<String, Value>) -> String {
-    let pilot = ctx.pilot.lock();
-    let snap = pilot.latest_snapshot.clone();
+    let mut pilot = ctx.pilot.lock();
+    let mut snap = pilot.latest_snapshot.clone();
+    // The snapshot is from the last control tick, and the sim may be
+    // paused while the LLM works: show the profile stack and plan as they
+    // are now, so a profile engaged this turn doesn't look missing.
+    let live_plan = pilot
+        .profile_mut::<crate::core::plan_profile::PlanProfile>()
+        .map(|p| p.status_json());
+    if let (Some(s), Some(plan)) = (snap.as_mut(), live_plan) {
+        s.active_profiles = pilot.list_profile_names();
+        s.plan_status = Some(plan);
+    }
     drop(pilot);
     let bridge_ref: Option<&dyn ToolBridge> = ctx.bridge.as_deref();
     let airspace = airspace_source(ctx);
@@ -938,6 +1000,242 @@ fn config_for_runway(
     cfg.airport.field_elevation_ft = field_elevation_ft;
     cfg.airport.runway = runway;
     cfg
+}
+
+/// Airport and runway data for plan resolution, from the apt.dat views.
+pub struct DuckAirports<'a> {
+    pub ctx: &'a ToolContext,
+}
+
+impl crate::plan::resolve::AirportSource for DuckAirports<'_> {
+    fn airport(&self, ident: &str) -> Result<crate::plan::resolve::AirportData> {
+        use crate::plan::resolve::{AirportData, RunwayInfo};
+        ensure_runway_conn(self.ctx)?;
+        let guard = self.ctx.runway_conn.lock().unwrap();
+        let conn = guard.as_ref().unwrap();
+        let (elevation_ft, lat, lon): (Option<f64>, Option<f64>, Option<f64>) = conn
+            .query_row(
+                "SELECT elevation_ft, latitude_deg, longitude_deg FROM airports WHERE ident = ? LIMIT 1",
+                [ident],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .map_err(|_| anyhow!("airport {ident:?} not found in the database"))?;
+        let mut stmt = conn.prepare(
+            "SELECT le_ident, he_ident, le_latitude_deg, le_longitude_deg, he_latitude_deg, he_longitude_deg, \
+                    le_heading_degT, he_heading_degT, le_displaced_threshold_ft, he_displaced_threshold_ft, \
+                    length_ft, width_ft \
+             FROM runways WHERE airport_ident = ? AND closed = 0",
+        )?;
+        let mut rows = stmt.query([ident])?;
+        let mut runways = Vec::new();
+        while let Some(row) = rows.next()? {
+            let le: Option<String> = row.get(0)?;
+            let he: Option<String> = row.get(1)?;
+            let (Some(le_lat), Some(le_lon), Some(he_lat), Some(he_lon)) =
+                (row.get::<_, Option<f64>>(2)?, row.get::<_, Option<f64>>(3)?, row.get::<_, Option<f64>>(4)?, row.get::<_, Option<f64>>(5)?)
+            else {
+                continue;
+            };
+            let le_hdg: Option<f64> = row.get(6)?;
+            let he_hdg: Option<f64> = row.get(7)?;
+            let le_disp: Option<f64> = row.get(8)?;
+            let he_disp: Option<f64> = row.get(9)?;
+            let length: f64 = row.get::<_, Option<f64>>(10)?.unwrap_or(5000.0);
+            let width: f64 = row.get::<_, Option<f64>>(11)?.unwrap_or(crate::config::DEFAULT_RUNWAY_WIDTH_FT);
+            for (id, lat, lon, flat, flon, hdg, disp) in [
+                (le, le_lat, le_lon, he_lat, he_lon, le_hdg, le_disp),
+                (he, he_lat, he_lon, le_lat, le_lon, he_hdg, he_disp),
+            ] {
+                let Some(id) = id else { continue };
+                runways.push(RunwayInfo {
+                    ident: id,
+                    lat,
+                    lon,
+                    far_lat: flat,
+                    far_lon: flon,
+                    course_deg: hdg.unwrap_or_else(|| crate::types::initial_bearing_deg(lat, lon, flat, flon)),
+                    length_ft: length,
+                    width_ft: width,
+                    displaced_threshold_ft: disp.unwrap_or(0.0),
+                });
+            }
+        }
+        Ok(AirportData {
+            ident: ident.to_string(),
+            elevation_ft: elevation_ft.unwrap_or(0.0),
+            lat: lat.unwrap_or(0.0),
+            lon: lon.unwrap_or(0.0),
+            runways,
+        })
+    }
+}
+
+/// The nearest airport with runways, for a plan with no airport named.
+fn nearest_airport(ctx: &ToolContext, lat: f64, lon: f64) -> Result<String> {
+    ensure_runway_conn(ctx)?;
+    let guard = ctx.runway_conn.lock().unwrap();
+    let conn = guard.as_ref().unwrap();
+    let cos = lat.to_radians().cos();
+    let ident: String = conn.query_row(
+        "SELECT a.ident FROM airports a \
+         WHERE a.latitude_deg BETWEEN ?1 - 0.5 AND ?1 + 0.5 \
+           AND EXISTS (SELECT 1 FROM runways r WHERE r.airport_ident = a.ident AND r.closed = 0) \
+         ORDER BY power(a.latitude_deg - ?1, 2) + power((a.longitude_deg - ?2) * ?3, 2) LIMIT 1",
+        duckdb::params![lat, lon, cos],
+        |r| r.get(0),
+    )?;
+    Ok(ident)
+}
+
+/// `fly(code)`: build or amend the plan from pilot-vocabulary Python.
+pub fn tool_fly(ctx: &ToolContext, args: &Map<String, Value>) -> String {
+    use crate::core::plan_profile::PlanProfile;
+    use crate::plan::compile::RStepKind;
+    let code = match arg_str(args, "code") {
+        Ok(s) => s.to_string(),
+        Err(e) => return format!("error: {e}"),
+    };
+    let Some(bridge) = ctx.bridge.clone() else {
+        return "error: aircraft systems bridge unavailable".to_string();
+    };
+    let (snapshot, plan_status, plan_airport) = {
+        let mut pilot = ctx.pilot.lock();
+        let snap = pilot.latest_snapshot.clone();
+        let (status, airport) = match pilot.profile_mut::<PlanProfile>() {
+            Some(p) => (Some(p.status_json()), p.pattern_runway().map(|(a, _)| a)),
+            None => (None, None),
+        };
+        (snap, status, airport)
+    };
+    let Some(snapshot) = snapshot else {
+        return "error: no aircraft state yet; call get_status first".to_string();
+    };
+    let state = snapshot.state.clone();
+    let airport = match args.get("airport").and_then(|v| v.as_str()).filter(|s| !s.trim().is_empty()) {
+        Some(a) => a.trim().to_ascii_uppercase(),
+        None => match plan_airport.or_else(|| ctx.config.lock().airport.airport.clone()) {
+            Some(a) => a,
+            None => {
+                let (Some(lat), Some(lon)) = (bridge.get_dataref_value(LATITUDE_DEG.name), bridge.get_dataref_value(LONGITUDE_DEG.name)) else {
+                    return "error: no airport given and no position to find the nearest one".to_string();
+                };
+                match nearest_airport(ctx, lat, lon) {
+                    Ok(a) => a,
+                    Err(e) => return format!("error: finding the nearest airport: {e}"),
+                }
+            }
+        },
+    };
+    if let Some(bus) = &ctx.bus {
+        bus.push_log_kind(crate::bus::LogKind::ToolCall, format!("[fly airport={airport}]\n{}", code.trim_end()));
+    }
+    let base = ctx.config.lock().clone();
+    let airports = DuckAirports { ctx };
+    let prepared = match crate::plan::session::prepare_with_traffic(
+        &code,
+        &airport,
+        &base,
+        &crate::plan::gazetteer::GAZETTEER,
+        &airports,
+        bridge.georef(),
+        plan_status.as_ref(),
+        &snapshot.traffic,
+    ) {
+        Ok(p) => p,
+        Err(e) => return format!("error: {e:#}"),
+    };
+
+    // On the ground a plan can only start with the pattern (a takeoff
+    // into closed traffic) from a lined-up position.
+    if state.on_ground {
+        if let Some(steps) = &prepared.delta.steps {
+            match steps.first().map(|s| &s.kind) {
+                Some(RStepKind::Pattern { pattern, .. }) | Some(RStepKind::Takeoff { pattern }) => {
+                    if let Some(msg) = parking_brake_refusal(ctx, "fly") {
+                        return msg;
+                    }
+                    let rwy = pattern.spec.runway.clone();
+                    if let Err(msg) = validate_takeoff_position(ctx, &pattern.frame, &rwy, false, "fly") {
+                        return msg;
+                    }
+                }
+                Some(_) => {
+                    return "error: on the ground, a plan can only start with takeoff(rwy) or join(p) (a takeoff into closed traffic) from the runway; taxi and line up with the ground tools first".to_string();
+                }
+                None => {}
+            }
+        }
+    }
+
+    let reference = prepared.delta.reference_pattern().map(|p| p.config.clone());
+    // The reply: a header, the plan as the autopilot reads it, notes, and
+    // anything the code printed.
+    let reply = |header: String, notes: Vec<String>| {
+        let mut out = vec![header];
+        out.extend(prepared.summary.iter().map(|l| format!("  {l}")));
+        out.extend(notes.into_iter().map(|n| format!("  note: {n}")));
+        out
+    };
+    let printed = (!prepared.printed.is_empty()).then(|| format!("printed:\n{}", prepared.printed.trim_end()));
+
+    // preview=true: fly the change ahead in the simple model, change nothing.
+    if prepared.preview || args.get("preview").and_then(|v| v.as_bool()).unwrap_or(false) {
+        let (profile, cfg, traffic, notes) = {
+            let mut pilot = ctx.pilot.lock();
+            let cfg = reference.clone().unwrap_or_else(|| pilot.config.clone());
+            let traffic = pilot.traffic.snapshot();
+            let picture = crate::core::traffic::TrafficPicture::default();
+            let mut profile = match pilot.profile_mut::<PlanProfile>() {
+                Some(p) => p.preview_copy(picture),
+                None => PlanProfile::new(base.clone(), &state).with_traffic(picture),
+            };
+            let notes = profile.apply(prepared.delta, &state);
+            (profile, cfg, traffic, notes)
+        };
+        let pv = crate::plan::preview::preview(&cfg, profile, &state, traffic, PREVIEW_HORIZON_S);
+        let mut out = reply("preview only; nothing changed. The plan would be:".to_string(), notes);
+        out.extend(pv.lines());
+        out.extend(printed);
+        return out.join("\n");
+    }
+
+    // Amend the plan being flown, checked and applied under one lock so a
+    // hand-off in between (touchdown) can't drop the change.
+    let mut delta = Some(prepared.delta);
+    let amended = {
+        let mut pilot = ctx.pilot.lock();
+        let notes = pilot.profile_mut::<PlanProfile>().map(|p| p.apply(delta.take().unwrap(), &state));
+        if notes.is_some() {
+            if let Some(cfg) = &reference {
+                if pilot.config.airport.runway.id != cfg.airport.runway.id
+                    || pilot.config.airport.airport != cfg.airport.airport
+                {
+                    pilot.set_reference_config(cfg.clone());
+                    ctx.config.lock().airport = cfg.airport.clone();
+                }
+            }
+        }
+        notes
+    };
+    let mut out = match (amended, delta) {
+        (Some(notes), _) => reply("plan amended:".to_string(), notes),
+        (None, Some(delta)) => {
+            let traffic = ctx.pilot.lock().traffic.clone();
+            let mut profile = PlanProfile::new(base.clone(), &state).with_traffic(traffic);
+            let notes = profile.apply(delta, &state);
+            let engaged = match reference {
+                Some(cfg) => engage_on_runway(ctx, cfg, vec![Box::new(profile)]),
+                None => engage(ctx, vec![Box::new(profile)]),
+            };
+            match engaged {
+                Ok(displaced) => reply(format!("plan engaged{displaced}:"), notes),
+                Err(e) => return e,
+            }
+        }
+        (None, None) => unreachable!("the delta is used only when a plan was amended"),
+    };
+    out.extend(printed);
+    out.join("\n")
 }
 
 pub fn tool_engage_pattern_fly(ctx: &ToolContext, args: &Map<String, Value>) -> String {
@@ -1597,7 +1895,16 @@ pub fn tool_list_profiles(ctx: &ToolContext, _args: &Map<String, Value>) -> Stri
 }
 
 fn with_pattern_profile<R>(ctx: &ToolContext, f: impl FnOnce(&mut PatternFlyProfile) -> R) -> Option<R> {
-    ctx.pilot.lock().profile_mut::<PatternFlyProfile>().map(f)
+    let mut pilot = ctx.pilot.lock();
+    if pilot.profile_mut::<PatternFlyProfile>().is_some() {
+        return pilot.profile_mut::<PatternFlyProfile>().map(f);
+    }
+    // A plan flying a pattern counts: go-around, touch-and-go and the
+    // runway-exit tools act on its pattern.
+    pilot
+        .profile_mut::<crate::core::plan_profile::PlanProfile>()
+        .and_then(|p| p.pattern_fly_mut())
+        .map(f)
 }
 
 pub fn tool_extend_pattern_leg(ctx: &ToolContext, args: &Map<String, Value>) -> String {
@@ -1633,7 +1940,7 @@ pub fn tool_extend_pattern_leg(ctx: &ToolContext, args: &Map<String, Value>) -> 
             }
         ),
         Some(Err(msg)) => format!("error: {}", msg),
-        None => "error: pattern_fly profile is not active; call engage_pattern_fly first".to_string(),
+        None => "error: pattern_fly profile is not active; call engage_pattern_fly (or fly a plan with join(p)) first".to_string(),
     }
 }
 
@@ -1650,7 +1957,7 @@ pub fn tool_execute_pattern_turn(ctx: &ToolContext, args: &Map<String, Value>) -
     };
     match with_pattern_profile(ctx, |p| p.execute_turn(leg)) {
         Some(_) => format!("turn to {} triggered", leg.as_str()),
-        None => "error: pattern_fly profile is not active; call engage_pattern_fly first".to_string(),
+        None => "error: pattern_fly profile is not active; call engage_pattern_fly (or fly a plan with join(p)) first".to_string(),
     }
 }
 
@@ -1686,7 +1993,7 @@ pub fn tool_set_pattern_clearance(ctx: &ToolContext, args: &Map<String, Value>) 
             (_, true) => format!("{} clearance granted", gate.as_str()),
             (_, false) => format!("{} clearance revoked — ATC will call", gate.as_str()),
         },
-        None => "error: pattern_fly profile is not active; call engage_pattern_fly first".to_string(),
+        None => "error: pattern_fly profile is not active; call engage_pattern_fly (or fly a plan with join(p)) first".to_string(),
     }
 }
 
@@ -1694,7 +2001,7 @@ pub fn tool_go_around(ctx: &ToolContext, _args: &Map<String, Value>) -> String {
     match with_pattern_profile(ctx, |p| p.go_around()) {
         Some(()) => "go_around triggered".to_string(),
         None if landed(ctx) => "error: already on the ground after landing; a go-around is no longer possible (arm execute_touch_and_go before touchdown instead)".to_string(),
-        None => "error: pattern_fly profile is not active; call engage_pattern_fly first".to_string(),
+        None => "error: pattern_fly profile is not active; call engage_pattern_fly (or fly a plan with join(p)) first".to_string(),
     }
 }
 
@@ -1711,7 +2018,7 @@ fn landed(ctx: &ToolContext) -> bool {
 pub fn tool_execute_touch_and_go(ctx: &ToolContext, _args: &Map<String, Value>) -> String {
     match with_pattern_profile(ctx, |p| p.execute_touch_and_go()) {
         Some(_) => "touch-and-go armed; landing will transition to takeoff_roll instead of rollout".to_string(),
-        None => "error: pattern_fly profile is not active; call engage_pattern_fly first".to_string(),
+        None => "error: pattern_fly profile is not active; call engage_pattern_fly (or fly a plan with join(p)) first".to_string(),
     }
 }
 
@@ -1823,6 +2130,8 @@ pub fn tool_broadcast_on_radio(ctx: &ToolContext, args: &Map<String, Value>) -> 
         println!("{}", line);
     }
     {
+        let t_sim = ctx.bridge.as_ref().and_then(|b| b.get_dataref_value(crate::sim::datarefs::SIM_TIME_S.name));
+        ctx.radio_log.lock().push((t_sim.unwrap_or(0.0), message.to_string()));
         let mut br = ctx.recent_broadcasts.lock();
         br.push(line.clone());
         if br.len() > 16 {
@@ -2502,7 +2811,7 @@ pub fn tool_choose_runway_exit(ctx: &ToolContext, args: &Map<String, Value>) -> 
             h.arrival().map(|a| (a.parking_name.clone(), a.via_taxiways.clone())),
         )
     }) else {
-        return "error: pattern_fly profile is not active; call engage_pattern_fly first".to_string();
+        return "error: pattern_fly profile is not active; call engage_pattern_fly (or fly a plan with join(p)) first".to_string();
     };
 
     // Resolve the selected taxi edge into its exact graph path now;
@@ -2548,7 +2857,7 @@ pub fn tool_choose_runway_exit(ctx: &ToolContext, args: &Map<String, Value>) -> 
     match ctx.pilot.lock().landing_plan_mut().map(|h| h.set_landing_plan(exit_plan, arrival)) {
         Some(Ok(())) => display,
         Some(Err(e)) => format!("error: {e}"),
-        None => "error: pattern_fly profile is not active; call engage_pattern_fly first".to_string(),
+        None => "error: pattern_fly profile is not active; call engage_pattern_fly (or fly a plan with join(p)) first".to_string(),
     }
 }
 
@@ -2574,7 +2883,7 @@ pub fn tool_plan_arrival(ctx: &ToolContext, args: &Map<String, Value>) -> String
         .landing_plan_mut()
         .map(|h| h.runway_frame().touchdown_runway_x_ft())
     else {
-        return "error: pattern_fly profile is not active; plan_arrival is for an upcoming landing (engage_pattern_fly first)".to_string();
+        return "error: no pattern is being flown; plan_arrival is for an upcoming landing (engage_pattern_fly, or fly a plan with join(p), first)".to_string();
     };
     let (airport, runway) = match active_runway(ctx) {
         Ok(v) => v,
@@ -2618,7 +2927,7 @@ pub fn tool_plan_arrival(ctx: &ToolContext, args: &Map<String, Value>) -> String
     match ctx.pilot.lock().landing_plan_mut().map(|h| h.set_landing_plan(Some(plan), Some(arrival))) {
         Some(Ok(())) => reply,
         Some(Err(e)) => format!("error: {e}"),
-        None => "error: pattern_fly profile is not active; call engage_pattern_fly first".to_string(),
+        None => "error: pattern_fly profile is not active; call engage_pattern_fly (or fly a plan with join(p)) first".to_string(),
     }
 }
 
@@ -3204,7 +3513,13 @@ pub fn dispatch_tool(name: &str, arguments: &str, ctx: &ToolContext) -> ToolResu
     let Value::Object(map) = args else {
         return ToolResult::from_output("error: arguments must be an object".to_string());
     };
+    if ctx.tool_set == ToolSet::Plan && PLAN_HIDDEN_TOOLS.contains(&name) {
+        return ToolResult::from_output(format!(
+            "error: {name} is not available in this session; describe the maneuver with fly(code)"
+        ));
+    }
     let output = match name {
+        "fly" => tool_fly(ctx, &map),
         "get_status" => tool_get_status(ctx, &map),
         "sleep" => tool_sleep(ctx, &map),
         "engage_heading_hold" => tool_engage_heading_hold(ctx, &map),
@@ -3248,6 +3563,47 @@ pub fn dispatch_tool(name: &str, arguments: &str, ctx: &ToolContext) -> ToolResu
 }
 
 // ---------- tool schemas ----------
+
+/// Schemas for a tool set: the legacy list, or (for `Plan`) the legacy
+/// list without the pattern/hold tools plus `fly`.
+pub fn tool_schemas_for(set: ToolSet, include_mission_complete: bool) -> Vec<ToolDef> {
+    let mut tools = tool_schemas(include_mission_complete);
+    if set == ToolSet::Plan {
+        tools.retain(|t| !PLAN_HIDDEN_TOOLS.contains(&t.name.as_str()));
+        tools.insert(
+            0,
+            ToolDef {
+                name: "fly".to_string(),
+                description: FLY_DESCRIPTION.to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "code": {
+                            "type": "string",
+                            "description": "Python using the pilot vocabulary (see the system prompt). Builds or amends the plan; runs once."
+                        },
+                        "airport": {
+                            "type": ["string", "null"],
+                            "description": "Airport ident whose runways and places the code refers to. null = the plan's airport, else the pilot's current reference airport, else the nearest airport."
+                        },
+                        "preview": {
+                            "type": ["boolean", "null"],
+                            "description": "true = simulate the change from now and report what would happen, without flying it. null/false = fly it."
+                        }
+                    },
+                    "required": ["code", "airport", "preview"],
+                    "additionalProperties": false,
+                }),
+            },
+        );
+    }
+    tools
+}
+
+/// How far ahead a `fly(preview=true)` looks.
+const PREVIEW_HORIZON_S: f64 = 900.0;
+
+pub const FLY_DESCRIPTION: &str = "Fly a plan described in Python with the pilot vocabulary (system prompt, \"Flying with plans\"). The code runs once and builds or amends the plan; the autopilot then flies it. A lateral step or .then() chain replaces the remaining steps; a lone climb/descend/maintain/speed applies at once; edits to `p` amend the live pattern in place; remain()/prefer()/report() add constraints and reports; release(\"base\") opens an atc(\"base\") gate. print() output comes back in the result, so `print(place(\"the VA\"))` checks a reference without changing anything. Returns the plan as the autopilot reads it (resolved places, where triggers fall relative to the runway, warnings) or an error naming the line. Completes immediately; the plan's progress arrives as heartbeats (\"plan: done: ...\", \"report due ...\", \"constraint c1 not met ...\") and in status.plan. preview=true flies the change ahead in a simple simulation from the current state (traffic moving on, no wind) and reports the timeline, touchdown, closest traffic and problems without changing anything: use it before answering \"can you ...?\" or accepting an unusual request.";
 
 /// Build the list of tool schemas advertised to the LLM. Set
 /// `include_mission_complete=true` only when running under the eval

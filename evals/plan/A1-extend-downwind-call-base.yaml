@@ -1,0 +1,27 @@
+# "Extend downwind, I'll call your base." (A1), then "Turn base now." (B9)
+# The call comes 90 s after passing abeam the 16R threshold, about
+# 2 nm beyond the normal base turn.
+id: A1
+items: [A1, B9]
+description: Extend downwind, I'll call your base
+airport: KVNY
+tool_set: plan
+start:
+  airborne: {runway: 16R, along_ft: 5000, right_ft: 6000, alt_msl_ft: 1800, heading_deg: 355.5, ias_kt: 80}
+briefing: >
+  You are Cessna 172SP, callsign "Skyhawk 2SP", on a right downwind for
+  runway 16R at Van Nuys (KVNY), at pattern altitude, talking to Van Nuys
+  Tower on 119.3. The autopilot is holding heading, altitude and speed
+  for now. Fly the tower's instructions and land.
+messages:
+  - at_s: 0
+    atc: "Skyhawk 2SP, Van Nuys Tower, extend downwind, I'll call your base, number two following a Cherokee on a four mile final."
+  - when: {cond: past, target: {ref: runway, airport: KVNY, runway: 16R, part: threshold}}
+    delay_s: 90
+    atc: "Skyhawk 2SP, turn base now, runway 16R cleared to land."
+max_sim_s: 1200
+checks:
+  - {check: turn_after_message, leg: base, message: 1, within_s: 15}
+  - {check: landed, runway: 16R}
+  - {check: no_go_around}
+  - {check: no_crash}

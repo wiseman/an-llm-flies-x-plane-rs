@@ -1,0 +1,38 @@
+# "Turn downwind, number two, follow the Falcon on a 6 mile final,
+# report traffic in sight." (H1) Called on the right crosswind for 16R;
+# the Falcon (130 kt) passes abeam about 1.4 nm before the threshold.
+id: H1
+items: [H1]
+description: Turn downwind, number two, follow the Falcon on a 6 mile final
+airport: KVNY
+tool_set: plan
+start:
+  airborne: {runway: 16R, along_ft: 9000, right_ft: 2500, alt_msl_ft: 1650, heading_deg: 265.5, ias_kt: 80}
+briefing: >
+  You are Cessna 172SP, callsign "Skyhawk 2SP", in right closed traffic
+  for runway 16R at Van Nuys (KVNY), on the crosswind leg climbing to
+  pattern altitude, talking to Van Nuys Tower on 119.3. The autopilot is
+  holding heading, altitude and speed for now. Fly the tower's
+  instructions and land.
+traffic:
+  - id: t1
+    type: Falcon
+    callsign: N950R
+    runway: 16R
+    speed_kt: 130
+    path:
+      - {along_ft: -36457, right_ft: 0, alt_agl_ft: 1900}
+      - {along_ft: 1200, right_ft: 0, alt_agl_ft: 0}
+      - {along_ft: 4500, right_ft: 0, alt_agl_ft: 0}
+messages:
+  - at_s: 0
+    atc: "Skyhawk 2SP, turn downwind, number two, follow the Falcon on a 6 mile final, report traffic in sight."
+  - when: {cond: on_leg, leg: base}
+    delay_s: 10
+    atc: "Skyhawk 2SP, runway 16R cleared to land."
+max_sim_s: 1200
+checks:
+  - {check: radio, label: reported the traffic in sight once it was, any: ["in sight", "have the traffic", "traffic in view"], in_sight_of: t1}
+  - {check: separation}
+  - {check: landed, runway: 16R}
+  - {check: no_crash}

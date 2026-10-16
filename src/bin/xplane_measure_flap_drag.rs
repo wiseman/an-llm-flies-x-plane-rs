@@ -146,6 +146,7 @@ fn measure_glide(
             aileron: clamp(aileron, -1.0, 1.0),
             elevator: clamp(elevator, -1.0, 1.0),
             rudder: 0.0,
+            slip: 0.0,
             throttle: 0.0,
             flaps: Some(flap_deg),
             gear_down: Some(true),

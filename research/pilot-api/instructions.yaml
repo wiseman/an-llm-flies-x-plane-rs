@@ -1,0 +1,733 @@
+# Curated instruction corpus for designing a pilot-vocabulary control API.
+#
+# ATC items come from Whisper transcripts of LiveATC recordings
+# (research/atc-corpus/, copied from weyland:/Volumes/shared/atc). `text` is a
+# cleaned reading; `raw` is the Whisper line it came from, kept so cleanups can
+# be checked. Callsigns are dropped from `text` unless they matter.
+#
+# Instructor items come from the FAA Airplane Flying Handbook (FAA-H-8083-3C,
+# research/afh/) and the Private Pilot ACS (FAA-S-ACS-6C).
+#
+# `family` groups items for the worked examples in DRAFT.md.
+
+# --- Pattern shape -----------------------------------------------------------
+
+- id: A1
+  source: ATC KVNT
+  family: pattern_shape
+  text: Extend downwind, I'll call your base.
+  raw: "N16L, extend downwind, I'll call your base."
+- id: A2
+  source: ATC KWHP
+  family: pattern_shape
+  text: Extend downwind one mile.
+  raw: "6M, PAPA, extend downwind, one mile."
+- id: A3
+  source: ATC KVNY
+  family: pattern_shape
+  text: Extend about another half mile on the upwind before you turn crosswind, to tighten up the traffic.
+  raw: "8NR, Delta, extend about another half mile on the upwind before you turn crosswind to tighten up the traffic."
+- id: A4
+  source: ATC KAVL
+  family: pattern_shape
+  text: Extend your upwind, I'll call your crosswind.
+  raw: "Western 116, extend your upwind, I'll call to crosswind."
+- id: A5
+  source: ATC KVNT
+  family: pattern_shape
+  text: Extend downwind just one more mile and square your left base turn and final; one departure prior to your arrival.
+  raw: "N4J, Fox Sharp, extend downwind just one more mile and square your left base turn and final one departure for our travel to Global Express, taking the runway now."
+- id: A6
+  source: ATC KVNY
+  family: pattern_shape
+  text: You're inside of a Cirrus on an 8 mile final; keep your base in close, runway 16R, cleared for the option.
+  raw: "Cessna 07, you're inside of a Cirrus 8 mile, follow, keep your base in close, runway 16R, cleared for the option."
+- id: A7
+  source: ATC KWHP
+  family: pattern_shape
+  text: Keep it wide on the downwind, I have a no-radio aircraft inbound for the straight-in.
+  raw: "Cap 41, keep it wide on the downwind, I have a no-coms traffic inbound for the straight in."
+- id: A8
+  source: ATC KVNY
+  family: pattern_shape
+  text: Keep your base square, you'll be following a Sport Cruiser now.
+  raw: "Piper 84015, keep your base square, you'll be following a sports cruiser now."
+- id: A9
+  source: ATC KVNY
+  family: pattern_shape
+  text: For sequencing, make a tight right pattern.
+  raw: "N6L, N6L, for sequencing, make a tight right"
+
+# --- Leg turns tied to places or events ----------------------------------------
+
+- id: B1
+  source: ATC KVNY
+  family: leg_turn
+  text: At the 118, turn base.
+  raw: "7, Charlie Bravo, at the 118 turn base."
+- id: B2
+  source: ATC KVNY
+  family: leg_turn
+  text: Turn base at the Veterans Hospital.
+  raw: "N087, turn base at the Veterans Hospital."
+- id: B3
+  source: ATC KVNY
+  family: leg_turn
+  text: Turn base abeam the VA hospital; there will be one departure.
+  raw: "Turn base, beam the VA hospital, and there will be one departure."
+- id: B4
+  source: ATC KSMO
+  family: leg_turn
+  text: Are you able to turn base at or before the freeway?
+  raw: "C-Ray, 3YZ, are you able to turn base at or before the freeway?"
+- id: B5
+  source: ATC KSMO
+  family: leg_turn
+  text: Turn base prior to the interchange, skydiver traffic.
+  raw: "Turn base prior to the interchange, ATR, Skydiver traffic."
+- id: B6
+  source: ATC KEMT
+  family: leg_turn
+  text: Cross the 10 freeway, then turn crosswind.
+  raw: "Cross the 10th freeway, then turn crosswind, WBVC"
+- id: B7
+  source: ATC KSMO
+  family: leg_turn
+  text: Cleared for takeoff, you can turn crosswind at the shoreline.
+  raw: "clear for takeoff, you can turn crosswind at the shoreline."
+- id: B8
+  source: ATC KSMO
+  family: leg_turn
+  text: That's approved, just take it out to the shoreline before you turn crosswind, runway 21, cleared for takeoff.
+  raw: "Ok, that's approved, just take it out to the shoreline before you turn crosswind, runway 21, clear for takeoff."
+- id: B9
+  source: ATC KVNY
+  family: leg_turn
+  text: Turn base now.
+  raw: "N9L, turn base now, N952J42, and turn right now, N952J42."
+- id: B10
+  source: ATC KVNY
+  family: leg_turn
+  text: Turn base as soon as you're able, traffic following you is at about your 10 o'clock.
+  raw: "And Phenom 0E, Echo, turn base as soon as you're able, traffic following you, that's your, about 10 o'clock."
+- id: B11
+  source: ATC KSMO
+  family: leg_turn
+  text: Don't turn base now; you're following the Cherokee that's across from you on base.
+  raw: "No, no, don't turn base now if you see the guy short final, you're following the Cherokee that's across from you on base."
+- id: B12
+  source: ATC KVNY
+  family: leg_turn
+  text: Over the VA, turn base, number 2, follow the Cherokee turning right base.
+  raw: "Cessna 015, over the VA, turn base, number 2, follow Cherokee, turning right, base."
+
+# --- Pattern entries and arrivals ---------------------------------------------
+
+- id: C1
+  source: ATC KVNY
+  family: entry
+  text: Enter left base, runway 34L.
+  raw: "Cessna 619, Tower, roger, enter left base runway 34L."
+- id: C2
+  source: ATC KSMO
+  family: entry
+  text: Fly over the field, and then enter right downwind, runway 21.
+  raw: "Baron 8589R, Santa Monica Tower, fly over the field, and then enter right downwind, runway 21."
+- id: C3
+  source: ATC KWHP
+  family: entry
+  text: Cross midfield, circle east for left traffic, runway 12.
+  raw: "Cross midfield, circle east for left traffic, runway 12, 7490"
+- id: C4
+  source: ATC KVNY
+  family: entry
+  text: Turn towards Chatsworth Reservoir, and then enter right base from there.
+  raw: "4Q04C, Charlie, start from northbound, turn towards Chatsworth Reservoir, and then enter right base from there."
+- id: C5
+  source: ATC KWHP
+  family: entry
+  text: Remain outside Burbank's Class C, and enter a left base for runway 12 over the 210 and 118 interchange.
+  raw: "37787N, Whiteman Tower, remain outside Burbanks, Class Charlie, and enter a left base for runway 12 over the 210 and the 118 interchange."
+- id: C6
+  source: ATC KWHP
+  family: entry
+  text: Report over the 210/118 interchange for a left base runway 12, number 2 following a Mooney on a 2 mile final at 2500.
+  raw: "N125DAL, Whiteman Tower, report over the 210, 118 interchange for a left base runway 12, for number 2 following a Mooney on a 2 mile final at 2500."
+- id: C7
+  source: ATC KVNY
+  family: entry
+  text: Turn 20 degrees left, remain north of the 118 freeway, then enter right base, runway 16L.
+  raw: "XOJ, 33377, Van Nuys Tower, turn 20 degrees left, remain north of the 118 freeway, then enter right base, runway 16L"
+- id: C8
+  source: ATC KVNY
+  family: entry
+  text: Turn 15 degrees left, stay north of the freeway, follow it eastbound, then make right traffic, runway 34L.
+  raw: "770, turn 15 degrees left, stay north of the main freeway, follow that eastbound, then make right traffic, runway 34L"
+- id: C9
+  source: ATC KVNY
+  family: entry
+  text: Fly present heading to the 101 freeway, and then make right traffic.
+  raw: "November 9525, Charlie, Van Nuys Tower, fly present heading to the 101 freeway, and then make right traffic to right."
+- id: C10
+  source: ATC KVNY
+  family: entry
+  text: Remain on the east side of the 405 freeway until the interchange, then you can make straight in for runway 34R.
+  raw: "618D, Sierra, Van Eystar, remain on the east side of the 405 freeway until the interchange, then you can make straight in for runway 34R."
+- id: C11
+  source: ATC KWHP
+  family: entry
+  text: Make a straight in runway 12, report 3 miles.
+  raw: "Cessna 739 Delta X-ray tower, make a straight in runway 12, report 3 miles."
+- id: C12
+  source: ATC KSMO
+  family: entry
+  text: Maintain at or above 4000 feet, overfly the field and make right traffic for runway 21.
+  raw: "B73 Romeo Hotel, Santa Monica Tower, maintain outer above 4000 feet, overfly the field and make right traffic for runway 21."
+- id: C13
+  source: ATC KVNY
+  family: entry
+  text: Fly direct to midfield, cross midfield, and enter right downwind, runway 34R.
+  raw: "Support crew to 724, Sierra Charlie, Red-Eye, Tower, fly direct to midfield, cross midfield, and enter right downwind, runway 34R."
+- id: C14
+  source: ATC KVNY
+  family: entry
+  text: Turn right, fly direct to the 405 and 101 interchange.
+  raw: "N575NW, turn right, fly direct to 405 and 101 interchange."
+- id: C15
+  source: ATC KVNY
+  family: entry
+  text: Amend instructions, turn 20 degrees left, overfly Encino Reservoir to make right traffic.
+  raw: "November 9, 4-10, Gulf, amend instructions, turn 20 degrees left overflying Sina Reservoir to make right traffic."
+- id: C16
+  source: ATC KSMO
+  family: entry
+  text: Once you cross midfield, make a right turn around the tower, runway 21, cleared to land.
+  raw: "N7L, once you cross midfield, make a right turn around the tower, runway 21, clear to land and hopper taxi, parking at this frequency."
+- id: C17
+  source: ATC KWHP
+  family: entry
+  text: Follow the 5, enter right downwind runway 12.
+  raw: "Cessna 26504, Whiteman tower, follow the 5, enter right downwind runway 12, put downwind to beam."
+- id: C18
+  source: ATC KVNY
+  family: entry
+  text: Follow the 405, keep the 405 off your left wing, make left traffic, runway 16L.
+  raw: "384 Sierra, Charlie, Van Nuys Tower, follow the 405, keep the 405 off your left wing, make left traffic, runway 16L."
+- id: C19
+  source: ATC KLGB
+  family: entry
+  text: Start a left turn, keep the 710 off your right hand side.
+  raw: "N26R, start a left turn, keep the 710 off your right hand side."
+
+# --- Lateral constraints ------------------------------------------------------
+
+- id: D1
+  source: ATC KVNY
+  family: lateral_constraint
+  text: Remain on the west side of the 405 for pattern traffic, opposite direction Cessna traffic.
+  raw: "Cessna 36, Delta, remain on the west side of the 405 for pattern traffic, have opposite direction Cessna traffic."
+- id: D2
+  source: ATC KVNY
+  family: lateral_constraint
+  text: Remain south of the 101 for traffic, 7 miles north, restricted north of the freeway.
+  raw: "Cherokee 99L, remain south of the 101 for traffic, 11 moving to your 12 o'clock, 7 miles north, you've found Cherokee 2900, restricted north of the freeway."
+- id: D3
+  source: ATC KVNY
+  family: lateral_constraint
+  text: Remain over the 101.
+  raw: "Cherokee 377 remain over the 101"
+- id: D4
+  source: ATC KSMO
+  family: lateral_constraint
+  text: Remain north of the new Getty, outside of the Class D for now.
+  raw: "N770LG, remain north of the new Getty, outside of the Cross Delta for now."
+- id: D5
+  source: ATC KSMO
+  family: lateral_constraint
+  text: Traffic is a Cirrus over the pier remaining over water; remain over land for that north downwind entry.
+  raw: "Baron 20 Mike, traffic Cirrus over the pier, remaining over water, remain over land for that north down land entry."
+- id: D6
+  source: ATC KSMO
+  family: lateral_constraint
+  text: Traffic passing off your right, altitude indicates 1800, remain north of the centerline.
+  raw: "N8Y, traffic, passing off your right, Alton, in case 1800, remain north of the centerline."
+- id: D7
+  source: ATC KVNY
+  family: lateral_constraint
+  text: I want you on the other side of the freeway, the north side, so turn 20 degrees left again please.
+  raw: "Cherokee, 2-9-KM, I want you on the other side of the freeway, the north side, so turn 20-degrees, left again, please."
+- id: D8
+  source: ATC KONT
+  family: lateral_constraint
+  text: Remain east of the 15 freeway for the Lake Elsinore jump zone.
+  raw: "Riverside information uniform is current, remain east of the 15th freeway for the Lake Elsinore jump zone."
+- id: D9
+  source: ATC KVNT
+  family: lateral_constraint
+  text: If able, keep it over the 101 freeway for traffic eastbound.
+  raw: "775, Mike, if able, keep it over the 101 freeway for traffic in the eastbound."
+- id: D10
+  source: ATC KVNY
+  family: lateral_constraint
+  text: Remain over or east of the 405 freeway until you're south of the Encino Reservoir.
+  raw: "Cessna 6H, pop up for traffic inbound for Grand Island, remain over or east of 405 freeway until you're south of the Encino Reservoir contact."
+- id: D11
+  source: ATC KVNY
+  family: lateral_constraint
+  text: Remain on the west side of the 405 when you turn your crosswind, and then proceed northbound.
+  raw: "Number 688, remain on the west side of the 405 when you turn your crosswind and then you proceed northbound."
+
+# --- Vertical constraints with an end condition -------------------------------
+
+- id: E1
+  source: ATC KVNY
+  family: vertical_constraint
+  text: Left downwind departure approved, remain at or below 1800 until north of the field, runway 16R, cleared for takeoff.
+  raw: "N46826, Van Nuys Tower, left downwind approved, remain at or below 1800 until north of the field, runway 16R, cleared for takeoff."
+- id: E2
+  source: ATC KVNY
+  family: vertical_constraint
+  text: Left crosswind departure approved, remain at or below 2000 until south of the 101, runway 16R, cleared for takeoff.
+  raw: "N705, left crosswind departure approved, remain at or below 2000 until south of the 101, runway 16R, cleared for takeoff."
+- id: E3
+  source: ATC KVNY
+  family: vertical_constraint
+  text: For traffic, remain at or above 3500 until established on base.
+  raw: "N8VNISR, for traffic, remain at above 3500 until established on base."
+- id: E4
+  source: ATC KVNT
+  family: vertical_constraint
+  text: Maintain pattern altitude 2000 until you turn base, traffic off your right 1.5 miles, restricted at or below 1000, helicopter.
+  raw: "Cherokee 7DP, maintain pattern altitude 2000 until you turn base, traffic off your right, 1 and a half miles, restricted by level 1000, indicated helicopter"
+- id: E5
+  source: ATC KVNY
+  family: vertical_constraint
+  text: Police helicopter on patrol east side of the 405, restricted low level; maintain pattern altitude 1800 until you turn final.
+  raw: "Z670E, traffic, police helicopter on patrol, east side of the 405, restricted low level, maintain pattern on speed 1,800 until you turn final."
+- id: E6
+  source: ATC KVNY
+  family: vertical_constraint
+  text: Remain at or below 2000 until you clear the Class D; after you clear the D, frequency change approved.
+  raw: "6999Z, remain at or below 2000 until you clear the class D, after you clear the D, for exchanges approved, SoCal to the left, 134.2."
+- id: E7
+  source: ATC KBUR
+  family: vertical_constraint
+  text: Maintain VFR above 3000 for the next 10 miles until you're east of the Santa Monica final; that will keep you clear of the TFR.
+  raw: "8RD, maintain VFR above 3000 for the next 10 miles until you're east of the Santa Monica final, and that will keep you clear of the TFR"
+- id: E8
+  source: ATC KVNY
+  family: vertical_constraint
+  text: Remain below 2500 or west of Topanga, and then resume navigation.
+  raw: "Cherokee 369, remain below 2,500 feet or west of Topanga, and then resume navigation today."
+- id: E9
+  source: ATC KVNY
+  family: vertical_constraint
+  text: As soon as you get south of the 101 freeway you can make that left turn; just remain at or below 2000.
+  raw: "N5500, as soon as you get south of the 101 freeway, sir, you can make that left turn, just remain out of blow at 2000."
+- id: E10
+  source: ATC KSMO
+  family: vertical_constraint
+  text: Right turn at the shoreline approved, runway 21, cleared for takeoff, maintain at or below 1500 until advised.
+  raw: "Plymouth 220, Papa Echo, Santa Monica town, right turn at the shoreline approved, runway 21, clear for takeoff, maintain outer below 1500 until advised."
+
+# --- Departures ---------------------------------------------------------------
+
+- id: F1
+  source: ATC KSMO
+  family: departure
+  text: Right turn at the shoreline approved, runway 21, cleared for takeoff.
+  raw: "Cessna 53440, Santa Monica tower, right turn at shoreline approved, runway 21, clear for takeoff."
+- id: F2
+  source: ATC KVNY
+  family: departure
+  text: Fly straight out and clear the ridge line, and then turn left towards the Griffith Park Observatory.
+  raw: "N6M, Mike, fly straight out and clear out the ridge line, just after your call to clock, they're in about 3 miles, and then you're going to turn left towards the Griffith Park Observatory."
+- id: F3
+  source: ATC KVNY
+  family: departure
+  text: On departure fly straight out, no turns until the 118; contact SoCal prior to entering Class C airspace.
+  raw: "N7WS, on departure, fly straight out, no turns until the 118, see me prior to entering class Charlie airspace on 120.4, squawk 4607."
+- id: F4
+  source: ATC KVNY
+  family: departure
+  text: Fly straight out, I'll call your turn, runway 16R, cleared for takeoff.
+  raw: "N00V, fly straight out the air tower, call your turn, runway 16R, cleared for takeoff."
+- id: F5
+  source: ATC KAVL
+  family: departure
+  text: Cleared for takeoff, fly runway heading.
+  raw: "Clear for takeoff, fly runway heading."
+- id: F6
+  source: ATC KVNY
+  family: departure
+  text: Turn left 10 degrees for departing traffic, runway 16L, cleared for takeoff.
+  raw: "Cessna 113, turn left 10 degrees for departing, Cessna 113, runway 16L, cleared for takeoff, Cessna upwind and left closed traffic, no factors."
+- id: F7
+  source: ATC KVNY
+  family: departure
+  text: At the flood basin, right downwind departure approved, remain at or below 2500 until north of Van Nuys Airport.
+  raw: "Cessna 76015 at the flood basin right downwind departure, approved, remain at or below 2,500 until north of Van Nuys Airport, Runway 16R."
+- id: F8
+  source: ATC KVNY
+  family: departure
+  text: Just offset left or right 20 degrees please, I've got traffic.
+  raw: "Roger, just offset left or right 20 degrees, please, I got traffic, probably gonna be straight out"
+- id: F9
+  source: ATC KLAX
+  family: departure
+  text: At the shoreline, turn left heading 210, runway 25R, cleared for takeoff.
+  raw: "JetBlue 2924, at the shoreline, turn left heading 210, runway 25R, clear for takeoff."
+- id: F10
+  source: ATC KVNY
+  family: departure
+  text: Runway 34L, cleared for immediate takeoff.
+  raw: "Challenger 4-0-0-6, Bravo, runway 34L, cleared for immediate takeoff"
+
+# --- Spacing, delay, and speed ------------------------------------------------
+
+- id: G1
+  source: ATC KVNY
+  family: spacing
+  text: Make one left 360 for spacing, and then look for traffic on a 6 mile final.
+  raw: "Spoken to 4CH, make one left 360 for spacing and then look for sightage on 6 mile final"
+- id: G2
+  source: ATC KWHP
+  family: spacing
+  text: Make a right 360, you're too close to that traffic.
+  raw: "Hyper 32, Foxtrot, make a right 360 or wait too close to that traffic, ready."
+- id: G3
+  source: ATC KVNY
+  family: spacing
+  text: For traffic, make a right 360, a wide right 360.
+  raw: "Cessna 246, Van Nuys, turn right heading 0, for traffic, make a right 360, a wide right 360"
+- id: G4
+  source: ATC KVNY
+  family: spacing
+  text: Make a right S-turn, you're a little close; the traffic you're following is just over the high speed on short final.
+  raw: "Cherokee 36N, make a right S-turn, you're a little close, the traffic you're following is just over the high speed now on short final."
+- id: G5
+  source: ATC KVNY
+  family: spacing
+  text: S-turns are approved to the west if you need them.
+  raw: "Cessna Sierra Chiako, S turns are approved to the west if you need them."
+- id: G6
+  source: ATC KVNY
+  family: spacing
+  text: Reduce to the slowest practical speed, continue.
+  raw: "6, Whiskey, Uniform, understood, I've got several jet departures to get out prior to arrival, reduce the slowest practical speed, continue."
+- id: G7
+  source: ATC KVNT
+  family: spacing
+  text: Best forward speed until about 2 mile final.
+  raw: "Cessna 805, best speed forward until about 2 miles final."
+- id: G8
+  source: ATC KSMO
+  family: spacing
+  text: Keep the speed up, cleared to land, 21.
+  raw: "Hey Charlie, Charlie, keep the speed up, cleared to land, 21."
+- id: G9
+  source: ATC KVNY
+  family: spacing
+  text: Extend downwind, reduce speed, and turn base at the 118 freeway.
+  raw: "0-0, Romeo, Tango, extend downwind, reduce speed and turn base at 118, freeway"
+- id: G10
+  source: ATC KVNY
+  family: spacing
+  text: Short approach approved, runway 34R, cleared for the option.
+  raw: "Cessna 90B, short approach approved, runway 34R, cleared for the option, tell departure, good morning"
+- id: G11
+  source: ATC KVNY
+  family: spacing
+  text: Can you make a short approach?
+  raw: "Cessna 015, can you make a short approach?"
+- id: G12
+  source: ATC KVNY
+  family: spacing
+  text: Make a turn towards the Encino Reservoir for traffic departing 16R.
+  raw: "7SAR5D, make a turn towards the Encino Reservoir for traffic departing 16R."
+
+# --- Sequencing against other traffic ----------------------------------------
+
+- id: H1
+  source: ATC KVNY
+  family: sequencing
+  text: Turn downwind, number two, follow the Falcon on a 6 mile final, report traffic in sight.
+  raw: "N950R, turn downwind, number two, follow Falcon on 6 mile final, report traffic to Cessna."
+- id: H2
+  source: ATC KVNT
+  family: sequencing
+  text: Follow the Cessna ahead on base, report.
+  raw: "36N, follow Cessna ahead on base, report."
+- id: H3
+  source: ATC KVNY
+  family: sequencing
+  text: Extend downwind, follow the Cherokee on a 3 mile final, report in sight.
+  raw: "Cherokee 4-6-7, extend downwind, follow Cherokee 3 mile final report to site and re-sequence."
+- id: H4
+  source: ATC KVNY
+  family: sequencing
+  text: Just behind the traffic, turn base, runway 16L, caution wake turbulence, cleared for the option.
+  raw: "...32 Foxtrot, just behind the traffic turn base, remain 16L, caution, white turbulence, clear for the option."
+- id: H5
+  source: ATC KVNY
+  family: sequencing
+  text: Pass behind that traffic, change to runway 16L, cleared for the option.
+  raw: "N3M, pass behind that traffic, change to runway 16L, clear for the option."
+- id: H6
+  source: ATC KVNT
+  family: sequencing
+  text: Just use the upwind as much as needed to follow company ahead.
+  raw: "Cherokee 274, just use the upwind as much as needed to follow company ahead."
+- id: H7
+  source: ATC KVNY
+  family: sequencing
+  text: That Cherokee is going to the same place, so just follow him; he's in the northbound turn now.
+  raw: "830K, that Cherokee is actually going to go to the same place they're going, so just follow him, he's in the northbound turn now"
+- id: H8
+  source: ATC KVNY
+  family: sequencing
+  text: Re-sequence number 2 behind the Cessna on short final.
+  raw: "7TQ, re-sequence number 2 on the Cessna short final."
+
+# --- Runway changes, landing options, exits -----------------------------------
+
+- id: I1
+  source: ATC KVNY
+  family: landing
+  text: Change to runway 16R, runway 16R, cleared to land.
+  raw: "N907L, change to runway 16R, runway 16R, cleared to land."
+- id: I2
+  source: ATC KVNY
+  family: landing
+  text: Turn base now, change to runway 16L.
+  raw: "Dreamline 401, turn base now, change to runway 16L."
+- id: I3
+  source: ATC KVNY
+  family: landing
+  text: Runway 16L, cleared for the option; on the go, straight-out departure is approved.
+  raw: "Cessna 347, runway 16L, cleared for the option on the go, straight out of departure, is approved"
+- id: I4
+  source: ATC KEMT
+  family: landing
+  text: Runway 19, cleared for the option, right closed traffic.
+  raw: "Right, 119, clear for the option, right, close traffic, 803."
+- id: I5
+  source: ATC KVNY
+  family: landing
+  text: Continue down the runway and exit at high-speed Hotel.
+  raw: "Cessna 4E, continue down the runway, and exit at high speed hotel, please, and kind of ground, pulling to."
+- id: I6
+  source: ATC KSMO
+  family: landing
+  text: Can you expedite off the runway at this intersection, please?
+  raw: "Cirrus 8P, can you expedite off the runway at this intersection, please?"
+- id: I7
+  source: ATC KONT
+  family: landing
+  text: Continue all the way down to the end, turn left at the end and contact ground.
+  raw: "Cessna 983 heavy continue all the way down to the end, turn left at the end and contact ground"
+- id: I8
+  source: ATC KWHP
+  family: landing
+  text: Cleared to land, exit Delta.
+  raw: "QB5125, cleared to land, exit D, winds 130 at 8"
+
+# --- Go-arounds ---------------------------------------------------------------
+
+- id: J1
+  source: ATC KVNY
+  family: go_around
+  text: Go around, and early turn is approved to crosswind.
+  raw: "N923, go around, and early turn is approved, set to crosswind."
+- id: J2
+  source: ATC KVNY
+  family: go_around
+  text: Start a climb, go around, continue right traffic for 34R.
+  raw: "Start a climb, go around, continue right traffic, for 34R."
+- id: J3
+  source: ATC KVNT
+  family: go_around
+  text: Start climbing, go around, and you can just make a left turn for the downwind now.
+  raw: "N77015, roger, started climbing, go around, and uh, yeah, you can just make a left turn for the downwind now."
+
+# --- Off-pattern maneuvering (transitions, holds over places) -----------------
+
+- id: K1
+  source: ATC KSMO
+  family: maneuvering
+  text: Cross midfield, hold over the business park.
+  raw: "Helicopter 624W, Santa Monica tower, cross midfield, hold over the business park."
+- id: K2
+  source: ATC KSMO
+  family: maneuvering
+  text: Approved as requested for Brentwood; go to the pier first and then eastbound, use caution drone activity.
+  raw: "TV9, Santa Monica Tower, mark altimeter 29.96, approved, as requested for Brantwood, go to the pier first and then eastbound, use caution drone activity over Santa Monica."
+- id: K3
+  source: ATC KVNY
+  family: maneuvering
+  text: Overfly the Northridge Mall.
+  raw: "N35M, overfly the Northridge Mall."
+- id: K4
+  source: ATC KSMO
+  family: maneuvering
+  text: (traffic advisory) He's going to circle the Santa Monica Pier a couple times and then head out towards the Hollywood sign.
+  raw: "November 3, Mike Victor, traffic up at the New Getty, he's going to circle the Santa Monica Pier a couple times and then head out towards the Hollywood sign."
+- id: K5
+  source: ATC KVNT
+  family: maneuvering
+  text: Follow the 101 freeway westbound, maintain VFR at or below 2500 until leaving the Class D.
+  raw: "Cessna 4LM, follow V101 freeway westbound, maintain VFRW at 2500 until leaving the class, D."
+
+# --- Approach control vectors -------------------------------------------------
+
+- id: L1
+  source: ATC KONT
+  family: vectors
+  text: Turn left heading 230 now, vector for your descent, maintain at or above 4000.
+  raw: "Turn left heading 230 now, vector for your descent, maintain at or above 4,000."
+- id: L2
+  source: ATC KBUR
+  family: vectors
+  text: Turn right heading 170, reduce speed to 170 knots or less.
+  raw: "Okay, right turn heading 170, reduce speed to 170 knots or less, Sonos 001."
+- id: L3
+  source: ATC KVNY
+  family: vectors
+  text: Turn right 10 degrees and contact departure 120.2.
+  raw: "Cherokee 467, turn right 10 degrees and contact down 120.2."
+- id: L4
+  source: ATC KBUR
+  family: vectors
+  text: Expedite climb through 5000.
+  raw: "...expedite climb through 5,000."
+
+# --- Ground ------------------------------------------------------------------
+
+- id: M1
+  source: ATC KVNY
+  family: ground
+  text: Turn right at Golf, hold short runway 16L for departing traffic.
+  raw: "Niner, turn right at Golf, hold short, Runway 16L for departing traffic."
+- id: M2
+  source: ATC KVNY
+  family: ground
+  text: Expedite and turn right at G, cross runway 16R, traffic 1 mile final.
+  raw: "Cessna 826, expedite and turn right at G, cross runway 16R, downwind 5, on the ground 0.7, traffic excitation on 1 mile final."
+- id: M3
+  source: ATC KVNY
+  family: ground
+  text: Cancel takeoff clearance, hold short runway 16R.
+  raw: "N787S, roger, just take your time, advise ready for departure, cancel takeoff clearance and hold short, runway 16R."
+- id: M4
+  source: ATC KVNY
+  family: ground
+  text: SoCal cancelled your release, so taxi down the runway, turn left at Quebec, and taxi back via Alpha.
+  raw: "Gulfstream 29H, Fox, SoCal cancelled your release, so taxi down the runway, turn left at Quebec, and taxi back via A, Romeo"
+- id: M5
+  source: ATC KVNY
+  family: ground
+  text: Runway 16R at Delta, line up and wait, traffic Cherokee.
+  raw: "Cessna 01L, running 16R at Delta, line up and wait, traffic Cherokee."
+
+# --- Instructor / handbook phrasing -------------------------------------------
+
+- id: P1
+  source: AFH ch6 (normal takeoff)
+  family: instructor
+  text: After a positive rate of climb is established and the airplane has accelerated to Vy, retract the flaps.
+- id: P2
+  source: AFH ch6
+  family: instructor
+  text: Maintain takeoff power until reaching at least 500 feet above the surrounding terrain or obstacles.
+- id: P3
+  source: AFH ch6 / ACS PA.IV.E
+  family: instructor
+  text: Short-field takeoff - climb at Vx until clear of obstacles or 50 feet, then accelerate to Vy (+10/-5) and retract flaps in increments.
+- id: P4
+  source: AFH ch8
+  family: instructor
+  text: If remaining in the pattern, turn crosswind beyond the departure end of the runway, within 300 feet of pattern altitude.
+- id: P5
+  source: AFH ch8
+  family: instructor
+  text: If departing the pattern, continue straight out or exit with a 45 degree turn in the pattern direction beyond the departure end, after reaching pattern altitude.
+- id: P6
+  source: AFH ch8
+  family: instructor
+  text: Enter the pattern at a 45 degree angle to the downwind, headed toward a point abeam midfield, at pattern altitude.
+- id: P7
+  source: AFH ch8
+  family: instructor
+  text: Arriving from the upwind side - cross midfield at least 500 feet above pattern altitude; when about 2 miles clear, descend to pattern altitude, then turn to enter on the 45.
+- id: P8
+  source: AFH ch8
+  family: instructor
+  text: Alternate upwind-side entry - enter on a midfield crosswind at pattern altitude, then turn downwind.
+- id: P9
+  source: AFH ch8
+  family: instructor
+  text: Fly the downwind about 1/2 to 1 mile from the landing runway, at pattern altitude.
+- id: P10
+  source: AFH ch8
+  family: instructor
+  text: Maintain pattern altitude until at least abeam the approach end; then reduce power and begin the descent.
+- id: P11
+  source: AFH ch8
+  family: instructor
+  text: Continue downwind until the approach end is about 45 degrees behind, then make a medium-bank turn onto base.
+- id: P12
+  source: AFH ch8
+  family: instructor
+  text: On base, keep the ground track perpendicular to the extended centerline; crab into the wind as needed.
+- id: P13
+  source: AFH ch9
+  family: instructor
+  text: With a strong wind on final, or a steep approach with flaps, position the base leg closer to the approach end.
+- id: P14
+  source: AFH ch9 / ACS PA.IV.B.S7
+  family: instructor
+  text: On final, fly the manufacturer's approach speed, or 1.3 Vso if there is none, +10/-5 knots.
+- id: P15
+  source: AFH ch9
+  family: instructor
+  text: Full flaps are not recommended until established on final.
+- id: P16
+  source: AFH ch9
+  family: instructor
+  text: Be stabilized (speed +10/-5 of landing speed, landing configuration, trimmed) by 500 feet AGL or go around; if the approach becomes unstabilized below 300 feet AGL, go around immediately.
+- id: P17
+  source: AFH ch9
+  family: instructor
+  text: If descending faster than 500 fpm, reduce the descent rate before 300 feet AGL.
+- id: P18
+  source: AFH ch9
+  family: instructor
+  text: Start the round out at about 10 to 20 feet above the runway.
+- id: P19
+  source: AFH ch9
+  family: instructor
+  text: Go-around - power first, then attitude, then configuration; once the descent has stopped, retract flaps to the takeoff setting.
+- id: P20
+  source: AFH ch8
+  family: instructor
+  text: After a go-around, at a safe altitude, shift to the upwind side so departing traffic stays in view.
+- id: P21
+  source: ACS PA.III.B.S5
+  family: instructor
+  text: Maintain traffic pattern altitude +/-100 feet and the appropriate airspeed +/-10 knots.
+- id: P22
+  source: ACS PA.IV.B.S10 / PA.IV.F.S10
+  family: instructor
+  text: Touch down within 400 feet beyond the specified point (normal landing); within 200 feet (short-field).
+- id: P23
+  source: AFH ch7
+  family: instructor
+  text: Rectangular course - maintain a constant distance from the field boundaries at constant altitude and airspeed, correcting for wind.
+- id: P24
+  source: AFH ch9
+  family: instructor
+  text: Use a forward slip to steepen the descent without gaining airspeed.
+- id: P25
+  source: ACS PA.V.A.S5
+  family: instructor
+  text: Steep turn - 45 degree bank, maintain entry altitude +/-100 feet, airspeed +/-10 knots, bank +/-5 degrees, roll out on the entry heading +/-10 degrees.

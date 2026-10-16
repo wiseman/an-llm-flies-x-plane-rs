@@ -1,4 +1,5 @@
 pub mod flare_profile;
+pub mod geo;
 pub mod lateral;
 pub mod pattern_manager;
 pub mod route_manager;

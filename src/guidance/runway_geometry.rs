@@ -12,6 +12,14 @@ impl RunwayFrame {
         Self { runway }
     }
 
+    /// A touchdown at runway-frame `rf` is a good one: past the
+    /// (displaced) threshold, within the first third, near the
+    /// centerline. Shared by the plan preview and the eval scorer.
+    pub fn touchdown_in_zone(&self, rf: Vec2) -> bool {
+        let thr = self.runway.displaced_threshold_ft;
+        rf.x >= thr - 50.0 && rf.x <= thr + self.runway.length_ft / 3.0 && rf.y.abs() <= 50.0
+    }
+
     pub fn forward(&self) -> Vec2 {
         heading_to_vector(self.runway.course_deg, 1.0)
     }

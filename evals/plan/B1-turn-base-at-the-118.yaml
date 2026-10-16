@@ -1,0 +1,24 @@
+# "At the 118, turn base." (research/pilot-api/instructions.yaml B1)
+# Right downwind 16R at Van Nuys; the 118 crosses the downwind about
+# 3.8 nm north of the threshold, so this is a long downwind.
+id: B1
+items: [B1]
+description: At the 118, turn base
+airport: KVNY
+tool_set: plan
+start:
+  airborne: {runway: 16R, along_ft: 4000, right_ft: 6000, alt_msl_ft: 1800, heading_deg: 355.5, ias_kt: 80}
+briefing: >
+  You are Cessna 172SP, callsign "Skyhawk 2SP", on a right downwind for
+  runway 16R at Van Nuys (KVNY), at pattern altitude, talking to Van Nuys
+  Tower on 119.3. The autopilot is holding heading, altitude and speed
+  for now. Fly the tower's instructions and land.
+messages:
+  - at_s: 0
+    atc: "Skyhawk 2SP, Van Nuys Tower, at the 118 turn base, runway 16R cleared to land."
+max_sim_s: 1200
+checks:
+  - {check: turn, leg: base, near: {ref: place, name: CA-118}, tol_ft: 1000}
+  - {check: landed, runway: 16R}
+  - {check: no_go_around}
+  - {check: no_crash}

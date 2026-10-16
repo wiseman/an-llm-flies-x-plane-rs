@@ -1,0 +1,32 @@
+# Report over the 210/118 interchange for a left base runway 12 (C5, C6)
+# Left traffic for 12 is north-east of the runway. The 118 ends at the 210
+# about 1 nm before the threshold and 1.1 nm left of the extended
+# centerline, so the interchange is a left-base point. The Mooney on a
+# 2 mile final lands well before the base turn.
+id: C6
+items: ["C5", "C6"]
+description: "Report over the 210/118 interchange for a left base runway 12"
+airport: KWHP
+tool_set: plan
+start: {"airborne": {"runway": "12", "along_ft": -12000, "right_ft": -30000, "alt_msl_ft": 3000, "heading_deg": 215, "ias_kt": 95}}
+briefing: "You are Cessna 172SP, callsign \"Skyhawk 2SP\", about 5 miles north-east of Whiteman (KWHP) at 3000 ft, inbound, talking to Whiteman Tower on 135.0. The autopilot is holding heading, altitude and speed for now. Fly the tower's instructions and land."
+traffic:
+  - id: t1
+    type: Mooney
+    runway: "12"
+    speed_kt: 85
+    path:
+      - {along_ft: -12152, right_ft: 0, alt_agl_ft: 640}
+      - {along_ft: 1000, right_ft: 0, alt_agl_ft: 0}
+      - {along_ft: 2500, right_ft: 0, alt_agl_ft: 0}
+messages:
+  - {"at_s": 0, "atc": "Skyhawk 2SP, Whiteman Tower, report over the 210, 118 interchange for a left base runway 12, number 2 following a Mooney on a 2 mile final at 2500."}
+  - {"when": {"cond": "on_leg", "leg": "base"}, "delay_s": 5, "atc": "Skyhawk 2SP, runway 12 cleared to land."}
+max_sim_s: 1200
+checks:
+  - {"check": "reached", "label": "over the interchange", "cond": {"cond": "within", "target": {"ref": "intersection", "a": {"ref": "place", "name": "I-210"}, "b": {"ref": "place", "name": "CA-118"}}, "distance_ft": 3000}}
+  - {"check": "reached", "label": "flew base", "cond": {"cond": "on_leg", "leg": "base"}}
+  - {"check": "remain", "label": "no downwind", "holds": {"cond": "not", "of": {"cond": "on_leg", "leg": "downwind"}}}
+  - {"check": "landed", "runway": "12"}
+  - {"check": "separation"}
+  - {"check": "no_crash"}

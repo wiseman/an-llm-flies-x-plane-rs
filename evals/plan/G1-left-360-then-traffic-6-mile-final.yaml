@@ -1,0 +1,34 @@
+# "Make one left 360 for spacing, and then look for traffic on a 6 mile
+# final." (G1) Left downwind 16L; the traffic (90 kt) is the one to
+# follow after the 360.
+id: G1
+items: [G1]
+description: Left 360 for spacing, then look for traffic on a 6 mile final
+airport: KVNY
+tool_set: plan
+start:
+  airborne: {runway: 16L, along_ft: 4000, right_ft: -6000, alt_msl_ft: 1800, heading_deg: 355.5, ias_kt: 85}
+briefing: >
+  You are Cessna 172SP, callsign "Skyhawk 2SP", on a left downwind for
+  runway 16L at Van Nuys (KVNY), at pattern altitude, talking to Van Nuys
+  Tower on 119.3. The autopilot is holding heading, altitude and speed
+  for now. Fly the tower's instructions and land.
+traffic:
+  - id: t1
+    type: Bonanza
+    runway: 16L
+    speed_kt: 90
+    path:
+      - {along_ft: -36457, right_ft: 0, alt_agl_ft: 1900}
+      - {along_ft: 1200, right_ft: 0, alt_agl_ft: 0}
+      - {along_ft: 3500, right_ft: 0, alt_agl_ft: 0}
+messages:
+  - at_s: 0
+    atc: "Skyhawk 2SP, make one left 360 for spacing, and then look for traffic on a 6 mile final, you'll be number two, runway 16L cleared to land."
+max_sim_s: 1200
+checks:
+  - {check: orbit, dir: left}
+  - {check: separation}
+  - {check: landed, runway: 16L}
+  - {check: no_go_around}
+  - {check: no_crash}

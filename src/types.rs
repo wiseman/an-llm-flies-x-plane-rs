@@ -340,9 +340,14 @@ impl Runway {
     /// Aim-point distance past the pavement end (the runway frame's
     /// origin). See `RunwayFrame::touchdown_runway_x_ft`.
     pub fn touchdown_x_ft(&self) -> f64 {
-        let half_tdz = self.touchdown_zone_ft * 0.5;
-        self.displaced_threshold_ft + half_tdz.max(500.0).min(self.length_ft / 3.0)
+        touchdown_x_ft(self.displaced_threshold_ft, self.touchdown_zone_ft, self.length_ft)
     }
+}
+
+/// Aim point past the pavement end: half the touchdown zone (at least
+/// 500 ft) past the displaced threshold, within the first third.
+pub fn touchdown_x_ft(displaced_threshold_ft: f64, touchdown_zone_ft: f64, length_ft: f64) -> f64 {
+    displaced_threshold_ft + (touchdown_zone_ft * 0.5).max(500.0).min(length_ft / 3.0)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -402,6 +407,9 @@ pub struct GuidanceTargets {
     pub target_speed_kt: Option<f64>,
     pub target_pitch_deg: Option<f64>,
     pub glidepath: Option<Glidepath>,
+    /// Forward slip demanded by the profile (-1..1 rudder). `None` lets
+    /// the glidepath tracker slip on its own when well above the path.
+    pub slip: Option<f64>,
     pub throttle_limit: Option<(f64, f64)>,
     pub flaps_cmd: Option<i32>,
     pub gear_down: Option<bool>,
@@ -425,6 +433,7 @@ impl Default for GuidanceTargets {
             target_speed_kt: None,
             target_pitch_deg: None,
             glidepath: None,
+            slip: None,
             throttle_limit: None,
             flaps_cmd: None,
             gear_down: None,
@@ -440,6 +449,10 @@ pub struct ActuatorCommands {
     pub aileron: f64,
     pub elevator: f64,
     pub rudder: f64,
+    /// Intentional sideslip (a forward slip), -1..1, positive = right
+    /// rudder. Already included in `rudder`; the simple model reads it for
+    /// sideslip, since it treats ordinary rudder as coordination.
+    pub slip: f64,
     pub throttle: f64,
     pub flaps: Option<i32>,
     pub gear_down: Option<bool>,

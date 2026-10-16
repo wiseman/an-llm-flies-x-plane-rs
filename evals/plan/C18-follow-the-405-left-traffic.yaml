@@ -1,0 +1,16 @@
+# Follow the 405, keep it off your left wing, left traffic 16L (C18)
+# The 405 runs about a mile east of 16L, close to where the left downwind goes.
+id: C18
+items: ["C18"]
+description: "Follow the 405, keep it off your left wing, left traffic 16L"
+airport: KVNY
+tool_set: plan
+start: {"airborne": {"runway": "16L", "along_ft": 28800, "right_ft": -7700, "alt_msl_ft": 2300, "heading_deg": 355, "ias_kt": 95}}
+briefing: "You are Cessna 172SP, callsign \"Skyhawk 2SP\", about 5 miles south of Van Nuys (KVNY) over the Sepulveda Pass at 2300 ft, northbound, just east of the 405, talking to Van Nuys Tower on 119.3. The autopilot is holding heading, altitude and speed for now. Fly the tower's instructions and land."
+messages:
+  - {"at_s": 0, "atc": "Skyhawk 2SP, Van Nuys Tower, follow the 405 northbound, keep it off your left wing, make left traffic runway 16L, cleared to land."}
+max_sim_s: 1200
+checks:
+  - {"check": "remain", "label": "east of the 405 until base", "holds": {"cond": "side_of", "target": {"ref": "place", "name": "I-405"}, "side_deg": 90}, "until": {"cond": "turning", "leg": "base"}}
+  - {"check": "landed", "runway": "16L"}
+  - {"check": "no_crash"}

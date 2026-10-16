@@ -1,0 +1,16 @@
+# Make a tight right pattern (A9)
+id: A9
+items: ["A9"]
+description: "Make a tight right pattern"
+airport: KVNY
+tool_set: plan
+start: {"airborne": {"runway": "16R", "along_ft": 5500, "right_ft": 0, "alt_msl_ft": 1150, "heading_deg": 175.5, "ias_kt": 72}}
+briefing: "You are Cessna 172SP, callsign \"Skyhawk 2SP\", just airborne off runway 16R at Van Nuys (KVNY), climbing through about 1150 ft, talking to Van Nuys Tower on 119.3. The autopilot is holding heading, altitude and speed for now. Fly the tower's instructions and land."
+messages:
+  - {"at_s": 0, "atc": "Skyhawk 2SP, make right closed traffic, keep it tight, runway 16R cleared to land."}
+max_sim_s: 1200
+checks:
+  - {"check": "reached", "label": "downwind within 0.75 nm of the runway", "cond": {"cond": "all", "conds": [{"cond": "on_leg", "leg": "downwind"}, {"cond": "within", "target": {"ref": "runway", "airport": "KVNY", "runway": "16R", "part": "extended_centerline"}, "distance_ft": 4557.09}]}}
+  - {"check": "remain", "label": "never a wide downwind (over 1 nm out)", "holds": {"cond": "not", "of": {"cond": "all", "conds": [{"cond": "on_leg", "leg": "downwind"}, {"cond": "not", "of": {"cond": "within", "target": {"ref": "runway", "airport": "KVNY", "runway": "16R", "part": "extended_centerline"}, "distance_ft": 6076.12}}]}}}
+  - {"check": "landed", "runway": "16R"}
+  - {"check": "no_crash"}

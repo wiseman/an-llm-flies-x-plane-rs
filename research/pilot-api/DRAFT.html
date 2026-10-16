@@ -1,0 +1,1778 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pilot Vocabulary API</title>
+<style>
+:root {
+  --bg: #fbfaf7; --panel: #f2f0ea; --text: #1d1f22; --muted: #62666d;
+  --rule: #dedad0; --accent: #1f5f8b; --accent-soft: #e3eef6; --code-bg: #f4f2ec;
+  --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #15171a; --panel: #1c1f23; --text: #e6e4df; --muted: #9a9ea5;
+    --rule: #2f333a; --accent: #7fb6dd; --accent-soft: #1d2c38; --code-bg: #1e2126;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #15171a; --panel: #1c1f23; --text: #e6e4df; --muted: #9a9ea5;
+  --rule: #2f333a; --accent: #7fb6dd; --accent-soft: #1d2c38; --code-bg: #1e2126;
+}
+* { box-sizing: border-box; }
+html { scroll-padding-top: 16px; }
+body { margin: 0; background: var(--bg); color: var(--text); font: 16px/1.6 var(--sans); }
+.layout { display: grid; grid-template-columns: 250px minmax(0, 1fr); max-width: 1320px; margin: 0 auto; }
+nav { position: sticky; top: 0; align-self: start; height: 100vh; overflow-y: auto;
+       padding: 28px 18px 28px 24px; border-right: 1px solid var(--rule); font-size: 13.5px; }
+nav .brand { font-weight: 650; font-size: 14px; margin-bottom: 14px; letter-spacing: .01em; }
+nav a { display: block; color: var(--muted); text-decoration: none; padding: 3px 0; line-height: 1.35; }
+nav a:hover { color: var(--accent); }
+nav a.l3 { padding-left: 12px; font-size: 13px; }
+main { padding: 36px 48px 80px; min-width: 0; }
+header h1 { font-size: 30px; line-height: 1.2; margin: 0 0 6px; letter-spacing: -.01em; }
+header .kicker { text-transform: uppercase; letter-spacing: .12em; font-size: 12px; color: var(--accent); font-weight: 600; }
+h2 { font-size: 23px; margin: 52px 0 12px; padding-top: 12px; border-top: 1px solid var(--rule); }
+h3 { font-size: 18px; margin: 34px 0 8px; }
+p, li { max-width: 76ch; }
+a { color: var(--accent); }
+hr { display: none; }
+code { font: 0.86em/1.5 var(--mono); background: var(--code-bg); padding: 1px 5px; border-radius: 4px; }
+pre { background: var(--code-bg); border: 1px solid var(--rule); border-radius: 8px; padding: 14px 16px;
+       overflow-x: auto; font: 13px/1.55 var(--mono); }
+pre code { background: none; padding: 0; font: inherit; }
+.table-wrap { overflow-x: auto; margin: 14px 0 18px; border: 1px solid var(--rule); border-radius: 8px; }
+table { border-collapse: collapse; width: 100%; font-size: 14px; }
+th, td { text-align: left; vertical-align: top; padding: 8px 12px; border-bottom: 1px solid var(--rule); }
+th { background: var(--panel); font-weight: 600; font-size: 13px; white-space: nowrap; }
+tr:last-child td { border-bottom: none; }
+td code { font-size: 12.5px; white-space: normal; word-break: break-word; }
+td[style*="right"] { font-variant-numeric: tabular-nums; }
+td.id { font: 600 12.5px var(--mono); white-space: nowrap; }
+td.id a { text-decoration: none; }
+td.src { white-space: nowrap; color: var(--muted); font-size: 13px; }
+.raw { margin-top: 4px; color: var(--muted); font: 12px/1.45 var(--mono); }
+.raw::before { content: "raw: "; opacity: .7; }
+tr:target td { background: var(--accent-soft); }
+.filters { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0; }
+.filters button { font: 12.5px var(--sans); border: 1px solid var(--rule); background: var(--panel);
+                   color: var(--text); padding: 4px 10px; border-radius: 999px; cursor: pointer; }
+.filters button.on { background: var(--accent); color: var(--bg); border-color: var(--accent); }
+pre { line-height: 125%; }
+td.linenos .normal { color: #666666; background-color: transparent; padding-left: 5px; padding-right: 5px; }
+span.linenos { color: #666666; background-color: transparent; padding-left: 5px; padding-right: 5px; }
+td.linenos .special { color: #000000; background-color: #ffffc0; padding-left: 5px; padding-right: 5px; }
+span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 5px; padding-right: 5px; }
+.hl .hll { background-color: #ffffcc }
+.hl { background: #f0f0f0; }
+.hl .c { color: #60A0B0; font-style: italic } /* Comment */
+.hl .err { border: 1px solid #F00 } /* Error */
+.hl .k { color: #007020; font-weight: bold } /* Keyword */
+.hl .o { color: #666 } /* Operator */
+.hl .ch { color: #60A0B0; font-style: italic } /* Comment.Hashbang */
+.hl .cm { color: #60A0B0; font-style: italic } /* Comment.Multiline */
+.hl .cp { color: #007020 } /* Comment.Preproc */
+.hl .cpf { color: #60A0B0; font-style: italic } /* Comment.PreprocFile */
+.hl .c1 { color: #60A0B0; font-style: italic } /* Comment.Single */
+.hl .cs { color: #60A0B0; background-color: #FFF0F0 } /* Comment.Special */
+.hl .gd { color: #A00000 } /* Generic.Deleted */
+.hl .ge { font-style: italic } /* Generic.Emph */
+.hl .ges { font-weight: bold; font-style: italic } /* Generic.EmphStrong */
+.hl .gr { color: #F00 } /* Generic.Error */
+.hl .gh { color: #000080; font-weight: bold } /* Generic.Heading */
+.hl .gi { color: #00A000 } /* Generic.Inserted */
+.hl .go { color: #888 } /* Generic.Output */
+.hl .gp { color: #C65D09; font-weight: bold } /* Generic.Prompt */
+.hl .gs { font-weight: bold } /* Generic.Strong */
+.hl .gu { color: #800080; font-weight: bold } /* Generic.Subheading */
+.hl .gt { color: #04D } /* Generic.Traceback */
+.hl .kc { color: #007020; font-weight: bold } /* Keyword.Constant */
+.hl .kd { color: #007020; font-weight: bold } /* Keyword.Declaration */
+.hl .kn { color: #007020; font-weight: bold } /* Keyword.Namespace */
+.hl .kp { color: #007020 } /* Keyword.Pseudo */
+.hl .kr { color: #007020; font-weight: bold } /* Keyword.Reserved */
+.hl .kt { color: #902000 } /* Keyword.Type */
+.hl .m { color: #40A070 } /* Literal.Number */
+.hl .s { color: #4070A0 } /* Literal.String */
+.hl .na { color: #4070A0 } /* Name.Attribute */
+.hl .nb { color: #007020 } /* Name.Builtin */
+.hl .nc { color: #0E84B5; font-weight: bold } /* Name.Class */
+.hl .no { color: #60ADD5 } /* Name.Constant */
+.hl .nd { color: #555; font-weight: bold } /* Name.Decorator */
+.hl .ni { color: #D55537; font-weight: bold } /* Name.Entity */
+.hl .ne { color: #007020 } /* Name.Exception */
+.hl .nf { color: #06287E } /* Name.Function */
+.hl .nl { color: #002070; font-weight: bold } /* Name.Label */
+.hl .nn { color: #0E84B5; font-weight: bold } /* Name.Namespace */
+.hl .nt { color: #062873; font-weight: bold } /* Name.Tag */
+.hl .nv { color: #BB60D5 } /* Name.Variable */
+.hl .ow { color: #007020; font-weight: bold } /* Operator.Word */
+.hl .w { color: #BBB } /* Text.Whitespace */
+.hl .mb { color: #40A070 } /* Literal.Number.Bin */
+.hl .mf { color: #40A070 } /* Literal.Number.Float */
+.hl .mh { color: #40A070 } /* Literal.Number.Hex */
+.hl .mi { color: #40A070 } /* Literal.Number.Integer */
+.hl .mo { color: #40A070 } /* Literal.Number.Oct */
+.hl .sa { color: #4070A0 } /* Literal.String.Affix */
+.hl .sb { color: #4070A0 } /* Literal.String.Backtick */
+.hl .sc { color: #4070A0 } /* Literal.String.Char */
+.hl .dl { color: #4070A0 } /* Literal.String.Delimiter */
+.hl .sd { color: #4070A0; font-style: italic } /* Literal.String.Doc */
+.hl .s2 { color: #4070A0 } /* Literal.String.Double */
+.hl .se { color: #4070A0; font-weight: bold } /* Literal.String.Escape */
+.hl .sh { color: #4070A0 } /* Literal.String.Heredoc */
+.hl .si { color: #70A0D0; font-style: italic } /* Literal.String.Interpol */
+.hl .sx { color: #C65D09 } /* Literal.String.Other */
+.hl .sr { color: #235388 } /* Literal.String.Regex */
+.hl .s1 { color: #4070A0 } /* Literal.String.Single */
+.hl .ss { color: #517918 } /* Literal.String.Symbol */
+.hl .bp { color: #007020 } /* Name.Builtin.Pseudo */
+.hl .fm { color: #06287E } /* Name.Function.Magic */
+.hl .vc { color: #BB60D5 } /* Name.Variable.Class */
+.hl .vg { color: #BB60D5 } /* Name.Variable.Global */
+.hl .vi { color: #BB60D5 } /* Name.Variable.Instance */
+.hl .vm { color: #BB60D5 } /* Name.Variable.Magic */
+.hl .il { color: #40A070 } /* Literal.Number.Integer.Long */
+@media (prefers-color-scheme: dark) {
+  pre { line-height: 125%; }
+  td.linenos .normal { color: inherit; background-color: transparent; padding-left: 5px; padding-right: 5px; }
+  span.linenos { color: inherit; background-color: transparent; padding-left: 5px; padding-right: 5px; }
+  td.linenos .special { color: #000000; background-color: #ffffc0; padding-left: 5px; padding-right: 5px; }
+  span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 5px; padding-right: 5px; }
+  :root:not([data-theme="light"]) .hl :root:not([data-theme="light"]) .hll { background-color: #49483e }
+  :root:not([data-theme="light"]) .hl { background: #272822; color: #F8F8F2 }
+  :root:not([data-theme="light"]) .hl .c { color: #959077 } /* Comment */
+  :root:not([data-theme="light"]) .hl .err { color: #ED007E; background-color: #1E0010 } /* Error */
+  :root:not([data-theme="light"]) .hl .esc { color: #F8F8F2 } /* Escape */
+  :root:not([data-theme="light"]) .hl .g { color: #F8F8F2 } /* Generic */
+  :root:not([data-theme="light"]) .hl .k { color: #66D9EF } /* Keyword */
+  :root:not([data-theme="light"]) .hl .l { color: #AE81FF } /* Literal */
+  :root:not([data-theme="light"]) .hl .n { color: #F8F8F2 } /* Name */
+  :root:not([data-theme="light"]) .hl .o { color: #FF4689 } /* Operator */
+  :root:not([data-theme="light"]) .hl .x { color: #F8F8F2 } /* Other */
+  :root:not([data-theme="light"]) .hl .p { color: #F8F8F2 } /* Punctuation */
+  :root:not([data-theme="light"]) .hl .ch { color: #959077 } /* Comment.Hashbang */
+  :root:not([data-theme="light"]) .hl .cm { color: #959077 } /* Comment.Multiline */
+  :root:not([data-theme="light"]) .hl .cp { color: #959077 } /* Comment.Preproc */
+  :root:not([data-theme="light"]) .hl .cpf { color: #959077 } /* Comment.PreprocFile */
+  :root:not([data-theme="light"]) .hl .c1 { color: #959077 } /* Comment.Single */
+  :root:not([data-theme="light"]) .hl .cs { color: #959077 } /* Comment.Special */
+  :root:not([data-theme="light"]) .hl .gd { color: #FF4689 } /* Generic.Deleted */
+  :root:not([data-theme="light"]) .hl .ge { color: #F8F8F2; font-style: italic } /* Generic.Emph */
+  :root:not([data-theme="light"]) .hl .ges { color: #F8F8F2; font-weight: bold; font-style: italic } /* Generic.EmphStrong */
+  :root:not([data-theme="light"]) .hl .gr { color: #FF4689 } /* Generic.Error */
+  :root:not([data-theme="light"]) .hl .gh { color: #F8F8F2 } /* Generic.Heading */
+  :root:not([data-theme="light"]) .hl .gi { color: #A6E22E } /* Generic.Inserted */
+  :root:not([data-theme="light"]) .hl .go { color: #66D9EF } /* Generic.Output */
+  :root:not([data-theme="light"]) .hl .gp { color: #FF4689; font-weight: bold } /* Generic.Prompt */
+  :root:not([data-theme="light"]) .hl .gs { color: #F8F8F2; font-weight: bold } /* Generic.Strong */
+  :root:not([data-theme="light"]) .hl .gu { color: #959077 } /* Generic.Subheading */
+  :root:not([data-theme="light"]) .hl .gt { color: #66D9EF } /* Generic.Traceback */
+  :root:not([data-theme="light"]) .hl .kc { color: #66D9EF } /* Keyword.Constant */
+  :root:not([data-theme="light"]) .hl .kd { color: #66D9EF } /* Keyword.Declaration */
+  :root:not([data-theme="light"]) .hl .kn { color: #FF4689 } /* Keyword.Namespace */
+  :root:not([data-theme="light"]) .hl .kp { color: #66D9EF } /* Keyword.Pseudo */
+  :root:not([data-theme="light"]) .hl .kr { color: #66D9EF } /* Keyword.Reserved */
+  :root:not([data-theme="light"]) .hl .kt { color: #66D9EF } /* Keyword.Type */
+  :root:not([data-theme="light"]) .hl .ld { color: #E6DB74 } /* Literal.Date */
+  :root:not([data-theme="light"]) .hl .m { color: #AE81FF } /* Literal.Number */
+  :root:not([data-theme="light"]) .hl .s { color: #E6DB74 } /* Literal.String */
+  :root:not([data-theme="light"]) .hl .na { color: #A6E22E } /* Name.Attribute */
+  :root:not([data-theme="light"]) .hl .nb { color: #A6E22E } /* Name.Builtin */
+  :root:not([data-theme="light"]) .hl .nc { color: #A6E22E } /* Name.Class */
+  :root:not([data-theme="light"]) .hl .no { color: #66D9EF } /* Name.Constant */
+  :root:not([data-theme="light"]) .hl .nd { color: #A6E22E } /* Name.Decorator */
+  :root:not([data-theme="light"]) .hl .ni { color: #F8F8F2 } /* Name.Entity */
+  :root:not([data-theme="light"]) .hl .ne { color: #A6E22E } /* Name.Exception */
+  :root:not([data-theme="light"]) .hl .nf { color: #A6E22E } /* Name.Function */
+  :root:not([data-theme="light"]) .hl .nl { color: #F8F8F2 } /* Name.Label */
+  :root:not([data-theme="light"]) .hl .nn { color: #F8F8F2 } /* Name.Namespace */
+  :root:not([data-theme="light"]) .hl .nx { color: #A6E22E } /* Name.Other */
+  :root:not([data-theme="light"]) .hl .py { color: #F8F8F2 } /* Name.Property */
+  :root:not([data-theme="light"]) .hl .nt { color: #FF4689 } /* Name.Tag */
+  :root:not([data-theme="light"]) .hl .nv { color: #F8F8F2 } /* Name.Variable */
+  :root:not([data-theme="light"]) .hl .ow { color: #FF4689 } /* Operator.Word */
+  :root:not([data-theme="light"]) .hl .pm { color: #F8F8F2 } /* Punctuation.Marker */
+  :root:not([data-theme="light"]) .hl .w { color: #F8F8F2 } /* Text.Whitespace */
+  :root:not([data-theme="light"]) .hl .mb { color: #AE81FF } /* Literal.Number.Bin */
+  :root:not([data-theme="light"]) .hl .mf { color: #AE81FF } /* Literal.Number.Float */
+  :root:not([data-theme="light"]) .hl .mh { color: #AE81FF } /* Literal.Number.Hex */
+  :root:not([data-theme="light"]) .hl .mi { color: #AE81FF } /* Literal.Number.Integer */
+  :root:not([data-theme="light"]) .hl .mo { color: #AE81FF } /* Literal.Number.Oct */
+  :root:not([data-theme="light"]) .hl .sa { color: #E6DB74 } /* Literal.String.Affix */
+  :root:not([data-theme="light"]) .hl .sb { color: #E6DB74 } /* Literal.String.Backtick */
+  :root:not([data-theme="light"]) .hl .sc { color: #E6DB74 } /* Literal.String.Char */
+  :root:not([data-theme="light"]) .hl .dl { color: #E6DB74 } /* Literal.String.Delimiter */
+  :root:not([data-theme="light"]) .hl .sd { color: #E6DB74 } /* Literal.String.Doc */
+  :root:not([data-theme="light"]) .hl .s2 { color: #E6DB74 } /* Literal.String.Double */
+  :root:not([data-theme="light"]) .hl .se { color: #AE81FF } /* Literal.String.Escape */
+  :root:not([data-theme="light"]) .hl .sh { color: #E6DB74 } /* Literal.String.Heredoc */
+  :root:not([data-theme="light"]) .hl .si { color: #E6DB74 } /* Literal.String.Interpol */
+  :root:not([data-theme="light"]) .hl .sx { color: #E6DB74 } /* Literal.String.Other */
+  :root:not([data-theme="light"]) .hl .sr { color: #E6DB74 } /* Literal.String.Regex */
+  :root:not([data-theme="light"]) .hl .s1 { color: #E6DB74 } /* Literal.String.Single */
+  :root:not([data-theme="light"]) .hl .ss { color: #E6DB74 } /* Literal.String.Symbol */
+  :root:not([data-theme="light"]) .hl .bp { color: #A6E22E } /* Name.Builtin.Pseudo */
+  :root:not([data-theme="light"]) .hl .fm { color: #A6E22E } /* Name.Function.Magic */
+  :root:not([data-theme="light"]) .hl .vc { color: #F8F8F2 } /* Name.Variable.Class */
+  :root:not([data-theme="light"]) .hl .vg { color: #F8F8F2 } /* Name.Variable.Global */
+  :root:not([data-theme="light"]) .hl .vi { color: #F8F8F2 } /* Name.Variable.Instance */
+  :root:not([data-theme="light"]) .hl .vm { color: #F8F8F2 } /* Name.Variable.Magic */
+  :root:not([data-theme="light"]) .hl .il { color: #AE81FF } /* Literal.Number.Integer.Long */
+}
+pre { line-height: 125%; }
+td.linenos .normal { color: inherit; background-color: transparent; padding-left: 5px; padding-right: 5px; }
+span.linenos { color: inherit; background-color: transparent; padding-left: 5px; padding-right: 5px; }
+td.linenos .special { color: #000000; background-color: #ffffc0; padding-left: 5px; padding-right: 5px; }
+span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 5px; padding-right: 5px; }
+:root[data-theme="dark"] .hl :root[data-theme="dark"] .hll { background-color: #49483e }
+:root[data-theme="dark"] .hl { background: #272822; color: #F8F8F2 }
+:root[data-theme="dark"] .hl .c { color: #959077 } /* Comment */
+:root[data-theme="dark"] .hl .err { color: #ED007E; background-color: #1E0010 } /* Error */
+:root[data-theme="dark"] .hl .esc { color: #F8F8F2 } /* Escape */
+:root[data-theme="dark"] .hl .g { color: #F8F8F2 } /* Generic */
+:root[data-theme="dark"] .hl .k { color: #66D9EF } /* Keyword */
+:root[data-theme="dark"] .hl .l { color: #AE81FF } /* Literal */
+:root[data-theme="dark"] .hl .n { color: #F8F8F2 } /* Name */
+:root[data-theme="dark"] .hl .o { color: #FF4689 } /* Operator */
+:root[data-theme="dark"] .hl .x { color: #F8F8F2 } /* Other */
+:root[data-theme="dark"] .hl .p { color: #F8F8F2 } /* Punctuation */
+:root[data-theme="dark"] .hl .ch { color: #959077 } /* Comment.Hashbang */
+:root[data-theme="dark"] .hl .cm { color: #959077 } /* Comment.Multiline */
+:root[data-theme="dark"] .hl .cp { color: #959077 } /* Comment.Preproc */
+:root[data-theme="dark"] .hl .cpf { color: #959077 } /* Comment.PreprocFile */
+:root[data-theme="dark"] .hl .c1 { color: #959077 } /* Comment.Single */
+:root[data-theme="dark"] .hl .cs { color: #959077 } /* Comment.Special */
+:root[data-theme="dark"] .hl .gd { color: #FF4689 } /* Generic.Deleted */
+:root[data-theme="dark"] .hl .ge { color: #F8F8F2; font-style: italic } /* Generic.Emph */
+:root[data-theme="dark"] .hl .ges { color: #F8F8F2; font-weight: bold; font-style: italic } /* Generic.EmphStrong */
+:root[data-theme="dark"] .hl .gr { color: #FF4689 } /* Generic.Error */
+:root[data-theme="dark"] .hl .gh { color: #F8F8F2 } /* Generic.Heading */
+:root[data-theme="dark"] .hl .gi { color: #A6E22E } /* Generic.Inserted */
+:root[data-theme="dark"] .hl .go { color: #66D9EF } /* Generic.Output */
+:root[data-theme="dark"] .hl .gp { color: #FF4689; font-weight: bold } /* Generic.Prompt */
+:root[data-theme="dark"] .hl .gs { color: #F8F8F2; font-weight: bold } /* Generic.Strong */
+:root[data-theme="dark"] .hl .gu { color: #959077 } /* Generic.Subheading */
+:root[data-theme="dark"] .hl .gt { color: #66D9EF } /* Generic.Traceback */
+:root[data-theme="dark"] .hl .kc { color: #66D9EF } /* Keyword.Constant */
+:root[data-theme="dark"] .hl .kd { color: #66D9EF } /* Keyword.Declaration */
+:root[data-theme="dark"] .hl .kn { color: #FF4689 } /* Keyword.Namespace */
+:root[data-theme="dark"] .hl .kp { color: #66D9EF } /* Keyword.Pseudo */
+:root[data-theme="dark"] .hl .kr { color: #66D9EF } /* Keyword.Reserved */
+:root[data-theme="dark"] .hl .kt { color: #66D9EF } /* Keyword.Type */
+:root[data-theme="dark"] .hl .ld { color: #E6DB74 } /* Literal.Date */
+:root[data-theme="dark"] .hl .m { color: #AE81FF } /* Literal.Number */
+:root[data-theme="dark"] .hl .s { color: #E6DB74 } /* Literal.String */
+:root[data-theme="dark"] .hl .na { color: #A6E22E } /* Name.Attribute */
+:root[data-theme="dark"] .hl .nb { color: #A6E22E } /* Name.Builtin */
+:root[data-theme="dark"] .hl .nc { color: #A6E22E } /* Name.Class */
+:root[data-theme="dark"] .hl .no { color: #66D9EF } /* Name.Constant */
+:root[data-theme="dark"] .hl .nd { color: #A6E22E } /* Name.Decorator */
+:root[data-theme="dark"] .hl .ni { color: #F8F8F2 } /* Name.Entity */
+:root[data-theme="dark"] .hl .ne { color: #A6E22E } /* Name.Exception */
+:root[data-theme="dark"] .hl .nf { color: #A6E22E } /* Name.Function */
+:root[data-theme="dark"] .hl .nl { color: #F8F8F2 } /* Name.Label */
+:root[data-theme="dark"] .hl .nn { color: #F8F8F2 } /* Name.Namespace */
+:root[data-theme="dark"] .hl .nx { color: #A6E22E } /* Name.Other */
+:root[data-theme="dark"] .hl .py { color: #F8F8F2 } /* Name.Property */
+:root[data-theme="dark"] .hl .nt { color: #FF4689 } /* Name.Tag */
+:root[data-theme="dark"] .hl .nv { color: #F8F8F2 } /* Name.Variable */
+:root[data-theme="dark"] .hl .ow { color: #FF4689 } /* Operator.Word */
+:root[data-theme="dark"] .hl .pm { color: #F8F8F2 } /* Punctuation.Marker */
+:root[data-theme="dark"] .hl .w { color: #F8F8F2 } /* Text.Whitespace */
+:root[data-theme="dark"] .hl .mb { color: #AE81FF } /* Literal.Number.Bin */
+:root[data-theme="dark"] .hl .mf { color: #AE81FF } /* Literal.Number.Float */
+:root[data-theme="dark"] .hl .mh { color: #AE81FF } /* Literal.Number.Hex */
+:root[data-theme="dark"] .hl .mi { color: #AE81FF } /* Literal.Number.Integer */
+:root[data-theme="dark"] .hl .mo { color: #AE81FF } /* Literal.Number.Oct */
+:root[data-theme="dark"] .hl .sa { color: #E6DB74 } /* Literal.String.Affix */
+:root[data-theme="dark"] .hl .sb { color: #E6DB74 } /* Literal.String.Backtick */
+:root[data-theme="dark"] .hl .sc { color: #E6DB74 } /* Literal.String.Char */
+:root[data-theme="dark"] .hl .dl { color: #E6DB74 } /* Literal.String.Delimiter */
+:root[data-theme="dark"] .hl .sd { color: #E6DB74 } /* Literal.String.Doc */
+:root[data-theme="dark"] .hl .s2 { color: #E6DB74 } /* Literal.String.Double */
+:root[data-theme="dark"] .hl .se { color: #AE81FF } /* Literal.String.Escape */
+:root[data-theme="dark"] .hl .sh { color: #E6DB74 } /* Literal.String.Heredoc */
+:root[data-theme="dark"] .hl .si { color: #E6DB74 } /* Literal.String.Interpol */
+:root[data-theme="dark"] .hl .sx { color: #E6DB74 } /* Literal.String.Other */
+:root[data-theme="dark"] .hl .sr { color: #E6DB74 } /* Literal.String.Regex */
+:root[data-theme="dark"] .hl .s1 { color: #E6DB74 } /* Literal.String.Single */
+:root[data-theme="dark"] .hl .ss { color: #E6DB74 } /* Literal.String.Symbol */
+:root[data-theme="dark"] .hl .bp { color: #A6E22E } /* Name.Builtin.Pseudo */
+:root[data-theme="dark"] .hl .fm { color: #A6E22E } /* Name.Function.Magic */
+:root[data-theme="dark"] .hl .vc { color: #F8F8F2 } /* Name.Variable.Class */
+:root[data-theme="dark"] .hl .vg { color: #F8F8F2 } /* Name.Variable.Global */
+:root[data-theme="dark"] .hl .vi { color: #F8F8F2 } /* Name.Variable.Instance */
+:root[data-theme="dark"] .hl .vm { color: #F8F8F2 } /* Name.Variable.Magic */
+:root[data-theme="dark"] .hl .il { color: #AE81FF } /* Literal.Number.Integer.Long */
+
+.hl { background: var(--code-bg); }
+@media (max-width: 900px) {
+  .layout { grid-template-columns: 1fr; }
+  nav { display: none; }
+  main { padding: 24px 16px 60px; }
+  header h1 { font-size: 24px; }
+}
+</style>
+</head>
+<body>
+<div class="layout">
+<nav><div class="brand">Pilot vocabulary API</div><a class="l2" href="#1-what-the-corpus-says">1. What the corpus says</a><a class="l3" href="#how-often-the-structures-occur">How often the structures occur</a><a class="l3" href="#twelve-findings">Twelve findings</a><a class="l2" href="#2-the-vocabulary">2. The vocabulary</a><a class="l3" href="#21-references-nouns">2.1 References (nouns)</a><a class="l3" href="#22-the-pattern-as-a-value">2.2 The pattern as a value</a><a class="l3" href="#23-steps-verbs">2.3 Steps (verbs)</a><a class="l3" href="#24-conditions-when">2.4 Conditions (when)</a><a class="l3" href="#25-constraints-gates-speech-acts">2.5 Constraints, gates, speech acts</a><a class="l3" href="#26-working-on-the-live-plan">2.6 Working on the live plan</a><a class="l2" href="#3-worked-examples">3. Worked examples</a><a class="l3" href="#pattern-shape">Pattern shape</a><a class="l3" href="#turn-timing">Turn timing</a><a class="l3" href="#entries-and-arrivals">Entries and arrivals</a><a class="l3" href="#lateral-constraints">Lateral constraints</a><a class="l3" href="#vertical-constraints">Vertical constraints</a><a class="l3" href="#departures">Departures</a><a class="l3" href="#spacing-and-speed">Spacing and speed</a><a class="l3" href="#sequencing">Sequencing</a><a class="l3" href="#landing-runway-changes-exits">Landing, runway changes, exits</a><a class="l3" href="#go-arounds">Go-arounds</a><a class="l3" href="#off-pattern-maneuvering">Off-pattern maneuvering</a><a class="l3" href="#vectors">Vectors</a><a class="l3" href="#ground">Ground</a><a class="l3" href="#instructor-and-handbook-items">Instructor and handbook items</a><a class="l2" href="#4-how-this-maps-onto-what-exists">4. How this maps onto what exists</a><a class="l2" href="#5-open-questions">5. Open questions</a><a class="l2" href="#appendix-the-curated-corpus">Appendix: the curated corpus</a></nav>
+<main>
+<header><div class="kicker">Design draft · an-llm-flies-x-plane</div><h1>A pilot-vocabulary API for agent-authored guidance — first draft</h1></header>
+<p>Status: exploratory design draft, 2026-10-15. Nothing here is implemented.</p>
+<p>The idea: instead of a fixed menu of parameterized profiles, the agent writes
+short Python that builds a <strong>plan</strong> out of primitives named the way pilots and
+controllers talk — Vy, abeam the numbers, extend downwind, remain south of the
+101 until the interchange. A deterministic Rust executor flies the plan. Agent
+code runs when a clearance arrives, never inside the control loop.</p>
+<p>This draft was built backwards from real instructions:</p>
+<ul>
+<li><strong>ATC</strong>: 1.22M transmissions (16,231 Whisper transcripts of LiveATC recordings
+from 26 facilities, mostly SoCal GA towers — VNY, WHP, SMO, EMT, BUR, plus
+LAX, ONT, BIL, CHO, PHNL and others). See <code>../atc-corpus/</code>.</li>
+<li><strong>Instructors</strong>: the FAA <em>Airplane Flying Handbook</em> chapters on takeoffs,
+ground reference maneuvers, traffic patterns, and landings, and the Private
+Pilot ACS for tolerances. See <code>../afh/</code>.</li>
+</ul>
+<p>116 ATC instructions and 25 instructor items were curated into
+<code>instructions.yaml</code>. Every one is translated below. Where a translation is
+awkward, that’s recorded as a gap.</p>
+<hr />
+<h2 id="1-what-the-corpus-says">1. What the corpus says</h2>
+<h3 id="how-often-the-structures-occur">How often the structures occur</h3>
+<p>Rough regex counts over all 1.22M transmissions (<code>../atc-corpus/structure.py</code>).
+Whisper noise means these undercount; treat them as orders of magnitude.</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Structure</th>
+<th style="text-align:right">Count</th>
+<th>Example</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Maneuver permission (“…approved”, “you can…”, “at your discretion”)</td>
+<td style="text-align:right">19,183</td>
+<td>“right turn at the shoreline approved”</td>
+</tr>
+<tr>
+<td>Sequencing (“number 2, following…”)</td>
+<td style="text-align:right">11,317</td>
+<td>“number 2, follow the Cessna on a 2 mile final”</td>
+</tr>
+<tr>
+<td>Altitude window (“at or above/below”)</td>
+<td style="text-align:right">5,529</td>
+<td>“remain at or below 2500”</td>
+</tr>
+<tr>
+<td>Question to pilot (“can you…”, “are you able…”)</td>
+<td style="text-align:right">4,959</td>
+<td>“are you able to turn base at or before the freeway?”</td>
+</tr>
+<tr>
+<td>Soft request (“if able”, “when able”)</td>
+<td style="text-align:right">4,375</td>
+<td>“if able, keep it over the 101”</td>
+</tr>
+<tr>
+<td>Sequence (“…then <action>”)</td>
+<td style="text-align:right">2,970</td>
+<td>“fly present heading to the 101, then make right traffic”</td>
+</tr>
+<tr>
+<td>Report traffic/field in sight</td>
+<td style="text-align:right">2,945</td>
+<td></td>
+</tr>
+<tr>
+<td>Extend upwind/downwind/crosswind</td>
+<td style="text-align:right">2,742</td>
+<td></td>
+</tr>
+<tr>
+<td><strong>Constraint with end condition</strong> (“remain … until …”)</td>
+<td style="text-align:right">2,385</td>
+<td>“remain at or below 1800 until north of the field”</td>
+</tr>
+<tr>
+<td>Short approach</td>
+<td style="text-align:right">2,215</td>
+<td></td>
+</tr>
+<tr>
+<td>Side of a line (“remain north of…”, “west side of…”)</td>
+<td style="text-align:right">1,697</td>
+<td>“remain on the west side of the 405”</td>
+</tr>
+<tr>
+<td>Change to runway (sidestep)</td>
+<td style="text-align:right">1,627</td>
+<td></td>
+</tr>
+<tr>
+<td>Left/right 360 or 270</td>
+<td style="text-align:right">1,608</td>
+<td></td>
+</tr>
+<tr>
+<td>“I’ll call your base/turn”</td>
+<td style="text-align:right">1,591</td>
+<td></td>
+</tr>
+<tr>
+<td>Follow a linear feature</td>
+<td style="text-align:right">1,553</td>
+<td>“follow the 5, enter right downwind”</td>
+</tr>
+<tr>
+<td>Relative turn (“turn 20 degrees left”)</td>
+<td style="text-align:right">1,433</td>
+<td></td>
+</tr>
+<tr>
+<td>“On the go, …”</td>
+<td style="text-align:right">1,291</td>
+<td></td>
+</tr>
+<tr>
+<td>Circle / orbit / hold over a place</td>
+<td style="text-align:right">913</td>
+<td>“cross midfield, hold over the business park”</td>
+</tr>
+<tr>
+<td>Turn a leg at/over/abeam/before a place</td>
+<td style="text-align:right">420</td>
+<td>“turn base at the VA hospital”</td>
+</tr>
+</tbody>
+</table></div>
+<h3 id="twelve-findings">Twelve findings</h3>
+<ol>
+<li>
+<p><strong>Most clearances amend a plan already in progress.</strong> “Extend downwind”,
+“turn base now”, “change to 16L”, and “keep your base in close” all assume an
+active pattern. The plan has to be a live object with named parts that the
+agent edits, not something rebuilt from scratch for each call.</p>
+</li>
+<li>
+<p><strong>Pattern turn timing is where most of the editing happens.</strong> The same
+turn can be ordered with many kinds of trigger:</p>
+<ul>
+<li><strong>now:</strong> “turn base now”</li>
+<li><strong>as soon as able:</strong> “turn base as soon as you’re able”</li>
+<li><strong>at a place:</strong> “at the 118 turn base”, “turn base at the VA”</li>
+<li><strong>abeam a place:</strong> “turn base abeam the VA hospital”</li>
+<li><strong>a deadline:</strong> “prior to the interchange”, “at or before the freeway”</li>
+<li><strong>an earliest point:</strong> “take it out to the shoreline before you turn crosswind”</li>
+<li><strong>ATC’s call:</strong> “I’ll call your base”</li>
+<li><strong>traffic:</strong> “just behind the traffic, turn base”; “don’t turn base now, you’re following the Cherokee”</li>
+</ul>
+<p>So every pattern turn needs a replaceable trigger, plus earliest and
+latest bounds.</p>
+</li>
+<li>
+<p><strong>Constraints come with expiry conditions.</strong> “Remain at or below 1800 until
+north of the field”, “remain on the east side of the 405 until the
+interchange”, “maintain 2000 until you turn base”. <code>remain(X).until(Y)</code>
+needs to be first-class, and the executor needs to enforce it.</p>
+</li>
+<li>
+<p><strong>Places are local nicknames, not identifiers.</strong> Examples: “the 118”, “the
+flood basin”, “the VA”, “the new Getty”, “Warner Center”, “Topanga”, “the
+interchange”. Resolving them needs OSM-style geography plus airport-local
+context. apt.dat has none of this.</p>
+</li>
+<li>
+<p><strong>Lines matter as much as points.</strong> Freeways, the shoreline, ridge lines,
+the runway centerline and the Santa Monica final are all lines.
+Instructions use side-of-line (“north of the 101”), crossing (“cross the 10,
+then turn crosswind”), and line-following with a side (“follow the 405,
+keep it off your left wing”). Freeways aren’t straight, so “north of the
+101” has to be defined against the local stretch of road.</p>
+</li>
+<li>
+<p><strong>Traffic is a first-class noun.</strong> “Follow the Cherokee”, “number 2”, “pass
+behind that traffic”, and “report in sight” are among the most common
+instructions. Followers time the base turn off the traffic ahead. ATC also
+describes other aircraft’s intentions in the same vocabulary (“he’s going
+to circle the pier a couple times, then head out to the Hollywood sign”).
+So the plan language doubles as a way to represent other aircraft’s
+expected paths.</p>
+</li>
+<li>
+<p><strong>Commands, permissions, preferences and questions are different speech
+acts.</strong> “Make a right 360” is a command. “S-turns approved to the west if
+you need them” is a permission. “If able, keep it over the 101” is a soft
+request. “Can you make a short approach?” is a question. Each needs its own
+construct (<code>do</code>, <code>permit</code>, <code>prefer</code>, <code>can</code>). A question is answered by
+checking whether the amended plan is feasible.</p>
+</li>
+<li>
+<p><strong>Qualitative words need per-aircraft definitions.</strong> For example: tight,
+wide, square, “in close”, short approach, slowest practical speed, best
+forward speed, expedite, immediate. These belong in aircraft config, the
+same way V-speeds do.</p>
+</li>
+<li>
+<p><strong>Many instructions never say when they end.</strong> “Fly runway heading”,
+“maintain at or above 4000”, “extend downwind”, “for now”. The plan should
+mark these items as open-ended, so the agent knows a follow-up is expected
+and can ask before an extension runs too long.</p>
+</li>
+<li>
+<p><strong>ATC instructions override training defaults, and that has
+consequences.</strong> “Maintain pattern altitude until you turn final” overrides
+the AFH’s “begin descent abeam the numbers”. The result is a steep final
+that may need full flaps or a slip, or may need an “unable”. Feasibility
+checks and the ability to say “unable” are part of the API, not extras.</p>
+</li>
+<li>
+<p><strong>Radio calls are plan steps too.</strong> “Report 3 miles”, “report over the
+interchange”, “contact SoCal prior to entering Class C”, “after you clear
+the D, frequency change approved”. These are triggers whose action wakes
+the agent to speak.</p>
+</li>
+<li>
+<p><strong>Instructor knowledge becomes defaults, tolerances and gates.</strong> The AFH
+pattern written in this vocabulary is the standard library. ACS tolerances
+define “established” and “deviation”. The stabilized-approach rule
+(“stabilized by 500 ft or go around”) is a gate: a check at a point,
+with a fallback action.</p>
+</li>
+</ol>
+<hr />
+<h2 id="2-the-vocabulary">2. The vocabulary</h2>
+<p>Python, because it’s what the model writes most reliably. The agent’s code
+<strong>builds a plan value</strong>. Nothing here blocks or touches actuators. The executor
+validates the plan, previews it in the simple sim, and flies it.</p>
+<h3 id="21-references-nouns">2.1 References (nouns)</h3>
+<p>References resolve once to geometry, and the agent can inspect them
+(<code>print(place(&quot;the VA&quot;))</code> shows the name, coordinates, and distance and bearing
+from the airport).</p>
+<pre class="hl"><code class="language-python"><span class="n">apt</span> <span class="o">=</span> <span class="n">airport</span><span class="p">(</span><span class="s2">"KVNY"</span><span class="p">)</span>
+<span class="n">rwy</span> <span class="o">=</span> <span class="n">apt</span><span class="o">.</span><span class="n">runway</span><span class="p">(</span><span class="s2">"16R"</span><span class="p">)</span>
+
+<span class="c1"># Runway anatomy (points unless noted)</span>
+<span class="n">rwy</span><span class="o">.</span><span class="n">threshold</span><span class="p">,</span> <span class="n">rwy</span><span class="o">.</span><span class="n">numbers</span><span class="p">,</span> <span class="n">rwy</span><span class="o">.</span><span class="n">aim_point</span><span class="p">,</span> <span class="n">rwy</span><span class="o">.</span><span class="n">departure_end</span><span class="p">,</span> <span class="n">rwy</span><span class="o">.</span><span class="n">midfield</span>
+<span class="n">rwy</span><span class="o">.</span><span class="n">centerline</span><span class="p">,</span> <span class="n">rwy</span><span class="o">.</span><span class="n">extended_centerline</span>          <span class="c1"># lines</span>
+<span class="n">rwy</span><span class="o">.</span><span class="n">exit</span><span class="p">(</span><span class="s2">"H"</span><span class="p">),</span> <span class="n">rwy</span><span class="o">.</span><span class="n">intersection</span><span class="p">(</span><span class="s2">"D"</span><span class="p">),</span> <span class="n">rwy</span><span class="o">.</span><span class="n">end</span>    <span class="c1"># ground references</span>
+
+<span class="c1"># Geography (resolved via OSM + airport-local aliases)</span>
+<span class="n">place</span><span class="p">(</span><span class="s2">"Encino Reservoir"</span><span class="p">)</span>                        <span class="c1"># point or area</span>
+<span class="n">place</span><span class="p">(</span><span class="s2">"the VA"</span><span class="p">,</span> <span class="n">near</span><span class="o">=</span><span class="n">apt</span><span class="p">)</span>                        <span class="c1"># local nickname; resolver picks the nearby VA hospital</span>
+<span class="n">road</span><span class="p">(</span><span class="s2">"the 118"</span><span class="p">)</span>                                  <span class="c1"># line (CA-118 near this airport)</span>
+<span class="n">interchange</span><span class="p">(</span><span class="s2">"I-405"</span><span class="p">,</span> <span class="s2">"US-101"</span><span class="p">)</span>                   <span class="c1"># point</span>
+<span class="n">shoreline</span><span class="p">(),</span> <span class="n">water</span><span class="p">(),</span> <span class="n">land</span><span class="p">()</span>                     <span class="c1"># line / areas</span>
+<span class="n">ridge</span><span class="p">(</span><span class="s2">"Santa Monica Mountains"</span><span class="p">)</span>                  <span class="c1"># line</span>
+<span class="n">airspace</span><span class="p">(</span><span class="s2">"KBUR"</span><span class="p">,</span> <span class="s2">"C"</span><span class="p">),</span> <span class="n">apt</span><span class="o">.</span><span class="n">class_d</span>               <span class="c1"># volumes</span>
+
+<span class="c1"># Traffic: binds to a sensed target when possible, otherwise unbound/estimated</span>
+<span class="n">t</span> <span class="o">=</span> <span class="n">traffic</span><span class="p">(</span><span class="s2">"Cherokee on a 3 mile final"</span><span class="p">)</span>
+
+<span class="c1"># Speeds, by name (from aircraft config)</span>
+<span class="n">Vr</span><span class="p">,</span> <span class="n">Vx</span><span class="p">,</span> <span class="n">Vy</span><span class="p">,</span> <span class="n">Vref</span><span class="p">,</span> <span class="n">Vapp</span><span class="p">,</span> <span class="n">Vbg</span><span class="p">,</span> <span class="n">Vso</span><span class="p">,</span> <span class="n">PATTERN_SPEED</span>
+<span class="n">SLOWEST_PRACTICAL</span><span class="p">,</span> <span class="n">BEST_FORWARD</span>                  <span class="c1"># phase-dependent, aircraft-defined</span>
+
+<span class="c1"># Units — bare numbers are MSL feet / knots / degrees</span>
+<span class="n">ft</span><span class="p">(</span><span class="mi">1800</span><span class="p">),</span> <span class="n">agl</span><span class="p">(</span><span class="mi">1000</span><span class="p">),</span> <span class="n">nm</span><span class="p">(</span><span class="mi">1</span><span class="p">),</span> <span class="n">kt</span><span class="p">(</span><span class="mi">90</span><span class="p">),</span> <span class="n">deg</span><span class="p">(</span><span class="mi">20</span><span class="p">)</span>
+</code></pre>
+<h3 id="22-the-pattern-as-a-value">2.2 The pattern as a value</h3>
+<p>The pattern is the main object, because most clearances edit it. It’s built
+from config (pattern altitude, offset) and is immutable. Edits return a new
+pattern, so the agent and the operator can diff and preview a change before it
+takes effect.</p>
+<pre class="hl"><code class="language-python"><span class="n">p</span> <span class="o">=</span> <span class="n">pattern</span><span class="p">(</span><span class="n">rwy</span><span class="p">,</span> <span class="n">side</span><span class="o">=</span><span class="n">RIGHT</span><span class="p">)</span>                     <span class="c1"># standard rectangle per AFH ch8</span>
+
+<span class="n">p</span><span class="o">.</span><span class="n">upwind</span><span class="p">,</span> <span class="n">p</span><span class="o">.</span><span class="n">crosswind</span><span class="p">,</span> <span class="n">p</span><span class="o">.</span><span class="n">downwind</span><span class="p">,</span> <span class="n">p</span><span class="o">.</span><span class="n">base</span><span class="p">,</span> <span class="n">p</span><span class="o">.</span><span class="n">final</span>     <span class="c1"># legs</span>
+<span class="n">p</span><span class="o">.</span><span class="n">abeam</span><span class="p">(</span><span class="n">rwy</span><span class="o">.</span><span class="n">numbers</span><span class="p">),</span> <span class="n">p</span><span class="o">.</span><span class="n">key_45</span><span class="p">,</span> <span class="n">p</span><span class="o">.</span><span class="n">entry_45</span><span class="p">,</span> <span class="n">p</span><span class="o">.</span><span class="n">midfield_crosswind</span>  <span class="c1"># derived points</span>
+
+<span class="c1"># Shape</span>
+<span class="n">p</span><span class="o">.</span><span class="n">extend</span><span class="p">(</span><span class="s2">"downwind"</span><span class="p">,</span> <span class="n">nm</span><span class="p">(</span><span class="mi">1</span><span class="p">))</span>                      <span class="c1"># also "upwind", "crosswind"</span>
+<span class="n">p</span><span class="o">.</span><span class="n">extend</span><span class="p">(</span><span class="s2">"downwind"</span><span class="p">,</span> <span class="n">OPEN</span><span class="p">)</span>                       <span class="c1"># until a trigger says otherwise</span>
+<span class="n">p</span><span class="o">.</span><span class="n">width</span><span class="p">(</span><span class="n">TIGHT</span> <span class="o">|</span> <span class="n">WIDE</span> <span class="o">|</span> <span class="n">nm</span><span class="p">(</span><span class="mf">0.75</span><span class="p">))</span>
+<span class="n">p</span><span class="o">.</span><span class="n">square</span><span class="p">(</span><span class="s2">"base"</span><span class="p">)</span>                                 <span class="c1"># no corner-cutting into or out of base</span>
+<span class="n">p</span><span class="o">.</span><span class="n">final_length</span><span class="p">(</span><span class="n">SHORT</span> <span class="o">|</span> <span class="n">nm</span><span class="p">(</span><span class="mf">0.5</span><span class="p">))</span>                  <span class="c1"># "keep your base in close", "short approach"</span>
+<span class="n">p</span><span class="o">.</span><span class="n">base_through</span><span class="p">(</span><span class="n">point</span><span class="p">)</span>                            <span class="c1"># base leg passes over a place</span>
+
+<span class="c1"># Turn timing: each pattern turn has one trigger and optional earliest/latest bounds</span>
+<span class="n">p</span><span class="o">.</span><span class="n">turn</span><span class="p">(</span><span class="s2">"base"</span><span class="p">,</span> <span class="n">when</span><span class="o">=</span><span class="n">crossing</span><span class="p">(</span><span class="n">road</span><span class="p">(</span><span class="s2">"the 118"</span><span class="p">)))</span>
+<span class="n">p</span><span class="o">.</span><span class="n">turn</span><span class="p">(</span><span class="s2">"base"</span><span class="p">,</span> <span class="n">when</span><span class="o">=</span><span class="n">abeam</span><span class="p">(</span><span class="n">place</span><span class="p">(</span><span class="s2">"the VA"</span><span class="p">)))</span>
+<span class="n">p</span><span class="o">.</span><span class="n">turn</span><span class="p">(</span><span class="s2">"base"</span><span class="p">,</span> <span class="n">latest</span><span class="o">=</span><span class="n">crossing</span><span class="p">(</span><span class="n">interchange</span><span class="p">(</span><span class="o">...</span><span class="p">)))</span>       <span class="c1"># "prior to"</span>
+<span class="n">p</span><span class="o">.</span><span class="n">turn</span><span class="p">(</span><span class="s2">"crosswind"</span><span class="p">,</span> <span class="n">earliest</span><span class="o">=</span><span class="n">crossing</span><span class="p">(</span><span class="n">shoreline</span><span class="p">()))</span>     <span class="c1"># "not before"</span>
+<span class="n">p</span><span class="o">.</span><span class="n">turn</span><span class="p">(</span><span class="s2">"base"</span><span class="p">,</span> <span class="n">when</span><span class="o">=</span><span class="n">NOW</span> <span class="o">|</span> <span class="n">ASAP</span> <span class="o">|</span> <span class="n">atc</span><span class="p">(</span><span class="s2">"base"</span><span class="p">))</span>
+</code></pre>
+<p>Defaults come from the AFH, so with no edits <code>p</code> flies the textbook pattern:</p>
+<ul>
+<li><strong>Crosswind turn:</strong> past the departure end, within 300 ft of pattern altitude.</li>
+<li><strong>Downwind:</strong> 0.5–1 nm out.</li>
+<li><strong>Descent:</strong> start abeam the threshold.</li>
+<li><strong>Base turn:</strong> when the threshold is 45° behind the wing.</li>
+</ul>
+<h3 id="23-steps-verbs">2.3 Steps (verbs)</h3>
+<p>A plan is a sequence of steps. Each step has targets on one or more axes, an
+optional <code>.until(cond)</code>, and an optional <code>.then(step)</code>.</p>
+<pre class="hl"><code class="language-python"><span class="c1"># Lateral</span>
+<span class="n">heading</span><span class="p">(</span><span class="mi">270</span><span class="p">)</span> <span class="o">/</span> <span class="n">heading</span><span class="p">(</span><span class="n">PRESENT</span><span class="p">)</span> <span class="o">/</span> <span class="n">heading</span><span class="p">(</span><span class="n">RUNWAY</span><span class="p">)</span>
+<span class="n">turn</span><span class="p">(</span><span class="n">LEFT</span><span class="p">,</span> <span class="n">by</span><span class="o">=</span><span class="mi">20</span><span class="p">)</span> <span class="o">/</span> <span class="n">turn</span><span class="p">(</span><span class="n">RIGHT</span><span class="p">,</span> <span class="n">to</span><span class="o">=</span><span class="mi">170</span><span class="p">)</span>
+<span class="n">direct</span><span class="p">(</span><span class="n">point</span><span class="p">)</span> <span class="o">/</span> <span class="n">toward</span><span class="p">(</span><span class="n">point</span><span class="p">)</span>                    <span class="c1"># toward = heading at it, no overfly required</span>
+<span class="n">track</span><span class="p">(</span><span class="n">course</span><span class="p">)</span> <span class="o">/</span> <span class="n">fly</span><span class="p">(</span><span class="n">leg_or_line</span><span class="p">)</span>
+<span class="n">follow</span><span class="p">(</span><span class="n">line</span><span class="p">,</span> <span class="n">direction</span><span class="o">=</span><span class="n">EAST</span><span class="p">,</span> <span class="n">keep</span><span class="o">=</span><span class="n">LEFT</span><span class="p">)</span>          <span class="c1"># "keep the 405 off your left wing" (where the line is, body-relative)</span>
+<span class="n">follow</span><span class="p">(</span><span class="n">line</span><span class="p">,</span> <span class="n">direction</span><span class="o">=</span><span class="n">EAST</span><span class="p">,</span> <span class="n">side</span><span class="o">=</span><span class="n">NORTH</span><span class="p">)</span>         <span class="c1"># "stay north of the freeway, follow it" (where the aircraft is)</span>
+<span class="n">overfly</span><span class="p">(</span><span class="n">point</span><span class="p">)</span>
+<span class="n">orbit</span><span class="p">(</span><span class="n">LEFT</span><span class="p">,</span> <span class="mi">360</span><span class="p">,</span> <span class="n">size</span><span class="o">=</span><span class="n">NORMAL</span> <span class="o">|</span> <span class="n">WIDE</span><span class="p">)</span>
+<span class="n">circle</span><span class="p">(</span><span class="n">point</span><span class="p">,</span> <span class="n">times</span><span class="o">=</span><span class="mi">2</span><span class="p">)</span>
+<span class="n">hold_over</span><span class="p">(</span><span class="n">point</span><span class="p">)</span>
+<span class="n">s_turn</span><span class="p">(</span><span class="n">RIGHT</span><span class="p">)</span> <span class="o">/</span> <span class="n">s_turns</span><span class="p">(</span><span class="n">side</span><span class="o">=</span><span class="n">WEST</span><span class="p">)</span>
+
+<span class="c1"># Vertical / speed / configuration</span>
+<span class="n">climb</span><span class="p">(</span><span class="n">to</span><span class="o">=</span><span class="n">ft</span><span class="p">(</span><span class="mi">3500</span><span class="p">),</span> <span class="n">at</span><span class="o">=</span><span class="n">Vy</span><span class="p">,</span> <span class="n">rate</span><span class="o">=</span><span class="n">NORMAL</span> <span class="o">|</span> <span class="n">EXPEDITE</span><span class="p">)</span>
+<span class="n">descend</span><span class="p">(</span><span class="n">to</span><span class="o">=...</span><span class="p">,</span> <span class="n">fpm</span><span class="o">=</span><span class="mi">500</span><span class="p">)</span>
+<span class="n">maintain</span><span class="p">(</span><span class="n">ft</span><span class="p">(</span><span class="mi">2000</span><span class="p">))</span>
+<span class="n">glidepath</span><span class="p">(</span><span class="n">deg</span><span class="p">(</span><span class="mi">3</span><span class="p">),</span> <span class="n">aim</span><span class="o">=</span><span class="n">rwy</span><span class="o">.</span><span class="n">aim_point</span><span class="p">)</span>
+<span class="n">speed</span><span class="p">(</span><span class="n">Vy</span> <span class="o">|</span> <span class="n">kt</span><span class="p">(</span><span class="mi">90</span><span class="p">)</span> <span class="o">|</span> <span class="n">at_most</span><span class="p">(</span><span class="n">kt</span><span class="p">(</span><span class="mi">170</span><span class="p">))</span> <span class="o">|</span> <span class="n">SLOWEST_PRACTICAL</span><span class="p">)</span>
+<span class="n">flaps</span><span class="p">(</span><span class="mi">10</span><span class="p">)</span> <span class="o">/</span> <span class="n">power</span><span class="p">(</span><span class="n">rpm</span><span class="o">=</span><span class="mi">1500</span><span class="p">)</span> <span class="o">/</span> <span class="n">power</span><span class="p">(</span><span class="n">IDLE</span><span class="p">)</span> <span class="o">/</span> <span class="n">slip</span><span class="p">(</span><span class="n">FORWARD</span><span class="p">)</span>
+
+<span class="c1"># Standard library (written in the primitives above; see section 4)</span>
+<span class="n">takeoff</span><span class="p">(</span><span class="n">rwy</span><span class="p">,</span> <span class="n">kind</span><span class="o">=</span><span class="n">NORMAL</span> <span class="o">|</span> <span class="n">SHORT</span> <span class="o">|</span> <span class="n">SOFT</span><span class="p">,</span> <span class="n">immediate</span><span class="o">=</span><span class="kc">False</span><span class="p">)</span>
+<span class="n">depart</span><span class="p">(</span><span class="n">p</span><span class="p">,</span> <span class="n">via</span><span class="o">=</span><span class="n">STRAIGHT_OUT</span> <span class="o">|</span> <span class="n">FORTY_FIVE</span> <span class="o">|</span> <span class="n">CROSSWIND</span> <span class="o">|</span> <span class="n">DOWNWIND</span><span class="p">)</span>
+<span class="n">circuit</span><span class="p">(</span><span class="n">p</span><span class="p">)</span>                                       <span class="c1"># one full pattern</span>
+<span class="n">enter</span><span class="p">(</span><span class="n">p</span><span class="o">.</span><span class="n">downwind</span><span class="p">,</span> <span class="n">via</span><span class="o">=</span><span class="n">FORTY_FIVE</span> <span class="o">|</span> <span class="n">MIDFIELD_CROSSWIND</span> <span class="o">|</span> <span class="n">OVERHEAD</span><span class="p">)</span>
+<span class="n">join</span><span class="p">(</span><span class="n">p</span><span class="p">)</span>                                          <span class="c1"># from present position, planner picks the geometry</span>
+<span class="n">straight_in</span><span class="p">(</span><span class="n">rwy</span><span class="p">)</span>
+<span class="n">land</span><span class="p">(</span><span class="n">rwy</span><span class="p">,</span> <span class="n">kind</span><span class="o">=</span><span class="n">FULL_STOP</span> <span class="o">|</span> <span class="n">TOUCH_AND_GO</span> <span class="o">|</span> <span class="n">STOP_AND_GO</span> <span class="o">|</span> <span class="n">LOW_APPROACH</span> <span class="o">|</span> <span class="n">OPTION</span><span class="p">)</span>
+<span class="n">go_around</span><span class="p">()</span>
+<span class="n">rollout</span><span class="p">(</span><span class="n">exit</span><span class="o">=</span><span class="n">rwy</span><span class="o">.</span><span class="n">exit</span><span class="p">(</span><span class="s2">"H"</span><span class="p">)</span> <span class="o">|</span> <span class="n">NEXT</span> <span class="o">|</span> <span class="n">END</span><span class="p">,</span> <span class="n">turn</span><span class="o">=</span><span class="n">LEFT</span><span class="p">)</span>
+<span class="n">taxi</span><span class="p">(</span><span class="n">via</span><span class="o">=</span><span class="p">[</span><span class="s2">"B"</span><span class="p">,</span> <span class="s2">"C"</span><span class="p">],</span> <span class="n">hold_short</span><span class="o">=</span><span class="n">apt</span><span class="o">.</span><span class="n">runway</span><span class="p">(</span><span class="s2">"16L"</span><span class="p">),</span> <span class="n">urgency</span><span class="o">=</span><span class="n">NORMAL</span> <span class="o">|</span> <span class="n">EXPEDITE</span><span class="p">)</span>
+<span class="n">line_up</span><span class="p">(</span><span class="n">rwy</span><span class="p">,</span> <span class="n">at</span><span class="o">=</span><span class="n">rwy</span><span class="o">.</span><span class="n">intersection</span><span class="p">(</span><span class="s2">"D"</span><span class="p">))</span> <span class="o">/</span> <span class="n">hold_position</span><span class="p">()</span>
+</code></pre>
+<h3 id="24-conditions-when">2.4 Conditions (when)</h3>
+<pre class="hl"><code class="language-python"><span class="c1"># Geometric</span>
+<span class="n">at</span><span class="p">(</span><span class="n">point</span><span class="p">)</span>            <span class="c1"># overhead if on the track, else closest approach</span>
+<span class="n">abeam</span><span class="p">(</span><span class="n">point</span><span class="p">)</span>
+<span class="n">crossing</span><span class="p">(</span><span class="n">line</span><span class="p">)</span>
+<span class="n">past</span><span class="p">(</span><span class="n">point_or_line</span><span class="p">)</span>
+<span class="n">north_of</span><span class="p">(</span><span class="n">x</span><span class="p">)</span> <span class="o">/</span> <span class="n">side_of</span><span class="p">(</span><span class="n">line</span><span class="p">,</span> <span class="n">WEST</span><span class="p">)</span>
+<span class="n">over</span><span class="p">(</span><span class="n">area_or_line</span><span class="p">)</span>
+<span class="n">inside</span><span class="p">(</span><span class="n">area</span><span class="p">)</span> <span class="o">/</span> <span class="n">outside</span><span class="p">(</span><span class="n">area</span><span class="p">)</span>
+<span class="n">within</span><span class="p">(</span><span class="n">nm</span><span class="p">(</span><span class="mi">2</span><span class="p">),</span> <span class="n">point</span><span class="p">)</span> <span class="o">/</span> <span class="n">on_final</span><span class="p">(</span><span class="n">nm</span><span class="p">(</span><span class="mi">2</span><span class="p">))</span>
+<span class="n">distance_flown</span><span class="p">(</span><span class="n">nm</span><span class="p">(</span><span class="mi">10</span><span class="p">))</span>
+<span class="n">angle_behind_wing</span><span class="p">(</span><span class="n">point</span><span class="p">)</span> <span class="o">&gt;=</span> <span class="n">deg</span><span class="p">(</span><span class="mi">45</span><span class="p">)</span>
+
+<span class="c1"># Aircraft state</span>
+<span class="n">reaching</span><span class="p">(</span><span class="n">alt</span><span class="p">),</span> <span class="n">positive_rate</span><span class="p">(),</span> <span class="n">at_speed</span><span class="p">(</span><span class="n">Vy</span><span class="p">)</span>
+<span class="n">agl_below</span><span class="p">(</span><span class="mi">500</span><span class="p">),</span> <span class="n">established</span><span class="p">(</span><span class="n">leg</span><span class="p">),</span> <span class="n">turning</span><span class="p">(</span><span class="n">p</span><span class="o">.</span><span class="n">base</span><span class="p">),</span> <span class="n">stabilized</span><span class="p">()</span>
+
+<span class="c1"># Traffic</span>
+<span class="n">in_sight</span><span class="p">(</span><span class="n">t</span><span class="p">),</span> <span class="n">abeam</span><span class="p">(</span><span class="n">t</span><span class="p">),</span> <span class="n">passed</span><span class="p">(</span><span class="n">t</span><span class="p">),</span> <span class="n">behind</span><span class="p">(</span><span class="n">t</span><span class="p">,</span> <span class="n">nm</span><span class="p">(</span><span class="mi">1</span><span class="p">))</span>
+
+<span class="c1"># Radio / ATC</span>
+<span class="n">atc</span><span class="p">(</span><span class="s2">"base"</span><span class="p">)</span>          <span class="c1"># gate opened by a controller call</span>
+<span class="n">advised</span><span class="p">()</span>            <span class="c1"># ATC lifts an instruction ("until advised")</span>
+
+<span class="c1"># Constants and combinators</span>
+<span class="n">NOW</span><span class="p">,</span> <span class="n">ASAP</span>
+<span class="n">a</span> <span class="o">&amp;</span> <span class="n">b</span><span class="p">,</span> <span class="n">a</span> <span class="o">|</span> <span class="n">b</span><span class="p">,</span> <span class="o">~</span><span class="n">a</span>
+</code></pre>
+<h3 id="25-constraints-gates-speech-acts">2.5 Constraints, gates, speech acts</h3>
+<pre class="hl"><code class="language-python"><span class="n">remain</span><span class="p">(</span><span class="n">at_or_below</span><span class="p">(</span><span class="n">ft</span><span class="p">(</span><span class="mi">1800</span><span class="p">)))</span><span class="o">.</span><span class="n">until</span><span class="p">(</span><span class="n">north_of</span><span class="p">(</span><span class="n">apt</span><span class="p">))</span>
+<span class="n">remain</span><span class="p">(</span><span class="n">side_of</span><span class="p">(</span><span class="n">road</span><span class="p">(</span><span class="s2">"I-405"</span><span class="p">),</span> <span class="n">EAST</span><span class="p">))</span><span class="o">.</span><span class="n">until</span><span class="p">(</span><span class="n">at</span><span class="p">(</span><span class="n">interchange</span><span class="p">(</span><span class="s2">"I-405"</span><span class="p">,</span> <span class="s2">"US-101"</span><span class="p">)))</span>
+<span class="n">remain</span><span class="p">(</span><span class="n">over</span><span class="p">(</span><span class="n">land</span><span class="p">()))</span>
+<span class="n">remain</span><span class="p">(</span><span class="n">at_or_below</span><span class="p">(</span><span class="mi">2500</span><span class="p">)</span> <span class="o">|</span> <span class="n">west_of</span><span class="p">(</span><span class="n">place</span><span class="p">(</span><span class="s2">"Topanga"</span><span class="p">)))</span>   <span class="c1"># disjunction, from E8</span>
+
+<span class="n">gate</span><span class="p">(</span><span class="n">agl</span><span class="p">(</span><span class="mi">500</span><span class="p">),</span> <span class="n">require</span><span class="o">=</span><span class="n">stabilized</span><span class="p">(),</span> <span class="n">otherwise</span><span class="o">=</span><span class="n">go_around</span><span class="p">())</span>   <span class="c1"># AFH stabilized-approach rule</span>
+
+<span class="n">permit</span><span class="p">(</span><span class="n">s_turns</span><span class="p">(</span><span class="n">side</span><span class="o">=</span><span class="n">WEST</span><span class="p">))</span>          <span class="c1"># granted option; the agent may use it</span>
+<span class="n">prefer</span><span class="p">(</span><span class="n">over</span><span class="p">(</span><span class="n">road</span><span class="p">(</span><span class="s2">"US-101"</span><span class="p">)))</span>        <span class="c1"># "if able": a soft constraint</span>
+<span class="n">can</span><span class="p">(</span><span class="n">p</span><span class="o">.</span><span class="n">turn</span><span class="p">(</span><span class="s2">"base"</span><span class="p">,</span> <span class="n">latest</span><span class="o">=</span><span class="n">crossing</span><span class="p">(</span><span class="n">road</span><span class="p">(</span><span class="s2">"the freeway"</span><span class="p">))))</span>  <span class="c1"># feasibility query → "able"/"unable"</span>
+
+<span class="n">report</span><span class="p">(</span><span class="s2">"3 miles"</span><span class="p">,</span> <span class="n">when</span><span class="o">=</span><span class="n">within</span><span class="p">(</span><span class="n">nm</span><span class="p">(</span><span class="mi">3</span><span class="p">),</span> <span class="n">rwy</span><span class="o">.</span><span class="n">threshold</span><span class="p">))</span>       <span class="c1"># wakes the agent to transmit</span>
+<span class="n">contact</span><span class="p">(</span><span class="s2">"SoCal"</span><span class="p">,</span> <span class="n">when</span><span class="o">=</span><span class="n">within</span><span class="p">(</span><span class="n">nm</span><span class="p">(</span><span class="mi">2</span><span class="p">),</span> <span class="n">airspace</span><span class="p">(</span><span class="s2">"KBUR"</span><span class="p">,</span> <span class="s2">"C"</span><span class="p">)))</span>
+</code></pre>
+<p>Every target carries a default tolerance from the ACS (altitude ±100 ft,
+heading ±10°, airspeed ±10 kt, approach speed +10/−5 kt). <code>established()</code>,
+violation events, and sim-preview pass/fail all use them.</p>
+<h3 id="26-working-on-the-live-plan">2.6 Working on the live plan</h3>
+<pre class="hl"><code class="language-python"><span class="n">plan</span><span class="o">.</span><span class="n">active</span>           <span class="c1"># the step in progress</span>
+<span class="n">plan</span><span class="o">.</span><span class="n">pattern</span>          <span class="c1"># handle to the active pattern, if any</span>
+<span class="n">plan</span><span class="o">.</span><span class="n">amend</span><span class="p">(</span><span class="o">...</span><span class="p">)</span>       <span class="c1"># replace part of the plan; previewed before it's committed</span>
+<span class="n">plan</span><span class="o">.</span><span class="n">replace</span><span class="p">(</span><span class="o">...</span><span class="p">)</span>     <span class="c1"># "amend instructions" / new clearance</span>
+<span class="n">plan</span><span class="o">.</span><span class="n">open_items</span><span class="p">()</span>     <span class="c1"># open-ended items awaiting a follow-up call</span>
+</code></pre>
+<hr />
+<h2 id="3-worked-examples">3. Worked examples</h2>
+<p><code>p</code> is the active pattern, <code>rwy</code> is its runway, and <code>t</code> is the traffic named in
+the instruction. “Gap” marks something the vocabulary handles poorly or
+doesn’t handle.</p>
+<h3 id="pattern-shape">Pattern shape</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>ID</th>
+<th>Instruction</th>
+<th>Translation</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td class="id"><a href="#item-A1">A1</a></td>
+<td>Extend downwind, I’ll call your base.</td>
+<td><code>p.extend(&quot;downwind&quot;, OPEN); p.turn(&quot;base&quot;, when=atc(&quot;base&quot;))</code></td>
+</tr>
+<tr>
+<td class="id"><a href="#item-A2">A2</a></td>
+<td>Extend downwind one mile.</td>
+<td><code>p.extend(&quot;downwind&quot;, nm(1))</code></td>
+</tr>
+<tr>
+<td class="id"><a href="#item-A3">A3</a></td>
+<td>Extend about another half mile on the upwind before you turn crosswind.</td>
+<td><code>p.extend(&quot;upwind&quot;, nm(0.5))</code></td>
+</tr>
+<tr>
+<td class="id"><a href="#item-A4">A4</a></td>
+<td>Extend your upwind, I’ll call your crosswind.</td>
+<td><code>p.extend(&quot;upwind&quot;, OPEN); p.turn(&quot;crosswind&quot;, when=atc(&quot;crosswind&quot;))</code></td>
+</tr>
+<tr>
+<td class="id"><a href="#item-A5">A5</a></td>
+<td>Extend downwind one more mile and square your left base turn and final.</td>
+<td><code>p.extend(&quot;downwind&quot;, nm(1)); p.square(&quot;base&quot;)</code></td>
+</tr>
+<tr>
+<td class="id"><a href="#item-A6">A6</a></td>
+<td>Keep your base in close.</td>
+<td><code>p.final_length(SHORT)</code></td>
+</tr>
+<tr>
+<td class="id"><a href="#item-A7">A7</a></td>
+<td>Keep it wide on the downwind (no-radio straight-in traffic).</td>
+<td><code>p.width(WIDE)</code></td>
+</tr>
+<tr>
+<td class="id"><a href="#item-A8">A8</a></td>
+<td>Keep your base square.</td>
+<td><code>p.square(&quot;base&quot;)</code></td>
+</tr>
+<tr>
+<td class="id"><a href="#item-A9">A9</a></td>
+<td>Make a tight right pattern.</td>
+<td><code>p = pattern(rwy, RIGHT).width(TIGHT)</code></td>
+</tr>
+</tbody>
+</table></div>
+<p>Gaps:</p>
+<ul>
+<li><strong>No limit on open extensions.</strong> <code>OPEN</code> extensions need a cap, or a point
+at which the agent asks. Otherwise a missed “I’ll call your base” flies the
+aircraft to the next county.</li>
+<li><strong>TIGHT / WIDE / SHORT / square are undefined.</strong> They need numbers per
+aircraft.</li>
+<li><strong>The executor cuts corners today.</strong> The L1 follower curves into base and
+final, so “square” means a constrained turn radius, not just geometry.</li>
+</ul>
+<h3 id="turn-timing">Turn timing</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>ID</th>
+<th>Instruction</th>
+<th>Translation</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td class="id"><a href="#item-B1">B1</a></td>
+<td>At the 118, turn base.</td>
+<td><code>p.turn(&quot;base&quot;, when=crossing(road(&quot;the 118&quot;)))</code></td>
+</tr>
+<tr>
+<td class="id"><a href="#item-B2">B2</a></td>
+<td>Turn base at the Veterans Hospital.</td>
+<td><code>p.turn(&quot;base&quot;, when=at(place(&quot;VA hospital&quot;, near=apt)))</code>, where <code>at</code> is abeam because the place is off the track</td>
+</tr>
+<tr>
+<td class="id"><a href="#item-B3">B3</a></td>
+<td>Turn base abeam the VA hospital.</td>
+<td><code>p.turn(&quot;base&quot;, when=abeam(place(&quot;the VA&quot;)))</code></td>
+</tr>
+<tr>
+<td class="id"><a href="#item-B4">B4</a></td>
+<td>Are you able to turn base at or before the freeway?</td>
+<td><code>can(p.turn(&quot;base&quot;, latest=crossing(road(&quot;the freeway&quot;))))</code>, then apply it if able</td>
+</tr>
+<tr>
+<td class="id"><a href="#item-B5">B5</a></td>
+<td>Turn base prior to the interchange.</td>
+<td><code>p.turn(&quot;base&quot;, latest=crossing(interchange(...)))</code></td>
+</tr>
+<tr>
+<td class="id"><a href="#item-B6">B6</a></td>
+<td>Cross the 10 freeway, then turn crosswind.</td>
+<td><code>p.turn(&quot;crosswind&quot;, when=crossing(road(&quot;I-10&quot;)))</code></td>
+</tr>
+<tr>
+<td class="id"><a href="#item-B7">B7</a></td>
+<td>You can turn crosswind at the shoreline.</td>
+<td><code>permit(p.turn(&quot;crosswind&quot;, when=crossing(shoreline())))</code></td>
+</tr>
+<tr>
+<td class="id"><a href="#item-B8">B8</a></td>
+<td>Take it out to the shoreline before you turn crosswind.</td>
+<td><code>p.turn(&quot;crosswind&quot;, earliest=crossing(shoreline()))</code></td>
+</tr>
+<tr>
+<td class="id"><a href="#item-B9">B9</a></td>
+<td>Turn base now.</td>
+<td><code>p.turn(&quot;base&quot;, when=NOW)</code></td>
+</tr>
+<tr>
+<td class="id"><a href="#item-B10">B10</a></td>
+<td>Turn base as soon as you’re able.</td>
+<td><code>p.turn(&quot;base&quot;, when=ASAP)</code></td>
+</tr>
+<tr>
+<td class="id"><a href="#item-B11">B11</a></td>
+<td>Don’t turn base now; you’re following the Cherokee across from you on base.</td>
+<td><code>t = traffic(&quot;Cherokee on base, opposite side&quot;); p.follow(t)</code>; the base trigger becomes <code>passed(t)</code></td>
+</tr>
+<tr>
+<td class="id"><a href="#item-B12">B12</a></td>
+<td>Over the VA, turn base, number 2, follow the Cherokee turning base.</td>
+<td><code>p.turn(&quot;base&quot;, when=at(place(&quot;the VA&quot;))); p.follow(traffic(&quot;Cherokee turning base&quot;))</code></td>
+</tr>
+</tbody>
+</table></div>
+<p>Gaps:</p>
+<ul>
+<li><strong>“At” is ambiguous</strong> for points off the flight path. The resolver should
+decide between overhead and abeam, and show which it chose.</li>
+<li><strong>“The freeway” and “the interchange” have no name.</strong> Resolving them needs
+geometric context: the freeway the base leg would cross.</li>
+<li><strong>What <code>follow(t)</code> does to the base turn needs defining.</strong> A standard
+technique is to turn base when the traffic being followed is abeam or
+behind the wing.</li>
+</ul>
+<h3 id="entries-and-arrivals">Entries and arrivals</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>ID</th>
+<th>Instruction</th>
+<th>Translation</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td class="id"><a href="#item-C1">C1</a></td>
+<td>Enter left base, runway 34L.</td>
+<td><code>enter(pattern(apt.runway(&quot;34L&quot;), LEFT).base)</code></td>
+</tr>
+<tr>
+<td class="id"><a href="#item-C2">C2</a></td>
+<td>Fly over the field, then enter right downwind, runway 21.</td>
+<td><code>overfly(apt).then(enter(p.downwind))</code></td>
+</tr>
+<tr>
+<td class="id"><a href="#item-C3">C3</a></td>
+<td>Cross midfield, circle east for left traffic, runway 12.</td>
+<td><code>overfly(rwy.midfield).then(join(p, from_side=EAST))</code></td>
+</tr>
+<tr>
+<td class="id"><a href="#item-C4">C4</a></td>
+<td>Turn towards Chatsworth Reservoir, then enter right base from there.</td>
+<td><code>toward(place(&quot;Chatsworth Reservoir&quot;)).then(enter(p.base))</code></td>
+</tr>
+<tr>
+<td class="id"><a href="#item-C5">C5</a></td>
+<td>Remain outside Burbank’s Class C; enter left base for 12 over the 210/118 interchange.</td>
+<td><code>remain(outside(airspace(&quot;KBUR&quot;,&quot;C&quot;))); enter(p.base_through(interchange(&quot;I-210&quot;,&quot;CA-118&quot;)).base)</code></td>
+</tr>
+<tr>
+<td class="id"><a href="#item-C6">C6</a></td>
+<td>Report over the 210/118 interchange for a left base 12, number 2 following a Mooney on a 2 mile final.</td>
+<td><code>ix = interchange(&quot;I-210&quot;, &quot;CA-118&quot;); report(&quot;over the interchange&quot;, when=at(ix)); enter(p.base); p.follow(traffic(&quot;Mooney, 2 mile final&quot;))</code></td>
+</tr>
+<tr>
+<td class="id"><a href="#item-C7">C7</a></td>
+<td>Turn 20° left, remain north of the 118, then enter right base 16L.</td>
+<td><code>turn(LEFT, by=20); remain(north_of(road(&quot;the 118&quot;))); then enter(p.base)</code></td>
+</tr>
+<tr>
+<td class="id"><a href="#item-C8">C8</a></td>
+<td>Turn 15° left, stay north of the freeway, follow it eastbound, then make right traffic 34L.</td>
+<td><code>turn(LEFT, by=15).then(follow(road(&quot;the freeway&quot;), direction=EAST, side=NORTH)).then(join(p))</code></td>
+</tr>
+<tr>
+<td class="id"><a href="#item-C9">C9</a></td>
+<td>Fly present heading to the 101, then make right traffic.</td>
+<td><code>heading(PRESENT).until(crossing(road(&quot;US-101&quot;))).then(join(p))</code></td>
+</tr>
+<tr>
+<td class="id"><a href="#item-C10">C10</a></td>
+<td>Remain on the east side of the 405 until the interchange, then you can make straight in 34R.</td>
+<td><code>ix = interchange(&quot;I-405&quot;, &quot;US-101&quot;); remain(side_of(road(&quot;I-405&quot;), EAST)).until(at(ix)); permit(straight_in(apt.runway(&quot;34R&quot;)))</code></td>
+</tr>
+<tr>
+<td class="id"><a href="#item-C11">C11</a></td>
+<td>Make straight in runway 12, report 3 miles.</td>
+<td><code>straight_in(rwy); report(&quot;3 miles&quot;, when=within(nm(3), rwy.threshold))</code></td>
+</tr>
+<tr>
+<td class="id"><a href="#item-C12">C12</a></td>
+<td>Maintain at or above 4000, overfly the field and make right traffic 21.</td>
+<td><code>remain(at_or_above(4000)).until(???); overfly(apt).then(join(p))</code></td>
+</tr>
+<tr>
+<td class="id"><a href="#item-C13">C13</a></td>
+<td>Fly direct to midfield, cross midfield, enter right downwind 34R.</td>
+<td><code>direct(rwy.midfield).then(overfly(rwy.midfield)).then(enter(p.downwind))</code></td>
+</tr>
+<tr>
+<td class="id"><a href="#item-C14">C14</a></td>
+<td>Turn right, fly direct to the 405/101 interchange.</td>
+<td><code>direct(interchange(&quot;I-405&quot;, &quot;US-101&quot;))</code> (turn direction <code>RIGHT</code> kept as a hint)</td>
+</tr>
+<tr>
+<td class="id"><a href="#item-C15">C15</a></td>
+<td>Amend instructions: turn 20° left, overfly Encino Reservoir to make right traffic.</td>
+<td><code>plan.replace(turn(LEFT, by=20).then(overfly(place(&quot;Encino Reservoir&quot;))).then(join(p)))</code></td>
+</tr>
+<tr>
+<td class="id"><a href="#item-C16">C16</a></td>
+<td>Once you cross midfield, make a right turn around the tower, cleared to land.</td>
+<td><code>when(past(rwy.midfield), circle(apt.tower, RIGHT).until(aligned(rwy)))</code></td>
+</tr>
+<tr>
+<td class="id"><a href="#item-C17">C17</a></td>
+<td>Follow the 5, enter right downwind 12.</td>
+<td><code>follow(road(&quot;I-5&quot;)).then(enter(p.downwind))</code></td>
+</tr>
+<tr>
+<td class="id"><a href="#item-C18">C18</a></td>
+<td>Follow the 405, keep it off your left wing, make left traffic 16L.</td>
+<td><code>follow(road(&quot;I-405&quot;), keep=LEFT).then(join(p))</code></td>
+</tr>
+<tr>
+<td class="id"><a href="#item-C19">C19</a></td>
+<td>Start a left turn, keep the 710 off your right-hand side.</td>
+<td><code>turn(LEFT).then(follow(road(&quot;I-710&quot;), keep=RIGHT))</code></td>
+</tr>
+</tbody>
+</table></div>
+<p>Gaps:</p>
+<ul>
+<li><strong>Unstated end conditions.</strong> In C12, when does “at or above 4000” end? It
+presumably ends at the field. The agent has to infer this, or the
+constraint stays <code>until(advised())</code> and blocks the pattern descent. The
+plan validator should flag constraints that make later steps impossible.</li>
+<li><strong><code>then</code> without a trigger.</strong> In C8 and C9 the pilot chooses when to turn
+off the freeway and join. <code>join()</code> has to plan that geometry.</li>
+<li><strong>Odd geometry.</strong> C16’s “turn around the tower” is a curved arrival path
+around a point. <code>circle(...).until(aligned(...))</code> covers it, awkwardly.</li>
+<li><strong>Turn direction as a hint.</strong> In C14 the turn direction is a requirement
+layered on <code>direct()</code>.</li>
+</ul>
+<h3 id="lateral-constraints">Lateral constraints</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>ID</th>
+<th>Instruction</th>
+<th>Translation</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td class="id"><a href="#item-D1">D1</a></td>
+<td>Remain on the west side of the 405.</td>
+<td><code>remain(side_of(road(&quot;I-405&quot;), WEST))</code></td>
+</tr>
+<tr>
+<td class="id"><a href="#item-D2">D2</a></td>
+<td>Remain south of the 101 for traffic.</td>
+<td><code>remain(south_of(road(&quot;US-101&quot;)))</code></td>
+</tr>
+<tr>
+<td class="id"><a href="#item-D3">D3</a></td>
+<td>Remain over the 101.</td>
+<td><code>remain(over(road(&quot;US-101&quot;)))</code></td>
+</tr>
+<tr>
+<td class="id"><a href="#item-D4">D4</a></td>
+<td>Remain north of the new Getty, outside the Class D for now.</td>
+<td><code>remain(north_of(place(&quot;the new Getty&quot;))).until(advised()); remain(outside(apt.class_d)).until(advised())</code></td>
+</tr>
+<tr>
+<td class="id"><a href="#item-D5">D5</a></td>
+<td>Remain over land for that north downwind entry.</td>
+<td><code>remain(over(land()))</code></td>
+</tr>
+<tr>
+<td class="id"><a href="#item-D6">D6</a></td>
+<td>Remain north of the centerline.</td>
+<td><code>remain(side_of(rwy.extended_centerline, NORTH))</code></td>
+</tr>
+<tr>
+<td class="id"><a href="#item-D7">D7</a></td>
+<td>I want you on the other side of the freeway, the north side, so turn 20° left.</td>
+<td><code>remain(north_of(road(&quot;the freeway&quot;))); turn(LEFT, by=20)</code> (the intent is the constraint; the turn is how to meet it)</td>
+</tr>
+<tr>
+<td class="id"><a href="#item-D8">D8</a></td>
+<td>Remain east of the 15 for the jump zone.</td>
+<td><code>remain(east_of(road(&quot;I-15&quot;)))</code></td>
+</tr>
+<tr>
+<td class="id"><a href="#item-D9">D9</a></td>
+<td>If able, keep it over the 101 for eastbound traffic.</td>
+<td><code>prefer(over(road(&quot;US-101&quot;)))</code></td>
+</tr>
+<tr>
+<td class="id"><a href="#item-D10">D10</a></td>
+<td>Remain over or east of the 405 until south of Encino Reservoir.</td>
+<td><code>remain(over(road(&quot;I-405&quot;)) | east_of(road(&quot;I-405&quot;))).until(south_of(place(&quot;Encino Reservoir&quot;)))</code></td>
+</tr>
+<tr>
+<td class="id"><a href="#item-D11">D11</a></td>
+<td>Remain on the west side of the 405 when you turn crosswind, then proceed northbound.</td>
+<td><code>p.crosswind.remain(west_of(road(&quot;I-405&quot;))); then track(NORTH)</code></td>
+</tr>
+</tbody>
+</table></div>
+<p>Gaps:</p>
+<ul>
+<li><strong>Side-of-line on a curving road.</strong> “North of the 101” for a freeway that
+bends has to be defined by signed distance to the local polyline, not a
+half-plane.</li>
+<li><strong>“Over” needs a width tolerance.</strong> How far from the road still counts as
+over it?</li>
+<li><strong>Constraints scoped to one leg</strong>, as in D11, need a home: <code>p.crosswind.remain(...)</code>.</li>
+</ul>
+<h3 id="vertical-constraints">Vertical constraints</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>ID</th>
+<th>Instruction</th>
+<th>Translation</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td class="id"><a href="#item-E1">E1</a></td>
+<td>Left downwind departure approved, remain at or below 1800 until north of the field.</td>
+<td><code>depart(p, via=DOWNWIND); remain(at_or_below(1800)).until(north_of(apt))</code></td>
+</tr>
+<tr>
+<td class="id"><a href="#item-E2">E2</a></td>
+<td>Left crosswind departure, remain at or below 2000 until south of the 101.</td>
+<td><code>depart(p, via=CROSSWIND); remain(at_or_below(2000)).until(south_of(road(&quot;US-101&quot;)))</code></td>
+</tr>
+<tr>
+<td class="id"><a href="#item-E3">E3</a></td>
+<td>Remain at or above 3500 until established on base.</td>
+<td><code>remain(at_or_above(3500)).until(established(p.base))</code></td>
+</tr>
+<tr>
+<td class="id"><a href="#item-E4">E4</a></td>
+<td>Maintain pattern altitude 2000 until you turn base.</td>
+<td><code>remain(at_or_above(2000)).until(turning(p.base))</code></td>
+</tr>
+<tr>
+<td class="id"><a href="#item-E5">E5</a></td>
+<td>Maintain pattern altitude 1800 until you turn final (helicopter below).</td>
+<td><code>remain(at_or_above(1800)).until(turning(p.final))</code></td>
+</tr>
+<tr>
+<td class="id"><a href="#item-E6">E6</a></td>
+<td>Remain at or below 2000 until you clear the Class D; after that, frequency change approved.</td>
+<td><code>remain(at_or_below(2000)).until(outside(apt.class_d)); permit(freq_change, when=outside(apt.class_d))</code></td>
+</tr>
+<tr>
+<td class="id"><a href="#item-E7">E7</a></td>
+<td>Maintain above 3000 for the next 10 miles until east of the Santa Monica final.</td>
+<td><code>remain(above(3000)).until(east_of(airport(&quot;KSMO&quot;).runway(&quot;21&quot;).extended_centerline) | distance_flown(nm(10)))</code></td>
+</tr>
+<tr>
+<td class="id"><a href="#item-E8">E8</a></td>
+<td>Remain below 2500 or west of Topanga, then resume navigation.</td>
+<td><code>remain(below(2500) | west_of(place(&quot;Topanga&quot;)))</code></td>
+</tr>
+<tr>
+<td class="id"><a href="#item-E9">E9</a></td>
+<td>As soon as you get south of the 101 you can make that left turn; remain at or below 2000.</td>
+<td><code>permit(turn(LEFT), when=south_of(road(&quot;US-101&quot;))); remain(at_or_below(2000))</code></td>
+</tr>
+<tr>
+<td class="id"><a href="#item-E10">E10</a></td>
+<td>Right turn at the shoreline approved, maintain at or below 1500 until advised.</td>
+<td><code>permit(turn(RIGHT), when=crossing(shoreline())); remain(at_or_below(1500)).until(advised())</code></td>
+</tr>
+</tbody>
+</table></div>
+<p>Gaps:</p>
+<ul>
+<li><strong>Constraints that defeat the defaults.</strong> E4 and E5 override the AFH
+descent abeam the numbers. E5 leaves about 1000 ft to lose on a short
+final. That needs <code>slip(FORWARD)</code> or full flaps, or an “unable”. This is
+the clearest case for previewing amendments in the simple sim before
+accepting them.</li>
+<li><strong>“North of the field”</strong> needs the airport boundary polygon, not just the
+airport reference point.</li>
+</ul>
+<h3 id="departures">Departures</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>ID</th>
+<th>Instruction</th>
+<th>Translation</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td class="id"><a href="#item-F1">F1</a></td>
+<td>Right turn at the shoreline approved, runway 21, cleared for takeoff.</td>
+<td><code>takeoff(rwy).then(heading(RUNWAY).until(crossing(shoreline()))).then(turn(RIGHT, to=...))</code></td>
+</tr>
+<tr>
+<td class="id"><a href="#item-F2">F2</a></td>
+<td>Fly straight out and clear the ridge line, then turn left towards the Griffith Park Observatory.</td>
+<td><code>takeoff(rwy).then(heading(RUNWAY).until(past(ridge(&quot;the ridge line&quot;)))).then(toward(place(&quot;Griffith Observatory&quot;)))</code></td>
+</tr>
+<tr>
+<td class="id"><a href="#item-F3">F3</a></td>
+<td>Fly straight out, no turns until the 118; contact SoCal prior to entering Class C.</td>
+<td><code>heading(RUNWAY).until(crossing(road(&quot;the 118&quot;))); contact(&quot;SoCal&quot;, when=within(nm(2), airspace(&quot;KBUR&quot;,&quot;C&quot;)))</code></td>
+</tr>
+<tr>
+<td class="id"><a href="#item-F4">F4</a></td>
+<td>Fly straight out, I’ll call your turn.</td>
+<td><code>heading(RUNWAY).until(atc(&quot;turn&quot;))</code></td>
+</tr>
+<tr>
+<td class="id"><a href="#item-F5">F5</a></td>
+<td>Cleared for takeoff, fly runway heading.</td>
+<td><code>takeoff(rwy).then(heading(RUNWAY).until(advised()))</code></td>
+</tr>
+<tr>
+<td class="id"><a href="#item-F6">F6</a></td>
+<td>Turn left 10 degrees for departing traffic, cleared for takeoff.</td>
+<td><code>takeoff(rwy).then(turn(LEFT, by=10))</code></td>
+</tr>
+<tr>
+<td class="id"><a href="#item-F7">F7</a></td>
+<td>At the flood basin, right downwind departure approved, remain at or below 2500 until north of the airport.</td>
+<td><code>depart(p, via=DOWNWIND, over=place(&quot;the flood basin&quot;)); remain(at_or_below(2500)).until(north_of(apt))</code></td>
+</tr>
+<tr>
+<td class="id"><a href="#item-F8">F8</a></td>
+<td>Just offset left or right 20 degrees, I’ve got traffic.</td>
+<td><code>turn(EITHER, by=20)</code> (the agent picks the side)</td>
+</tr>
+<tr>
+<td class="id"><a href="#item-F9">F9</a></td>
+<td>At the shoreline, turn left heading 210, cleared for takeoff.</td>
+<td><code>takeoff(rwy).then(heading(RUNWAY).until(crossing(shoreline()))).then(turn(LEFT, to=210))</code></td>
+</tr>
+<tr>
+<td class="id"><a href="#item-F10">F10</a></td>
+<td>Cleared for immediate takeoff.</td>
+<td><code>takeoff(rwy, immediate=True)</code></td>
+</tr>
+</tbody>
+</table></div>
+<p>Gaps:</p>
+<ul>
+<li><strong>“Clear the ridge line” is vague.</strong> Does it mean past the ridge, or above
+it with margin? Probably past, with a terrain-clearance check.</li>
+<li><strong>“The flood basin”</strong> is a local name (the Sepulveda Basin). This is the
+sort of alias table a resolver needs per airport.</li>
+<li><strong>Picking a side.</strong> F8 needs traffic awareness to choose which way to
+offset.</li>
+</ul>
+<h3 id="spacing-and-speed">Spacing and speed</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>ID</th>
+<th>Instruction</th>
+<th>Translation</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td class="id"><a href="#item-G1">G1</a></td>
+<td>Make one left 360 for spacing, then look for traffic on a 6 mile final.</td>
+<td><code>orbit(LEFT, 360).then(p.follow(traffic(&quot;6 mile final&quot;)))</code></td>
+</tr>
+<tr>
+<td class="id"><a href="#item-G2">G2</a></td>
+<td>Make a right 360, you’re too close to that traffic.</td>
+<td><code>orbit(RIGHT, 360)</code></td>
+</tr>
+<tr>
+<td class="id"><a href="#item-G3">G3</a></td>
+<td>A wide right 360.</td>
+<td><code>orbit(RIGHT, 360, size=WIDE)</code></td>
+</tr>
+<tr>
+<td class="id"><a href="#item-G4">G4</a></td>
+<td>Make a right S-turn, you’re a little close.</td>
+<td><code>s_turn(RIGHT).until(behind(t, SPACING))</code></td>
+</tr>
+<tr>
+<td class="id"><a href="#item-G5">G5</a></td>
+<td>S-turns are approved to the west if you need them.</td>
+<td><code>permit(s_turns(side=WEST))</code></td>
+</tr>
+<tr>
+<td class="id"><a href="#item-G6">G6</a></td>
+<td>Reduce to the slowest practical speed.</td>
+<td><code>speed(SLOWEST_PRACTICAL)</code></td>
+</tr>
+<tr>
+<td class="id"><a href="#item-G7">G7</a></td>
+<td>Best forward speed until about 2 mile final.</td>
+<td><code>speed(BEST_FORWARD).until(on_final(nm(2)))</code></td>
+</tr>
+<tr>
+<td class="id"><a href="#item-G8">G8</a></td>
+<td>Keep the speed up, cleared to land.</td>
+<td><code>speed(BEST_FORWARD)</code></td>
+</tr>
+<tr>
+<td class="id"><a href="#item-G9">G9</a></td>
+<td>Extend downwind, reduce speed, turn base at the 118.</td>
+<td><code>p.extend(&quot;downwind&quot;, OPEN); speed(SLOWEST_PRACTICAL); p.turn(&quot;base&quot;, when=crossing(road(&quot;the 118&quot;)))</code></td>
+</tr>
+<tr>
+<td class="id"><a href="#item-G10">G10</a></td>
+<td>Short approach approved, cleared for the option.</td>
+<td><code>permit(p.final_length(SHORT)); land(rwy, OPTION)</code></td>
+</tr>
+<tr>
+<td class="id"><a href="#item-G11">G11</a></td>
+<td>Can you make a short approach?</td>
+<td><code>can(p.final_length(SHORT))</code></td>
+</tr>
+<tr>
+<td class="id"><a href="#item-G12">G12</a></td>
+<td>Make a turn towards the Encino Reservoir for departing traffic.</td>
+<td><code>toward(place(&quot;Encino Reservoir&quot;))</code></td>
+</tr>
+</tbody>
+</table></div>
+<p>Gaps:</p>
+<ul>
+<li><strong>Speed words depend on phase.</strong> SLOWEST_PRACTICAL and BEST_FORWARD
+differ between downwind and final.</li>
+<li><strong>Speed instructions imply a deceleration plan.</strong> G7 has to slow from
+cruise-ish to Vapp by about 1 nm, which may be infeasible. That’s a sim
+preview question.</li>
+</ul>
+<h3 id="sequencing">Sequencing</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>ID</th>
+<th>Instruction</th>
+<th>Translation</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td class="id"><a href="#item-H1">H1</a></td>
+<td>Turn downwind, number two, follow the Falcon on a 6 mile final, report in sight.</td>
+<td><code>p.turn(&quot;downwind&quot;, when=NOW); p.follow(t); report(&quot;in sight&quot;, when=in_sight(t))</code></td>
+</tr>
+<tr>
+<td class="id"><a href="#item-H2">H2</a></td>
+<td>Follow the Cessna ahead on base, report.</td>
+<td><code>p.follow(traffic(&quot;Cessna ahead on base&quot;))</code></td>
+</tr>
+<tr>
+<td class="id"><a href="#item-H3">H3</a></td>
+<td>Extend downwind, follow the Cherokee on a 3 mile final, report in sight.</td>
+<td><code>p.extend(&quot;downwind&quot;, OPEN); p.follow(t)</code></td>
+</tr>
+<tr>
+<td class="id"><a href="#item-H4">H4</a></td>
+<td>Just behind the traffic, turn base, caution wake turbulence.</td>
+<td><code>p.turn(&quot;base&quot;, when=behind(t)); wake_caution(t)</code> (land beyond its touchdown point)</td>
+</tr>
+<tr>
+<td class="id"><a href="#item-H5">H5</a></td>
+<td>Pass behind that traffic, change to runway 16L.</td>
+<td><code>pass_behind(t); plan.change_runway(apt.runway(&quot;16L&quot;))</code></td>
+</tr>
+<tr>
+<td class="id"><a href="#item-H6">H6</a></td>
+<td>Use the upwind as much as needed to follow company ahead.</td>
+<td><code>p.extend(&quot;upwind&quot;, OPEN); p.turn(&quot;crosswind&quot;, when=behind(t))</code></td>
+</tr>
+<tr>
+<td class="id"><a href="#item-H7">H7</a></td>
+<td>That Cherokee is going to the same place, just follow him.</td>
+<td><code>follow_traffic(t)</code> (fly its path, not a pattern)</td>
+</tr>
+<tr>
+<td class="id"><a href="#item-H8">H8</a></td>
+<td>Re-sequence number 2 behind the Cessna on short final.</td>
+<td><code>p.follow(t)</code></td>
+</tr>
+</tbody>
+</table></div>
+<p>Gap:</p>
+<ul>
+<li><strong>This category depends on a traffic model,</strong> meaning sensed positions of
+other aircraft. Without one, <code>follow</code>, <code>behind</code>, <code>passed</code> and <code>in_sight</code>
+fall back to ATC timing. Representing traffic intent with the same
+vocabulary (see K4) gives the deconfliction code something to work with.</li>
+</ul>
+<h3 id="landing-runway-changes-exits">Landing, runway changes, exits</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>ID</th>
+<th>Instruction</th>
+<th>Translation</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td class="id"><a href="#item-I1">I1</a></td>
+<td>Change to runway 16R, cleared to land.</td>
+<td><code>plan.change_runway(apt.runway(&quot;16R&quot;)); land(..., FULL_STOP)</code></td>
+</tr>
+<tr>
+<td class="id"><a href="#item-I2">I2</a></td>
+<td>Turn base now, change to runway 16L.</td>
+<td><code>p.turn(&quot;base&quot;, when=NOW); plan.change_runway(apt.runway(&quot;16L&quot;))</code></td>
+</tr>
+<tr>
+<td class="id"><a href="#item-I3">I3</a></td>
+<td>Cleared for the option; on the go, straight-out departure approved.</td>
+<td><code>land(rwy, OPTION, on_go=depart(p, via=STRAIGHT_OUT))</code></td>
+</tr>
+<tr>
+<td class="id"><a href="#item-I4">I4</a></td>
+<td>Cleared for the option, right closed traffic.</td>
+<td><code>land(rwy, OPTION, on_go=circuit(pattern(rwy, RIGHT)))</code></td>
+</tr>
+<tr>
+<td class="id"><a href="#item-I5">I5</a></td>
+<td>Continue down the runway and exit at high-speed Hotel.</td>
+<td><code>rollout(exit=rwy.exit(&quot;H&quot;))</code></td>
+</tr>
+<tr>
+<td class="id"><a href="#item-I6">I6</a></td>
+<td>Can you expedite off the runway at this intersection?</td>
+<td><code>rollout(exit=NEXT, braking=FIRM)</code> (answer via <code>can()</code>)</td>
+</tr>
+<tr>
+<td class="id"><a href="#item-I7">I7</a></td>
+<td>Continue to the end, turn left at the end.</td>
+<td><code>rollout(exit=END, turn=LEFT)</code></td>
+</tr>
+<tr>
+<td class="id"><a href="#item-I8">I8</a></td>
+<td>Cleared to land, exit Delta.</td>
+<td><code>land(rwy); rollout(exit=rwy.exit(&quot;D&quot;))</code></td>
+</tr>
+</tbody>
+</table></div>
+<h3 id="go-arounds">Go-arounds</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>ID</th>
+<th>Instruction</th>
+<th>Translation</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td class="id"><a href="#item-J1">J1</a></td>
+<td>Go around, early turn approved to crosswind.</td>
+<td><code>go_around(); permit(p.turn(&quot;crosswind&quot;, when=ASAP))</code></td>
+</tr>
+<tr>
+<td class="id"><a href="#item-J2">J2</a></td>
+<td>Start a climb, go around, continue right traffic for 34R.</td>
+<td><code>go_around().then(circuit(p))</code></td>
+</tr>
+<tr>
+<td class="id"><a href="#item-J3">J3</a></td>
+<td>Go around, you can just make a left turn for the downwind now.</td>
+<td><code>go_around().then(join(p.downwind, when=NOW))</code></td>
+</tr>
+</tbody>
+</table></div>
+<h3 id="off-pattern-maneuvering">Off-pattern maneuvering</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>ID</th>
+<th>Instruction</th>
+<th>Translation</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td class="id"><a href="#item-K1">K1</a></td>
+<td>Cross midfield, hold over the business park.</td>
+<td><code>overfly(rwy.midfield).then(hold_over(place(&quot;the business park&quot;)))</code></td>
+</tr>
+<tr>
+<td class="id"><a href="#item-K2">K2</a></td>
+<td>Go to the pier first and then eastbound.</td>
+<td><code>direct(place(&quot;Santa Monica Pier&quot;)).then(track(EAST))</code></td>
+</tr>
+<tr>
+<td class="id"><a href="#item-K3">K3</a></td>
+<td>Overfly the Northridge Mall.</td>
+<td><code>overfly(place(&quot;Northridge Mall&quot;))</code></td>
+</tr>
+<tr>
+<td class="id"><a href="#item-K4">K4</a></td>
+<td>(traffic) He’ll circle the pier a couple times, then head out towards the Hollywood sign.</td>
+<td><code>t.intent = circle(place(&quot;Santa Monica Pier&quot;), times=2).then(direct(place(&quot;Hollywood Sign&quot;)))</code></td>
+</tr>
+<tr>
+<td class="id"><a href="#item-K5">K5</a></td>
+<td>Follow the 101 westbound, at or below 2500 until leaving the Class D.</td>
+<td><code>follow(road(&quot;US-101&quot;), direction=WEST); remain(at_or_below(2500)).until(outside(apt.class_d))</code></td>
+</tr>
+</tbody>
+</table></div>
+<h3 id="vectors">Vectors</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>ID</th>
+<th>Instruction</th>
+<th>Translation</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td class="id"><a href="#item-L1">L1</a></td>
+<td>Turn left heading 230, maintain at or above 4000.</td>
+<td><code>turn(LEFT, to=230); remain(at_or_above(4000))</code></td>
+</tr>
+<tr>
+<td class="id"><a href="#item-L2">L2</a></td>
+<td>Turn right heading 170, reduce speed to 170 or less.</td>
+<td><code>turn(RIGHT, to=170); speed(at_most(kt(170)))</code></td>
+</tr>
+<tr>
+<td class="id"><a href="#item-L3">L3</a></td>
+<td>Turn right 10 degrees.</td>
+<td><code>turn(RIGHT, by=10)</code></td>
+</tr>
+<tr>
+<td class="id"><a href="#item-L4">L4</a></td>
+<td>Expedite climb through 5000.</td>
+<td><code>climb(rate=EXPEDITE).until(reaching(5000))</code></td>
+</tr>
+</tbody>
+</table></div>
+<h3 id="ground">Ground</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>ID</th>
+<th>Instruction</th>
+<th>Translation</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td class="id"><a href="#item-M1">M1</a></td>
+<td>Turn right at Golf, hold short 16L.</td>
+<td><code>rollout(exit=rwy.exit(&quot;G&quot;), turn=RIGHT); taxi(hold_short=apt.runway(&quot;16L&quot;))</code></td>
+</tr>
+<tr>
+<td class="id"><a href="#item-M2">M2</a></td>
+<td>Expedite, turn right at G, cross 16R, traffic 1 mile final.</td>
+<td><code>rollout(exit=rwy.exit(&quot;G&quot;), turn=RIGHT); taxi(cross=[apt.runway(&quot;16R&quot;)], urgency=EXPEDITE)</code></td>
+</tr>
+<tr>
+<td class="id"><a href="#item-M3">M3</a></td>
+<td>Cancel takeoff clearance, hold short 16R.</td>
+<td><code>plan.replace(hold_short(apt.runway(&quot;16R&quot;)))</code> (refused once the takeoff roll has started)</td>
+</tr>
+<tr>
+<td class="id"><a href="#item-M4">M4</a></td>
+<td>Taxi down the runway, turn left at Quebec, taxi back via Alpha.</td>
+<td><code>taxi(on=rwy, to=rwy.exit(&quot;Q&quot;)).then(taxi(via=[&quot;A&quot;]))</code></td>
+</tr>
+<tr>
+<td class="id"><a href="#item-M5">M5</a></td>
+<td>Runway 16R at Delta, line up and wait.</td>
+<td><code>line_up(rwy, at=rwy.intersection(&quot;D&quot;))</code></td>
+</tr>
+</tbody>
+</table></div>
+<h3 id="instructor-and-handbook-items">Instructor and handbook items</h3>
+<p>These mostly become standard library definitions, defaults and gates rather
+than things the agent writes in the moment.</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>ID</th>
+<th>Rule</th>
+<th>Translation</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td class="id"><a href="#item-P1">P1</a></td>
+<td>Flaps up after positive rate and at Vy.</td>
+<td><code>when(positive_rate() &amp; at_speed(Vy), flaps(0))</code></td>
+</tr>
+<tr>
+<td class="id"><a href="#item-P2">P2</a></td>
+<td>Takeoff power until at least 500 ft AGL.</td>
+<td><code>power(FULL).until(agl_above(500))</code></td>
+</tr>
+<tr>
+<td class="id"><a href="#item-P3">P3</a></td>
+<td>Short-field: Vx until clear of obstacles or 50 ft, then Vy, flaps up in increments.</td>
+<td><code>climb(at=Vx).until(agl_above(50)).then(climb(at=Vy)); when(at_speed(Vy), flaps(0, incremental=True))</code></td>
+</tr>
+<tr>
+<td class="id"><a href="#item-P4">P4</a></td>
+<td>Turn crosswind beyond the departure end, within 300 ft of pattern altitude.</td>
+<td>default <code>p.turn(&quot;crosswind&quot;, when=past(rwy.departure_end) &amp; within(ft(300), p.altitude))</code></td>
+</tr>
+<tr>
+<td class="id"><a href="#item-P5">P5</a></td>
+<td>Departing: straight out, or 45° in the pattern direction after reaching pattern altitude.</td>
+<td><code>depart(p, via=FORTY_FIVE)</code> = <code>turn(p.side, by=45, when=past(rwy.departure_end) &amp; reaching(p.altitude))</code></td>
+</tr>
+<tr>
+<td class="id"><a href="#item-P6">P6</a></td>
+<td>Enter on the 45 toward abeam midfield, at pattern altitude.</td>
+<td><code>enter(p.downwind, via=FORTY_FIVE)</code></td>
+</tr>
+<tr>
+<td class="id"><a href="#item-P7">P7</a></td>
+<td>From the upwind side: cross midfield 500 ft above, 2 nm out descend, turn back to the 45.</td>
+<td><code>enter(p.downwind, via=OVERHEAD)</code> = <code>overfly(rwy.midfield, at=p.altitude + 500).until(distance_from(apt) &gt;= nm(2)).then(descend(p.altitude)).then(enter(p.downwind, via=FORTY_FIVE))</code></td>
+</tr>
+<tr>
+<td class="id"><a href="#item-P8">P8</a></td>
+<td>Alternate: midfield crosswind at pattern altitude, then downwind.</td>
+<td><code>enter(p.downwind, via=MIDFIELD_CROSSWIND)</code></td>
+</tr>
+<tr>
+<td class="id"><a href="#item-P9">P9</a></td>
+<td>Downwind 0.5–1 nm out.</td>
+<td><code>p.width(NORMAL)</code> default</td>
+</tr>
+<tr>
+<td class="id"><a href="#item-P10">P10</a></td>
+<td>Hold altitude until abeam the approach end, then power back and descend.</td>
+<td><code>p.downwind: maintain(p.altitude).until(abeam(rwy.threshold)).then(power(rpm=1500), flaps(10), descend(fpm=500))</code></td>
+</tr>
+<tr>
+<td class="id"><a href="#item-P11">P11</a></td>
+<td>Turn base when the approach end is 45° behind.</td>
+<td>default <code>p.turn(&quot;base&quot;, when=angle_behind_wing(rwy.threshold) &gt;= 45)</code></td>
+</tr>
+<tr>
+<td class="id"><a href="#item-P12">P12</a></td>
+<td>Base track perpendicular to centerline, crab as needed.</td>
+<td>executor: the path follower already crabs</td>
+</tr>
+<tr>
+<td class="id"><a href="#item-P13">P13</a></td>
+<td>Strong wind or steep approach: base closer in.</td>
+<td>planner rule: <code>p.final_length()</code> scales with headwind and flap setting</td>
+</tr>
+<tr>
+<td class="id"><a href="#item-P14">P14</a></td>
+<td>Final at the approach speed or 1.3 Vso, +10/−5.</td>
+<td><code>p.final: speed(Vapp, tolerance=(+10, -5))</code></td>
+</tr>
+<tr>
+<td class="id"><a href="#item-P15">P15</a></td>
+<td>Full flaps not until established on final.</td>
+<td><code>flaps(FULL).earliest(established(p.final))</code></td>
+</tr>
+<tr>
+<td class="id"><a href="#item-P16">P16</a></td>
+<td>Stabilized by 500 ft AGL or go around; unstabilized below 300 ft, go around immediately.</td>
+<td><code>gate(agl(500), require=stabilized(), otherwise=go_around()); remain(stabilized()).after(agl_below(300)).otherwise(go_around())</code></td>
+</tr>
+<tr>
+<td class="id"><a href="#item-P17">P17</a></td>
+<td>Over 500 fpm, reduce before 300 ft AGL.</td>
+<td><code>remain(sink_rate(at_most(500))).after(agl_below(300))</code></td>
+</tr>
+<tr>
+<td class="id"><a href="#item-P18">P18</a></td>
+<td>Round out at 10–20 ft.</td>
+<td>executor reflex, not exposed</td>
+</tr>
+<tr>
+<td class="id"><a href="#item-P19">P19</a></td>
+<td>Go-around: power, attitude, configuration.</td>
+<td><code>go_around()</code> library definition</td>
+</tr>
+<tr>
+<td class="id"><a href="#item-P20">P20</a></td>
+<td>After a go-around, shift to the upwind side.</td>
+<td><code>go_around(offset=UPWIND_SIDE)</code></td>
+</tr>
+<tr>
+<td class="id"><a href="#item-P21">P21</a></td>
+<td>Pattern altitude ±100 ft, airspeed ±10 kt.</td>
+<td>default tolerances on <code>p.altitude</code>, <code>PATTERN_SPEED</code></td>
+</tr>
+<tr>
+<td class="id"><a href="#item-P22">P22</a></td>
+<td>Touch down within 400 ft (200 ft short-field) of the point.</td>
+<td><code>land(rwy, touchdown=(rwy.aim_point, ft(400)))</code>, also an eval criterion</td>
+</tr>
+<tr>
+<td class="id"><a href="#item-P23">P23</a></td>
+<td>Rectangular course at constant distance from the field edges.</td>
+<td><code>circuit(pattern(rectangle=place(&quot;that field&quot;), offset=nm(0.5)))</code> (the pattern generalised beyond runways)</td>
+</tr>
+<tr>
+<td class="id"><a href="#item-P24">P24</a></td>
+<td>Forward slip to steepen descent.</td>
+<td><code>slip(FORWARD)</code>: an executor capability E5 needs</td>
+</tr>
+<tr>
+<td class="id"><a href="#item-P25">P25</a></td>
+<td>Steep turn: 45° bank, ±100 ft, ±10 kt, roll out ±10°.</td>
+<td><code>orbit(LEFT, 360, bank=45)</code> with ACS tolerances</td>
+</tr>
+</tbody>
+</table></div>
+<hr />
+<h2 id="4-how-this-maps-onto-what-exists">4. How this maps onto what exists</h2>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Concept</th>
+<th>Today</th>
+<th>Gap</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Pattern as a value</td>
+<td><code>PatternGeometry</code> (runway frame, downwind offset, <code>extension_ft</code>, <code>crosswind_extension_ft</code>, <code>base_turn_x_ft</code>)</td>
+<td>Upwind extension, width presets, <code>base_through(point)</code>, final length</td>
+</tr>
+<tr>
+<td>Turn triggers</td>
+<td>Geometric base trigger (<code>base_turn_ready</code>), <code>set_pattern_clearance</code> gates (≈ <code>atc(&quot;base&quot;)</code>), <code>execute_pattern_turn</code> (≈ <code>NOW</code>)</td>
+<td>Triggers on places, crossings, traffic; earliest/latest bounds</td>
+</tr>
+<tr>
+<td>Steps</td>
+<td>Heading, altitude and speed holds; takeoff; pattern; dead-stick; taxi; line-up; park</td>
+<td><code>follow(line)</code>, <code>toward/direct(point)</code>, <code>orbit</code>, <code>s_turn</code>, <code>hold_over</code>, relative turns</td>
+</tr>
+<tr>
+<td>Constraints</td>
+<td>None; <code>SafetyMonitor</code> covers the envelope only</td>
+<td><code>remain(...).until(...)</code>, enforced and previewed</td>
+</tr>
+<tr>
+<td>Landing options</td>
+<td>Full stop, touch-and-go, go-around, runway exits</td>
+<td>Stop-and-go, low approach, option, sidestep (<code>change_runway</code>)</td>
+</tr>
+<tr>
+<td>Geography</td>
+<td>apt.dat (runways, taxiways, comms) through DuckDB spatial</td>
+<td>Roads, shoreline, water/land, landmarks, airspace volumes, local aliases</td>
+</tr>
+<tr>
+<td>Traffic</td>
+<td>None</td>
+<td>Sensed traffic (X-Plane AI/multiplayer datarefs), intent model</td>
+</tr>
+<tr>
+<td>Speech acts</td>
+<td>Tools are imperative</td>
+<td><code>permit</code>, <code>prefer</code>, <code>can</code> (sim-preview feasibility)</td>
+</tr>
+<tr>
+<td>Tolerances</td>
+<td>Ad-hoc thresholds in code (e.g. downwind ±350 ft, final ±120 ft / 15°)</td>
+<td>ACS tolerances as named defaults</td>
+</tr>
+</tbody>
+</table></div>
+<p>A plausible implementation path keeps the current stack and adds one profile:</p>
+<ul>
+<li><strong><code>PlanProfile</code> owns all three axes and interprets a plan value each tick.</strong>
+<ul>
+<li>Steps compile to guidance targets: a path for the L1 follower, and
+altitude and speed targets for TECS.</li>
+<li>Conditions and constraints are evaluated in Rust.</li>
+<li>Hand-off to <code>LandingRolloutProfile</code> at touchdown works as it does now.</li>
+</ul>
+</li>
+<li><strong>The Python layer only builds plans.</strong> That could be an embedded
+interpreter run once per clearance, or a restricted Python-like front end
+that emits JSON.</li>
+<li><strong>Plans go through a validator plus a simple-sim preview before they’re
+committed.</strong> The preview answers <code>can()</code>.</li>
+</ul>
+<h2 id="5-open-questions">5. Open questions</h2>
+<ol>
+<li><strong>Geography source.</strong> Should it be a local OSM extract (roads, coastline,
+water, landuse, named POIs) loaded into the existing DuckDB spatial views,
+with a per-airport alias table (“the flood basin” → Sepulveda Basin, “the
+VA” → the VA hospital nearest the airport)? How should the resolver show
+its confidence?</li>
+<li><strong>Traffic.</strong> Can X-Plane AI or multiplayer traffic positions be read
+reliably through the web API? Without them, a third of tower instructions
+have no sensor behind them.</li>
+<li><strong>Limits on open-ended items.</strong> How far can an open downwind extension go
+before the agent should query ATC? Should that limit be in config or
+decided by the agent?</li>
+<li><strong>Who resolves ambiguity?</strong> “At” vs abeam, which freeway is “the
+freeway”, the unstated end of “at or above 4000”. Should the agent decide
+explicitly in code, or should the resolver decide and the agent review?</li>
+<li><strong>Executor fidelity.</strong> “Square”, slips, and steep turns need the
+low-level control to do more than smooth path following.</li>
+<li><strong>Evaluation.</strong> <code>instructions.yaml</code> can become an eval set: give the agent
+the instruction with a scenario, check the plan it writes, and fly it in
+the simple sim against the ACS tolerances.</li>
+</ol>
+
+<h2 id="appendix-the-curated-corpus">Appendix: the curated corpus</h2>
+<p>All 141 items from <code>instructions.yaml</code>. ATC items show the cleaned reading and,
+beneath it, the raw Whisper line it came from.</p>
+<div class="filters"><button data-f="" class="on">all</button><button data-f="departure">departure</button><button data-f="entry">entry</button><button data-f="go_around">go around</button><button data-f="ground">ground</button><button data-f="instructor">instructor</button><button data-f="landing">landing</button><button data-f="lateral_constraint">lateral constraint</button><button data-f="leg_turn">leg turn</button><button data-f="maneuvering">maneuvering</button><button data-f="pattern_shape">pattern shape</button><button data-f="sequencing">sequencing</button><button data-f="spacing">spacing</button><button data-f="vectors">vectors</button><button data-f="vertical_constraint">vertical constraint</button></div>
+<div class="table-wrap"><table class="corpus"><thead><tr><th>ID</th><th>Source</th><th>Instruction</th></tr></thead>
+<tbody><tr id="item-A1" data-family="pattern_shape"><td class="id">A1</td><td class="src">ATC KVNT</td><td>Extend downwind, I&#x27;ll call your base.<div class="raw">N16L, extend downwind, I&#x27;ll call your base.</div></td></tr><tr id="item-A2" data-family="pattern_shape"><td class="id">A2</td><td class="src">ATC KWHP</td><td>Extend downwind one mile.<div class="raw">6M, PAPA, extend downwind, one mile.</div></td></tr><tr id="item-A3" data-family="pattern_shape"><td class="id">A3</td><td class="src">ATC KVNY</td><td>Extend about another half mile on the upwind before you turn crosswind, to tighten up the traffic.<div class="raw">8NR, Delta, extend about another half mile on the upwind before you turn crosswind to tighten up the traffic.</div></td></tr><tr id="item-A4" data-family="pattern_shape"><td class="id">A4</td><td class="src">ATC KAVL</td><td>Extend your upwind, I&#x27;ll call your crosswind.<div class="raw">Western 116, extend your upwind, I&#x27;ll call to crosswind.</div></td></tr><tr id="item-A5" data-family="pattern_shape"><td class="id">A5</td><td class="src">ATC KVNT</td><td>Extend downwind just one more mile and square your left base turn and final; one departure prior to your arrival.<div class="raw">N4J, Fox Sharp, extend downwind just one more mile and square your left base turn and final one departure for our travel to Global Express, taking the runway now.</div></td></tr><tr id="item-A6" data-family="pattern_shape"><td class="id">A6</td><td class="src">ATC KVNY</td><td>You&#x27;re inside of a Cirrus on an 8 mile final; keep your base in close, runway 16R, cleared for the option.<div class="raw">Cessna 07, you&#x27;re inside of a Cirrus 8 mile, follow, keep your base in close, runway 16R, cleared for the option.</div></td></tr><tr id="item-A7" data-family="pattern_shape"><td class="id">A7</td><td class="src">ATC KWHP</td><td>Keep it wide on the downwind, I have a no-radio aircraft inbound for the straight-in.<div class="raw">Cap 41, keep it wide on the downwind, I have a no-coms traffic inbound for the straight in.</div></td></tr><tr id="item-A8" data-family="pattern_shape"><td class="id">A8</td><td class="src">ATC KVNY</td><td>Keep your base square, you&#x27;ll be following a Sport Cruiser now.<div class="raw">Piper 84015, keep your base square, you&#x27;ll be following a sports cruiser now.</div></td></tr><tr id="item-A9" data-family="pattern_shape"><td class="id">A9</td><td class="src">ATC KVNY</td><td>For sequencing, make a tight right pattern.<div class="raw">N6L, N6L, for sequencing, make a tight right</div></td></tr><tr id="item-B1" data-family="leg_turn"><td class="id">B1</td><td class="src">ATC KVNY</td><td>At the 118, turn base.<div class="raw">7, Charlie Bravo, at the 118 turn base.</div></td></tr><tr id="item-B2" data-family="leg_turn"><td class="id">B2</td><td class="src">ATC KVNY</td><td>Turn base at the Veterans Hospital.<div class="raw">N087, turn base at the Veterans Hospital.</div></td></tr><tr id="item-B3" data-family="leg_turn"><td class="id">B3</td><td class="src">ATC KVNY</td><td>Turn base abeam the VA hospital; there will be one departure.<div class="raw">Turn base, beam the VA hospital, and there will be one departure.</div></td></tr><tr id="item-B4" data-family="leg_turn"><td class="id">B4</td><td class="src">ATC KSMO</td><td>Are you able to turn base at or before the freeway?<div class="raw">C-Ray, 3YZ, are you able to turn base at or before the freeway?</div></td></tr><tr id="item-B5" data-family="leg_turn"><td class="id">B5</td><td class="src">ATC KSMO</td><td>Turn base prior to the interchange, skydiver traffic.<div class="raw">Turn base prior to the interchange, ATR, Skydiver traffic.</div></td></tr><tr id="item-B6" data-family="leg_turn"><td class="id">B6</td><td class="src">ATC KEMT</td><td>Cross the 10 freeway, then turn crosswind.<div class="raw">Cross the 10th freeway, then turn crosswind, WBVC</div></td></tr><tr id="item-B7" data-family="leg_turn"><td class="id">B7</td><td class="src">ATC KSMO</td><td>Cleared for takeoff, you can turn crosswind at the shoreline.<div class="raw">clear for takeoff, you can turn crosswind at the shoreline.</div></td></tr><tr id="item-B8" data-family="leg_turn"><td class="id">B8</td><td class="src">ATC KSMO</td><td>That&#x27;s approved, just take it out to the shoreline before you turn crosswind, runway 21, cleared for takeoff.<div class="raw">Ok, that&#x27;s approved, just take it out to the shoreline before you turn crosswind, runway 21, clear for takeoff.</div></td></tr><tr id="item-B9" data-family="leg_turn"><td class="id">B9</td><td class="src">ATC KVNY</td><td>Turn base now.<div class="raw">N9L, turn base now, N952J42, and turn right now, N952J42.</div></td></tr><tr id="item-B10" data-family="leg_turn"><td class="id">B10</td><td class="src">ATC KVNY</td><td>Turn base as soon as you&#x27;re able, traffic following you is at about your 10 o&#x27;clock.<div class="raw">And Phenom 0E, Echo, turn base as soon as you&#x27;re able, traffic following you, that&#x27;s your, about 10 o&#x27;clock.</div></td></tr><tr id="item-B11" data-family="leg_turn"><td class="id">B11</td><td class="src">ATC KSMO</td><td>Don&#x27;t turn base now; you&#x27;re following the Cherokee that&#x27;s across from you on base.<div class="raw">No, no, don&#x27;t turn base now if you see the guy short final, you&#x27;re following the Cherokee that&#x27;s across from you on base.</div></td></tr><tr id="item-B12" data-family="leg_turn"><td class="id">B12</td><td class="src">ATC KVNY</td><td>Over the VA, turn base, number 2, follow the Cherokee turning right base.<div class="raw">Cessna 015, over the VA, turn base, number 2, follow Cherokee, turning right, base.</div></td></tr><tr id="item-C1" data-family="entry"><td class="id">C1</td><td class="src">ATC KVNY</td><td>Enter left base, runway 34L.<div class="raw">Cessna 619, Tower, roger, enter left base runway 34L.</div></td></tr><tr id="item-C2" data-family="entry"><td class="id">C2</td><td class="src">ATC KSMO</td><td>Fly over the field, and then enter right downwind, runway 21.<div class="raw">Baron 8589R, Santa Monica Tower, fly over the field, and then enter right downwind, runway 21.</div></td></tr><tr id="item-C3" data-family="entry"><td class="id">C3</td><td class="src">ATC KWHP</td><td>Cross midfield, circle east for left traffic, runway 12.<div class="raw">Cross midfield, circle east for left traffic, runway 12, 7490</div></td></tr><tr id="item-C4" data-family="entry"><td class="id">C4</td><td class="src">ATC KVNY</td><td>Turn towards Chatsworth Reservoir, and then enter right base from there.<div class="raw">4Q04C, Charlie, start from northbound, turn towards Chatsworth Reservoir, and then enter right base from there.</div></td></tr><tr id="item-C5" data-family="entry"><td class="id">C5</td><td class="src">ATC KWHP</td><td>Remain outside Burbank&#x27;s Class C, and enter a left base for runway 12 over the 210 and 118 interchange.<div class="raw">37787N, Whiteman Tower, remain outside Burbanks, Class Charlie, and enter a left base for runway 12 over the 210 and the 118 interchange.</div></td></tr><tr id="item-C6" data-family="entry"><td class="id">C6</td><td class="src">ATC KWHP</td><td>Report over the 210/118 interchange for a left base runway 12, number 2 following a Mooney on a 2 mile final at 2500.<div class="raw">N125DAL, Whiteman Tower, report over the 210, 118 interchange for a left base runway 12, for number 2 following a Mooney on a 2 mile final at 2500.</div></td></tr><tr id="item-C7" data-family="entry"><td class="id">C7</td><td class="src">ATC KVNY</td><td>Turn 20 degrees left, remain north of the 118 freeway, then enter right base, runway 16L.<div class="raw">XOJ, 33377, Van Nuys Tower, turn 20 degrees left, remain north of the 118 freeway, then enter right base, runway 16L</div></td></tr><tr id="item-C8" data-family="entry"><td class="id">C8</td><td class="src">ATC KVNY</td><td>Turn 15 degrees left, stay north of the freeway, follow it eastbound, then make right traffic, runway 34L.<div class="raw">770, turn 15 degrees left, stay north of the main freeway, follow that eastbound, then make right traffic, runway 34L</div></td></tr><tr id="item-C9" data-family="entry"><td class="id">C9</td><td class="src">ATC KVNY</td><td>Fly present heading to the 101 freeway, and then make right traffic.<div class="raw">November 9525, Charlie, Van Nuys Tower, fly present heading to the 101 freeway, and then make right traffic to right.</div></td></tr><tr id="item-C10" data-family="entry"><td class="id">C10</td><td class="src">ATC KVNY</td><td>Remain on the east side of the 405 freeway until the interchange, then you can make straight in for runway 34R.<div class="raw">618D, Sierra, Van Eystar, remain on the east side of the 405 freeway until the interchange, then you can make straight in for runway 34R.</div></td></tr><tr id="item-C11" data-family="entry"><td class="id">C11</td><td class="src">ATC KWHP</td><td>Make a straight in runway 12, report 3 miles.<div class="raw">Cessna 739 Delta X-ray tower, make a straight in runway 12, report 3 miles.</div></td></tr><tr id="item-C12" data-family="entry"><td class="id">C12</td><td class="src">ATC KSMO</td><td>Maintain at or above 4000 feet, overfly the field and make right traffic for runway 21.<div class="raw">B73 Romeo Hotel, Santa Monica Tower, maintain outer above 4000 feet, overfly the field and make right traffic for runway 21.</div></td></tr><tr id="item-C13" data-family="entry"><td class="id">C13</td><td class="src">ATC KVNY</td><td>Fly direct to midfield, cross midfield, and enter right downwind, runway 34R.<div class="raw">Support crew to 724, Sierra Charlie, Red-Eye, Tower, fly direct to midfield, cross midfield, and enter right downwind, runway 34R.</div></td></tr><tr id="item-C14" data-family="entry"><td class="id">C14</td><td class="src">ATC KVNY</td><td>Turn right, fly direct to the 405 and 101 interchange.<div class="raw">N575NW, turn right, fly direct to 405 and 101 interchange.</div></td></tr><tr id="item-C15" data-family="entry"><td class="id">C15</td><td class="src">ATC KVNY</td><td>Amend instructions, turn 20 degrees left, overfly Encino Reservoir to make right traffic.<div class="raw">November 9, 4-10, Gulf, amend instructions, turn 20 degrees left overflying Sina Reservoir to make right traffic.</div></td></tr><tr id="item-C16" data-family="entry"><td class="id">C16</td><td class="src">ATC KSMO</td><td>Once you cross midfield, make a right turn around the tower, runway 21, cleared to land.<div class="raw">N7L, once you cross midfield, make a right turn around the tower, runway 21, clear to land and hopper taxi, parking at this frequency.</div></td></tr><tr id="item-C17" data-family="entry"><td class="id">C17</td><td class="src">ATC KWHP</td><td>Follow the 5, enter right downwind runway 12.<div class="raw">Cessna 26504, Whiteman tower, follow the 5, enter right downwind runway 12, put downwind to beam.</div></td></tr><tr id="item-C18" data-family="entry"><td class="id">C18</td><td class="src">ATC KVNY</td><td>Follow the 405, keep the 405 off your left wing, make left traffic, runway 16L.<div class="raw">384 Sierra, Charlie, Van Nuys Tower, follow the 405, keep the 405 off your left wing, make left traffic, runway 16L.</div></td></tr><tr id="item-C19" data-family="entry"><td class="id">C19</td><td class="src">ATC KLGB</td><td>Start a left turn, keep the 710 off your right hand side.<div class="raw">N26R, start a left turn, keep the 710 off your right hand side.</div></td></tr><tr id="item-D1" data-family="lateral_constraint"><td class="id">D1</td><td class="src">ATC KVNY</td><td>Remain on the west side of the 405 for pattern traffic, opposite direction Cessna traffic.<div class="raw">Cessna 36, Delta, remain on the west side of the 405 for pattern traffic, have opposite direction Cessna traffic.</div></td></tr><tr id="item-D2" data-family="lateral_constraint"><td class="id">D2</td><td class="src">ATC KVNY</td><td>Remain south of the 101 for traffic, 7 miles north, restricted north of the freeway.<div class="raw">Cherokee 99L, remain south of the 101 for traffic, 11 moving to your 12 o&#x27;clock, 7 miles north, you&#x27;ve found Cherokee 2900, restricted north of the freeway.</div></td></tr><tr id="item-D3" data-family="lateral_constraint"><td class="id">D3</td><td class="src">ATC KVNY</td><td>Remain over the 101.<div class="raw">Cherokee 377 remain over the 101</div></td></tr><tr id="item-D4" data-family="lateral_constraint"><td class="id">D4</td><td class="src">ATC KSMO</td><td>Remain north of the new Getty, outside of the Class D for now.<div class="raw">N770LG, remain north of the new Getty, outside of the Cross Delta for now.</div></td></tr><tr id="item-D5" data-family="lateral_constraint"><td class="id">D5</td><td class="src">ATC KSMO</td><td>Traffic is a Cirrus over the pier remaining over water; remain over land for that north downwind entry.<div class="raw">Baron 20 Mike, traffic Cirrus over the pier, remaining over water, remain over land for that north down land entry.</div></td></tr><tr id="item-D6" data-family="lateral_constraint"><td class="id">D6</td><td class="src">ATC KSMO</td><td>Traffic passing off your right, altitude indicates 1800, remain north of the centerline.<div class="raw">N8Y, traffic, passing off your right, Alton, in case 1800, remain north of the centerline.</div></td></tr><tr id="item-D7" data-family="lateral_constraint"><td class="id">D7</td><td class="src">ATC KVNY</td><td>I want you on the other side of the freeway, the north side, so turn 20 degrees left again please.<div class="raw">Cherokee, 2-9-KM, I want you on the other side of the freeway, the north side, so turn 20-degrees, left again, please.</div></td></tr><tr id="item-D8" data-family="lateral_constraint"><td class="id">D8</td><td class="src">ATC KONT</td><td>Remain east of the 15 freeway for the Lake Elsinore jump zone.<div class="raw">Riverside information uniform is current, remain east of the 15th freeway for the Lake Elsinore jump zone.</div></td></tr><tr id="item-D9" data-family="lateral_constraint"><td class="id">D9</td><td class="src">ATC KVNT</td><td>If able, keep it over the 101 freeway for traffic eastbound.<div class="raw">775, Mike, if able, keep it over the 101 freeway for traffic in the eastbound.</div></td></tr><tr id="item-D10" data-family="lateral_constraint"><td class="id">D10</td><td class="src">ATC KVNY</td><td>Remain over or east of the 405 freeway until you&#x27;re south of the Encino Reservoir.<div class="raw">Cessna 6H, pop up for traffic inbound for Grand Island, remain over or east of 405 freeway until you&#x27;re south of the Encino Reservoir contact.</div></td></tr><tr id="item-D11" data-family="lateral_constraint"><td class="id">D11</td><td class="src">ATC KVNY</td><td>Remain on the west side of the 405 when you turn your crosswind, and then proceed northbound.<div class="raw">Number 688, remain on the west side of the 405 when you turn your crosswind and then you proceed northbound.</div></td></tr><tr id="item-E1" data-family="vertical_constraint"><td class="id">E1</td><td class="src">ATC KVNY</td><td>Left downwind departure approved, remain at or below 1800 until north of the field, runway 16R, cleared for takeoff.<div class="raw">N46826, Van Nuys Tower, left downwind approved, remain at or below 1800 until north of the field, runway 16R, cleared for takeoff.</div></td></tr><tr id="item-E2" data-family="vertical_constraint"><td class="id">E2</td><td class="src">ATC KVNY</td><td>Left crosswind departure approved, remain at or below 2000 until south of the 101, runway 16R, cleared for takeoff.<div class="raw">N705, left crosswind departure approved, remain at or below 2000 until south of the 101, runway 16R, cleared for takeoff.</div></td></tr><tr id="item-E3" data-family="vertical_constraint"><td class="id">E3</td><td class="src">ATC KVNY</td><td>For traffic, remain at or above 3500 until established on base.<div class="raw">N8VNISR, for traffic, remain at above 3500 until established on base.</div></td></tr><tr id="item-E4" data-family="vertical_constraint"><td class="id">E4</td><td class="src">ATC KVNT</td><td>Maintain pattern altitude 2000 until you turn base, traffic off your right 1.5 miles, restricted at or below 1000, helicopter.<div class="raw">Cherokee 7DP, maintain pattern altitude 2000 until you turn base, traffic off your right, 1 and a half miles, restricted by level 1000, indicated helicopter</div></td></tr><tr id="item-E5" data-family="vertical_constraint"><td class="id">E5</td><td class="src">ATC KVNY</td><td>Police helicopter on patrol east side of the 405, restricted low level; maintain pattern altitude 1800 until you turn final.<div class="raw">Z670E, traffic, police helicopter on patrol, east side of the 405, restricted low level, maintain pattern on speed 1,800 until you turn final.</div></td></tr><tr id="item-E6" data-family="vertical_constraint"><td class="id">E6</td><td class="src">ATC KVNY</td><td>Remain at or below 2000 until you clear the Class D; after you clear the D, frequency change approved.<div class="raw">6999Z, remain at or below 2000 until you clear the class D, after you clear the D, for exchanges approved, SoCal to the left, 134.2.</div></td></tr><tr id="item-E7" data-family="vertical_constraint"><td class="id">E7</td><td class="src">ATC KBUR</td><td>Maintain VFR above 3000 for the next 10 miles until you&#x27;re east of the Santa Monica final; that will keep you clear of the TFR.<div class="raw">8RD, maintain VFR above 3000 for the next 10 miles until you&#x27;re east of the Santa Monica final, and that will keep you clear of the TFR</div></td></tr><tr id="item-E8" data-family="vertical_constraint"><td class="id">E8</td><td class="src">ATC KVNY</td><td>Remain below 2500 or west of Topanga, and then resume navigation.<div class="raw">Cherokee 369, remain below 2,500 feet or west of Topanga, and then resume navigation today.</div></td></tr><tr id="item-E9" data-family="vertical_constraint"><td class="id">E9</td><td class="src">ATC KVNY</td><td>As soon as you get south of the 101 freeway you can make that left turn; just remain at or below 2000.<div class="raw">N5500, as soon as you get south of the 101 freeway, sir, you can make that left turn, just remain out of blow at 2000.</div></td></tr><tr id="item-E10" data-family="vertical_constraint"><td class="id">E10</td><td class="src">ATC KSMO</td><td>Right turn at the shoreline approved, runway 21, cleared for takeoff, maintain at or below 1500 until advised.<div class="raw">Plymouth 220, Papa Echo, Santa Monica town, right turn at the shoreline approved, runway 21, clear for takeoff, maintain outer below 1500 until advised.</div></td></tr><tr id="item-F1" data-family="departure"><td class="id">F1</td><td class="src">ATC KSMO</td><td>Right turn at the shoreline approved, runway 21, cleared for takeoff.<div class="raw">Cessna 53440, Santa Monica tower, right turn at shoreline approved, runway 21, clear for takeoff.</div></td></tr><tr id="item-F2" data-family="departure"><td class="id">F2</td><td class="src">ATC KVNY</td><td>Fly straight out and clear the ridge line, and then turn left towards the Griffith Park Observatory.<div class="raw">N6M, Mike, fly straight out and clear out the ridge line, just after your call to clock, they&#x27;re in about 3 miles, and then you&#x27;re going to turn left towards the Griffith Park Observatory.</div></td></tr><tr id="item-F3" data-family="departure"><td class="id">F3</td><td class="src">ATC KVNY</td><td>On departure fly straight out, no turns until the 118; contact SoCal prior to entering Class C airspace.<div class="raw">N7WS, on departure, fly straight out, no turns until the 118, see me prior to entering class Charlie airspace on 120.4, squawk 4607.</div></td></tr><tr id="item-F4" data-family="departure"><td class="id">F4</td><td class="src">ATC KVNY</td><td>Fly straight out, I&#x27;ll call your turn, runway 16R, cleared for takeoff.<div class="raw">N00V, fly straight out the air tower, call your turn, runway 16R, cleared for takeoff.</div></td></tr><tr id="item-F5" data-family="departure"><td class="id">F5</td><td class="src">ATC KAVL</td><td>Cleared for takeoff, fly runway heading.<div class="raw">Clear for takeoff, fly runway heading.</div></td></tr><tr id="item-F6" data-family="departure"><td class="id">F6</td><td class="src">ATC KVNY</td><td>Turn left 10 degrees for departing traffic, runway 16L, cleared for takeoff.<div class="raw">Cessna 113, turn left 10 degrees for departing, Cessna 113, runway 16L, cleared for takeoff, Cessna upwind and left closed traffic, no factors.</div></td></tr><tr id="item-F7" data-family="departure"><td class="id">F7</td><td class="src">ATC KVNY</td><td>At the flood basin, right downwind departure approved, remain at or below 2500 until north of Van Nuys Airport.<div class="raw">Cessna 76015 at the flood basin right downwind departure, approved, remain at or below 2,500 until north of Van Nuys Airport, Runway 16R.</div></td></tr><tr id="item-F8" data-family="departure"><td class="id">F8</td><td class="src">ATC KVNY</td><td>Just offset left or right 20 degrees please, I&#x27;ve got traffic.<div class="raw">Roger, just offset left or right 20 degrees, please, I got traffic, probably gonna be straight out</div></td></tr><tr id="item-F9" data-family="departure"><td class="id">F9</td><td class="src">ATC KLAX</td><td>At the shoreline, turn left heading 210, runway 25R, cleared for takeoff.<div class="raw">JetBlue 2924, at the shoreline, turn left heading 210, runway 25R, clear for takeoff.</div></td></tr><tr id="item-F10" data-family="departure"><td class="id">F10</td><td class="src">ATC KVNY</td><td>Runway 34L, cleared for immediate takeoff.<div class="raw">Challenger 4-0-0-6, Bravo, runway 34L, cleared for immediate takeoff</div></td></tr><tr id="item-G1" data-family="spacing"><td class="id">G1</td><td class="src">ATC KVNY</td><td>Make one left 360 for spacing, and then look for traffic on a 6 mile final.<div class="raw">Spoken to 4CH, make one left 360 for spacing and then look for sightage on 6 mile final</div></td></tr><tr id="item-G2" data-family="spacing"><td class="id">G2</td><td class="src">ATC KWHP</td><td>Make a right 360, you&#x27;re too close to that traffic.<div class="raw">Hyper 32, Foxtrot, make a right 360 or wait too close to that traffic, ready.</div></td></tr><tr id="item-G3" data-family="spacing"><td class="id">G3</td><td class="src">ATC KVNY</td><td>For traffic, make a right 360, a wide right 360.<div class="raw">Cessna 246, Van Nuys, turn right heading 0, for traffic, make a right 360, a wide right 360</div></td></tr><tr id="item-G4" data-family="spacing"><td class="id">G4</td><td class="src">ATC KVNY</td><td>Make a right S-turn, you&#x27;re a little close; the traffic you&#x27;re following is just over the high speed on short final.<div class="raw">Cherokee 36N, make a right S-turn, you&#x27;re a little close, the traffic you&#x27;re following is just over the high speed now on short final.</div></td></tr><tr id="item-G5" data-family="spacing"><td class="id">G5</td><td class="src">ATC KVNY</td><td>S-turns are approved to the west if you need them.<div class="raw">Cessna Sierra Chiako, S turns are approved to the west if you need them.</div></td></tr><tr id="item-G6" data-family="spacing"><td class="id">G6</td><td class="src">ATC KVNY</td><td>Reduce to the slowest practical speed, continue.<div class="raw">6, Whiskey, Uniform, understood, I&#x27;ve got several jet departures to get out prior to arrival, reduce the slowest practical speed, continue.</div></td></tr><tr id="item-G7" data-family="spacing"><td class="id">G7</td><td class="src">ATC KVNT</td><td>Best forward speed until about 2 mile final.<div class="raw">Cessna 805, best speed forward until about 2 miles final.</div></td></tr><tr id="item-G8" data-family="spacing"><td class="id">G8</td><td class="src">ATC KSMO</td><td>Keep the speed up, cleared to land, 21.<div class="raw">Hey Charlie, Charlie, keep the speed up, cleared to land, 21.</div></td></tr><tr id="item-G9" data-family="spacing"><td class="id">G9</td><td class="src">ATC KVNY</td><td>Extend downwind, reduce speed, and turn base at the 118 freeway.<div class="raw">0-0, Romeo, Tango, extend downwind, reduce speed and turn base at 118, freeway</div></td></tr><tr id="item-G10" data-family="spacing"><td class="id">G10</td><td class="src">ATC KVNY</td><td>Short approach approved, runway 34R, cleared for the option.<div class="raw">Cessna 90B, short approach approved, runway 34R, cleared for the option, tell departure, good morning</div></td></tr><tr id="item-G11" data-family="spacing"><td class="id">G11</td><td class="src">ATC KVNY</td><td>Can you make a short approach?<div class="raw">Cessna 015, can you make a short approach?</div></td></tr><tr id="item-G12" data-family="spacing"><td class="id">G12</td><td class="src">ATC KVNY</td><td>Make a turn towards the Encino Reservoir for traffic departing 16R.<div class="raw">7SAR5D, make a turn towards the Encino Reservoir for traffic departing 16R.</div></td></tr><tr id="item-H1" data-family="sequencing"><td class="id">H1</td><td class="src">ATC KVNY</td><td>Turn downwind, number two, follow the Falcon on a 6 mile final, report traffic in sight.<div class="raw">N950R, turn downwind, number two, follow Falcon on 6 mile final, report traffic to Cessna.</div></td></tr><tr id="item-H2" data-family="sequencing"><td class="id">H2</td><td class="src">ATC KVNT</td><td>Follow the Cessna ahead on base, report.<div class="raw">36N, follow Cessna ahead on base, report.</div></td></tr><tr id="item-H3" data-family="sequencing"><td class="id">H3</td><td class="src">ATC KVNY</td><td>Extend downwind, follow the Cherokee on a 3 mile final, report in sight.<div class="raw">Cherokee 4-6-7, extend downwind, follow Cherokee 3 mile final report to site and re-sequence.</div></td></tr><tr id="item-H4" data-family="sequencing"><td class="id">H4</td><td class="src">ATC KVNY</td><td>Just behind the traffic, turn base, runway 16L, caution wake turbulence, cleared for the option.<div class="raw">...32 Foxtrot, just behind the traffic turn base, remain 16L, caution, white turbulence, clear for the option.</div></td></tr><tr id="item-H5" data-family="sequencing"><td class="id">H5</td><td class="src">ATC KVNY</td><td>Pass behind that traffic, change to runway 16L, cleared for the option.<div class="raw">N3M, pass behind that traffic, change to runway 16L, clear for the option.</div></td></tr><tr id="item-H6" data-family="sequencing"><td class="id">H6</td><td class="src">ATC KVNT</td><td>Just use the upwind as much as needed to follow company ahead.<div class="raw">Cherokee 274, just use the upwind as much as needed to follow company ahead.</div></td></tr><tr id="item-H7" data-family="sequencing"><td class="id">H7</td><td class="src">ATC KVNY</td><td>That Cherokee is going to the same place, so just follow him; he&#x27;s in the northbound turn now.<div class="raw">830K, that Cherokee is actually going to go to the same place they&#x27;re going, so just follow him, he&#x27;s in the northbound turn now</div></td></tr><tr id="item-H8" data-family="sequencing"><td class="id">H8</td><td class="src">ATC KVNY</td><td>Re-sequence number 2 behind the Cessna on short final.<div class="raw">7TQ, re-sequence number 2 on the Cessna short final.</div></td></tr><tr id="item-I1" data-family="landing"><td class="id">I1</td><td class="src">ATC KVNY</td><td>Change to runway 16R, runway 16R, cleared to land.<div class="raw">N907L, change to runway 16R, runway 16R, cleared to land.</div></td></tr><tr id="item-I2" data-family="landing"><td class="id">I2</td><td class="src">ATC KVNY</td><td>Turn base now, change to runway 16L.<div class="raw">Dreamline 401, turn base now, change to runway 16L.</div></td></tr><tr id="item-I3" data-family="landing"><td class="id">I3</td><td class="src">ATC KVNY</td><td>Runway 16L, cleared for the option; on the go, straight-out departure is approved.<div class="raw">Cessna 347, runway 16L, cleared for the option on the go, straight out of departure, is approved</div></td></tr><tr id="item-I4" data-family="landing"><td class="id">I4</td><td class="src">ATC KEMT</td><td>Runway 19, cleared for the option, right closed traffic.<div class="raw">Right, 119, clear for the option, right, close traffic, 803.</div></td></tr><tr id="item-I5" data-family="landing"><td class="id">I5</td><td class="src">ATC KVNY</td><td>Continue down the runway and exit at high-speed Hotel.<div class="raw">Cessna 4E, continue down the runway, and exit at high speed hotel, please, and kind of ground, pulling to.</div></td></tr><tr id="item-I6" data-family="landing"><td class="id">I6</td><td class="src">ATC KSMO</td><td>Can you expedite off the runway at this intersection, please?<div class="raw">Cirrus 8P, can you expedite off the runway at this intersection, please?</div></td></tr><tr id="item-I7" data-family="landing"><td class="id">I7</td><td class="src">ATC KONT</td><td>Continue all the way down to the end, turn left at the end and contact ground.<div class="raw">Cessna 983 heavy continue all the way down to the end, turn left at the end and contact ground</div></td></tr><tr id="item-I8" data-family="landing"><td class="id">I8</td><td class="src">ATC KWHP</td><td>Cleared to land, exit Delta.<div class="raw">QB5125, cleared to land, exit D, winds 130 at 8</div></td></tr><tr id="item-J1" data-family="go_around"><td class="id">J1</td><td class="src">ATC KVNY</td><td>Go around, and early turn is approved to crosswind.<div class="raw">N923, go around, and early turn is approved, set to crosswind.</div></td></tr><tr id="item-J2" data-family="go_around"><td class="id">J2</td><td class="src">ATC KVNY</td><td>Start a climb, go around, continue right traffic for 34R.<div class="raw">Start a climb, go around, continue right traffic, for 34R.</div></td></tr><tr id="item-J3" data-family="go_around"><td class="id">J3</td><td class="src">ATC KVNT</td><td>Start climbing, go around, and you can just make a left turn for the downwind now.<div class="raw">N77015, roger, started climbing, go around, and uh, yeah, you can just make a left turn for the downwind now.</div></td></tr><tr id="item-K1" data-family="maneuvering"><td class="id">K1</td><td class="src">ATC KSMO</td><td>Cross midfield, hold over the business park.<div class="raw">Helicopter 624W, Santa Monica tower, cross midfield, hold over the business park.</div></td></tr><tr id="item-K2" data-family="maneuvering"><td class="id">K2</td><td class="src">ATC KSMO</td><td>Approved as requested for Brentwood; go to the pier first and then eastbound, use caution drone activity.<div class="raw">TV9, Santa Monica Tower, mark altimeter 29.96, approved, as requested for Brantwood, go to the pier first and then eastbound, use caution drone activity over Santa Monica.</div></td></tr><tr id="item-K3" data-family="maneuvering"><td class="id">K3</td><td class="src">ATC KVNY</td><td>Overfly the Northridge Mall.<div class="raw">N35M, overfly the Northridge Mall.</div></td></tr><tr id="item-K4" data-family="maneuvering"><td class="id">K4</td><td class="src">ATC KSMO</td><td>(traffic advisory) He&#x27;s going to circle the Santa Monica Pier a couple times and then head out towards the Hollywood sign.<div class="raw">November 3, Mike Victor, traffic up at the New Getty, he&#x27;s going to circle the Santa Monica Pier a couple times and then head out towards the Hollywood sign.</div></td></tr><tr id="item-K5" data-family="maneuvering"><td class="id">K5</td><td class="src">ATC KVNT</td><td>Follow the 101 freeway westbound, maintain VFR at or below 2500 until leaving the Class D.<div class="raw">Cessna 4LM, follow V101 freeway westbound, maintain VFRW at 2500 until leaving the class, D.</div></td></tr><tr id="item-L1" data-family="vectors"><td class="id">L1</td><td class="src">ATC KONT</td><td>Turn left heading 230 now, vector for your descent, maintain at or above 4000.<div class="raw">Turn left heading 230 now, vector for your descent, maintain at or above 4,000.</div></td></tr><tr id="item-L2" data-family="vectors"><td class="id">L2</td><td class="src">ATC KBUR</td><td>Turn right heading 170, reduce speed to 170 knots or less.<div class="raw">Okay, right turn heading 170, reduce speed to 170 knots or less, Sonos 001.</div></td></tr><tr id="item-L3" data-family="vectors"><td class="id">L3</td><td class="src">ATC KVNY</td><td>Turn right 10 degrees and contact departure 120.2.<div class="raw">Cherokee 467, turn right 10 degrees and contact down 120.2.</div></td></tr><tr id="item-L4" data-family="vectors"><td class="id">L4</td><td class="src">ATC KBUR</td><td>Expedite climb through 5000.<div class="raw">...expedite climb through 5,000.</div></td></tr><tr id="item-M1" data-family="ground"><td class="id">M1</td><td class="src">ATC KVNY</td><td>Turn right at Golf, hold short runway 16L for departing traffic.<div class="raw">Niner, turn right at Golf, hold short, Runway 16L for departing traffic.</div></td></tr><tr id="item-M2" data-family="ground"><td class="id">M2</td><td class="src">ATC KVNY</td><td>Expedite and turn right at G, cross runway 16R, traffic 1 mile final.<div class="raw">Cessna 826, expedite and turn right at G, cross runway 16R, downwind 5, on the ground 0.7, traffic excitation on 1 mile final.</div></td></tr><tr id="item-M3" data-family="ground"><td class="id">M3</td><td class="src">ATC KVNY</td><td>Cancel takeoff clearance, hold short runway 16R.<div class="raw">N787S, roger, just take your time, advise ready for departure, cancel takeoff clearance and hold short, runway 16R.</div></td></tr><tr id="item-M4" data-family="ground"><td class="id">M4</td><td class="src">ATC KVNY</td><td>SoCal cancelled your release, so taxi down the runway, turn left at Quebec, and taxi back via Alpha.<div class="raw">Gulfstream 29H, Fox, SoCal cancelled your release, so taxi down the runway, turn left at Quebec, and taxi back via A, Romeo</div></td></tr><tr id="item-M5" data-family="ground"><td class="id">M5</td><td class="src">ATC KVNY</td><td>Runway 16R at Delta, line up and wait, traffic Cherokee.<div class="raw">Cessna 01L, running 16R at Delta, line up and wait, traffic Cherokee.</div></td></tr><tr id="item-P1" data-family="instructor"><td class="id">P1</td><td class="src">AFH ch6 (normal takeoff)</td><td>After a positive rate of climb is established and the airplane has accelerated to Vy, retract the flaps.</td></tr><tr id="item-P2" data-family="instructor"><td class="id">P2</td><td class="src">AFH ch6</td><td>Maintain takeoff power until reaching at least 500 feet above the surrounding terrain or obstacles.</td></tr><tr id="item-P3" data-family="instructor"><td class="id">P3</td><td class="src">AFH ch6 / ACS PA.IV.E</td><td>Short-field takeoff - climb at Vx until clear of obstacles or 50 feet, then accelerate to Vy (+10/-5) and retract flaps in increments.</td></tr><tr id="item-P4" data-family="instructor"><td class="id">P4</td><td class="src">AFH ch8</td><td>If remaining in the pattern, turn crosswind beyond the departure end of the runway, within 300 feet of pattern altitude.</td></tr><tr id="item-P5" data-family="instructor"><td class="id">P5</td><td class="src">AFH ch8</td><td>If departing the pattern, continue straight out or exit with a 45 degree turn in the pattern direction beyond the departure end, after reaching pattern altitude.</td></tr><tr id="item-P6" data-family="instructor"><td class="id">P6</td><td class="src">AFH ch8</td><td>Enter the pattern at a 45 degree angle to the downwind, headed toward a point abeam midfield, at pattern altitude.</td></tr><tr id="item-P7" data-family="instructor"><td class="id">P7</td><td class="src">AFH ch8</td><td>Arriving from the upwind side - cross midfield at least 500 feet above pattern altitude; when about 2 miles clear, descend to pattern altitude, then turn to enter on the 45.</td></tr><tr id="item-P8" data-family="instructor"><td class="id">P8</td><td class="src">AFH ch8</td><td>Alternate upwind-side entry - enter on a midfield crosswind at pattern altitude, then turn downwind.</td></tr><tr id="item-P9" data-family="instructor"><td class="id">P9</td><td class="src">AFH ch8</td><td>Fly the downwind about 1/2 to 1 mile from the landing runway, at pattern altitude.</td></tr><tr id="item-P10" data-family="instructor"><td class="id">P10</td><td class="src">AFH ch8</td><td>Maintain pattern altitude until at least abeam the approach end; then reduce power and begin the descent.</td></tr><tr id="item-P11" data-family="instructor"><td class="id">P11</td><td class="src">AFH ch8</td><td>Continue downwind until the approach end is about 45 degrees behind, then make a medium-bank turn onto base.</td></tr><tr id="item-P12" data-family="instructor"><td class="id">P12</td><td class="src">AFH ch8</td><td>On base, keep the ground track perpendicular to the extended centerline; crab into the wind as needed.</td></tr><tr id="item-P13" data-family="instructor"><td class="id">P13</td><td class="src">AFH ch9</td><td>With a strong wind on final, or a steep approach with flaps, position the base leg closer to the approach end.</td></tr><tr id="item-P14" data-family="instructor"><td class="id">P14</td><td class="src">AFH ch9 / ACS PA.IV.B.S7</td><td>On final, fly the manufacturer&#x27;s approach speed, or 1.3 Vso if there is none, +10/-5 knots.</td></tr><tr id="item-P15" data-family="instructor"><td class="id">P15</td><td class="src">AFH ch9</td><td>Full flaps are not recommended until established on final.</td></tr><tr id="item-P16" data-family="instructor"><td class="id">P16</td><td class="src">AFH ch9</td><td>Be stabilized (speed +10/-5 of landing speed, landing configuration, trimmed) by 500 feet AGL or go around; if the approach becomes unstabilized below 300 feet AGL, go around immediately.</td></tr><tr id="item-P17" data-family="instructor"><td class="id">P17</td><td class="src">AFH ch9</td><td>If descending faster than 500 fpm, reduce the descent rate before 300 feet AGL.</td></tr><tr id="item-P18" data-family="instructor"><td class="id">P18</td><td class="src">AFH ch9</td><td>Start the round out at about 10 to 20 feet above the runway.</td></tr><tr id="item-P19" data-family="instructor"><td class="id">P19</td><td class="src">AFH ch9</td><td>Go-around - power first, then attitude, then configuration; once the descent has stopped, retract flaps to the takeoff setting.</td></tr><tr id="item-P20" data-family="instructor"><td class="id">P20</td><td class="src">AFH ch8</td><td>After a go-around, at a safe altitude, shift to the upwind side so departing traffic stays in view.</td></tr><tr id="item-P21" data-family="instructor"><td class="id">P21</td><td class="src">ACS PA.III.B.S5</td><td>Maintain traffic pattern altitude +/-100 feet and the appropriate airspeed +/-10 knots.</td></tr><tr id="item-P22" data-family="instructor"><td class="id">P22</td><td class="src">ACS PA.IV.B.S10 / PA.IV.F.S10</td><td>Touch down within 400 feet beyond the specified point (normal landing); within 200 feet (short-field).</td></tr><tr id="item-P23" data-family="instructor"><td class="id">P23</td><td class="src">AFH ch7</td><td>Rectangular course - maintain a constant distance from the field boundaries at constant altitude and airspeed, correcting for wind.</td></tr><tr id="item-P24" data-family="instructor"><td class="id">P24</td><td class="src">AFH ch9</td><td>Use a forward slip to steepen the descent without gaining airspeed.</td></tr><tr id="item-P25" data-family="instructor"><td class="id">P25</td><td class="src">ACS PA.V.A.S5</td><td>Steep turn - 45 degree bank, maintain entry altitude +/-100 feet, airspeed +/-10 knots, bank +/-5 degrees, roll out on the entry heading +/-10 degrees.</td></tr></tbody></table></div>
+
+</main>
+</div>
+<script>
+document.querySelectorAll('.filters button').forEach(b => b.addEventListener('click', () => {
+  document.querySelectorAll('.filters button').forEach(x => x.classList.toggle('on', x === b));
+  const f = b.dataset.f;
+  document.querySelectorAll('table.corpus tbody tr').forEach(r => {
+    r.style.display = !f || r.dataset.family === f ? '' : 'none';
+  });
+}));
+</script>
+</body>
+</html>

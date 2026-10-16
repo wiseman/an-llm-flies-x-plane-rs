@@ -249,7 +249,11 @@ impl ClaudeSession {
             LogKind::System,
             &format!("[claude-code] tools served at {}", mcp.url),
         );
-        let system_prompt = format!("{}{}", mode.system_prompt(), CLAUDE_CODE_ADDENDUM);
+        let system_prompt = format!(
+            "{}{}",
+            crate::llm::conversation::system_prompt_for(mode, tool_context.tool_set),
+            CLAUDE_CODE_ADDENDUM
+        );
         let mut session = Self::plain(cfg, "[claude-code]", system_prompt, bus)?;
         session.tool_context = Some(tool_context);
         session.mcp = Some(mcp);

@@ -179,6 +179,12 @@ pub struct EvalConfig {
     /// Model for a simulated controller that answers the pilot's radio
     /// calls (see `llm::sim_atc`). `None` = nobody answers.
     pub sim_atc_model: Option<String>,
+    /// Which tools (and matching system prompt) the pilot LLM gets.
+    pub tool_set: crate::llm::tools::ToolSet,
+    /// A scripted scenario (`evals/plan/*.yaml`): start state, timed or
+    /// triggered ATC calls, end condition and checks. `None` = the
+    /// classic parked-start mission eval.
+    pub scenario: Option<crate::eval_scenario::Scenario>,
 }
 
 #[derive(Debug, Clone)]
@@ -203,6 +209,9 @@ pub struct EvalResult {
     pub summary_json: Option<PathBuf>,
     pub track_csv: Option<PathBuf>,
     pub track_kml: Option<PathBuf>,
+    /// Scenario checks, scored over the flown track.
+    pub checks: Vec<crate::eval_scenario::CheckResult>,
+    pub ground_svg: Option<PathBuf>,
 }
 
 /// Resolved lat/lon/heading/length for the start state + runway frame.
@@ -368,6 +377,35 @@ fn resolve_start(cfg: &EvalConfig) -> Result<ResolvedStart> {
     })
 }
 
+/// Start for an airborne or on-runway scenario: the named runway anchors
+/// the frame and the georeference sits at the airport reference point.
+fn resolve_start_runway(cfg: &EvalConfig, runway: &str, heading_deg: Option<f64>) -> Result<ResolvedStart> {
+    use crate::llm::tools::{open_apt_dat_parquet, query_runway_end};
+    let cache = &cfg.apt_dat_cache_dir;
+    let conn = open_apt_dat_parquet(&cache.join(AIRPORTS_FILE), &cache.join(RUNWAYS_FILE), &cache.join(COMMS_FILE))?;
+    let (elev, lat, lon): (f64, f64, f64) = conn
+        .query_row(
+            "SELECT elevation_ft, latitude_deg, longitude_deg FROM airports WHERE ident = ? LIMIT 1",
+            [&cfg.airport],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .with_context(|| format!("looking up airport {}", cfg.airport))?;
+    let end = query_runway_end(&conn, &cfg.airport, runway)?;
+    Ok(ResolvedStart {
+        runway_ident: runway.to_string(),
+        runway_threshold_lat_deg: end.threshold_lat_deg,
+        runway_threshold_lon_deg: end.threshold_lon_deg,
+        runway_course_deg: end.course_deg,
+        runway_length_ft: end.length_ft,
+        runway_width_ft: end.width_ft,
+        runway_displaced_threshold_ft: end.displaced_threshold_ft,
+        field_elevation_ft: elev,
+        parking_lat_deg: lat,
+        parking_lon_deg: lon,
+        parking_heading_deg: heading_deg.unwrap_or(end.course_deg),
+    })
+}
+
 fn build_eval_config_bundle(
     base: ConfigBundle,
     resolved: &ResolvedStart,
@@ -434,6 +472,29 @@ struct ControlLoopCtx {
     /// `t_sim` so Google Earth replays at simulated pace even when the
     /// eval ran much faster (or slower) than realtime.
     track_wall_start: chrono::DateTime<chrono::Utc>,
+    /// Scenario: scripted messages, the per-tick track, and whether the
+    /// run ends once the aircraft has landed and stopped (or at a set
+    /// time).
+    schedule: Option<crate::eval_scenario::MessageSchedule>,
+    /// When each scripted message went out, for scoring.
+    sent_at: Arc<PLMutex<Vec<Option<f64>>>>,
+    input_tx: Sender<IncomingMessage>,
+    /// The pilot's inbox. The sim holds still while messages wait in it,
+    /// as it does while the LLM is thinking: a slow-starting worker (a
+    /// Claude Code child) mustn't let the sim run past its first message.
+    input_rx: Receiver<IncomingMessage>,
+    samples: Arc<PLMutex<Vec<crate::eval_scenario::Sample>>>,
+    scenario_end: Option<ScenarioEnd>,
+    /// Scripted traffic, fed to the pilot's traffic picture every tick.
+    traffic: Option<Arc<crate::eval_scenario::ScriptedTraffic>>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ScenarioEnd {
+    /// End after landing and slowing to a stop.
+    on_landed: bool,
+    /// End (as a completed run) at this sim time.
+    after_s: Option<f64>,
 }
 
 /// Build a `TrackPoint` and hand it to the recorder. Called only when
@@ -499,7 +560,7 @@ fn sample_eval_track(
 
 /// Drive the sim forward until the outcome channel yields a result (or
 /// budget expires). Returns the final outcome + peak AGL + final fuel.
-fn run_control_loop(ctx: ControlLoopCtx) -> (MissionOutcome, f64, f64) {
+fn run_control_loop(mut ctx: ControlLoopCtx) -> (MissionOutcome, f64, f64) {
     let mut max_alt_agl_ft: f64 = 0.0;
     let mut been_airborne = false;
     let wall_spin_sleep = Duration::from_millis(1);
@@ -565,7 +626,7 @@ fn run_control_loop(ctx: ControlLoopCtx) -> (MissionOutcome, f64, f64) {
 
         // Sim is paused while the LLM deliberates so sleep(N) stays
         // anchored to sim time.
-        if ctx.bus.is_llm_busy() {
+        if ctx.bus.is_llm_busy() || !ctx.input_rx.is_empty() {
             thread::sleep(wall_spin_sleep);
             continue;
         }
@@ -573,6 +634,9 @@ fn run_control_loop(ctx: ControlLoopCtx) -> (MissionOutcome, f64, f64) {
         {
             let mut pilot = ctx.pilot.lock();
             let mut dyn_state = ctx.dynamics.lock();
+            if let Some(t) = &ctx.traffic {
+                pilot.traffic.set(t.at(dyn_state.time_s));
+            }
             let (_, commands) = pilot.update(&dyn_state, ctx.dt);
             ctx.model.step(&mut dyn_state, &commands, ctx.dt);
         }
@@ -588,12 +652,12 @@ fn run_control_loop(ctx: ControlLoopCtx) -> (MissionOutcome, f64, f64) {
         // Update airborne tracking + auto-detection state.
         let (on_ground, alt_ft, gs_kt, phase_now, sim_time_s) = {
             let d = ctx.dynamics.lock();
-            let snap = ctx.pilot.lock().latest_snapshot.clone();
+            let phase = ctx.pilot.lock().latest_snapshot.as_ref().and_then(|s| s.phase);
             (
                 d.on_ground,
                 d.altitude_ft,
                 d.ground_velocity_ft_s.length() / crate::types::KT_TO_FPS,
-                snap.as_ref().and_then(|s| s.phase),
+                phase,
                 d.time_s,
             )
         };
@@ -603,6 +667,59 @@ fn run_control_loop(ctx: ControlLoopCtx) -> (MissionOutcome, f64, f64) {
         }
         if !on_ground {
             been_airborne = true;
+        }
+
+        if ctx.scenario_end.is_some() {
+            let (pos, track, bank_deg, vs_fpm) = {
+                let d = ctx.dynamics.lock();
+                let trk = if d.ground_velocity_ft_s.length() > 1.0 {
+                    crate::types::vector_to_heading(d.ground_velocity_ft_s)
+                } else {
+                    d.heading_deg
+                };
+                (d.position_ft, trk, d.roll_deg, d.vertical_speed_ft_s * 60.0)
+            };
+            let sample = crate::eval_scenario::Sample {
+                t: sim_time_s,
+                pos,
+                alt_msl_ft: alt_ft,
+                alt_agl_ft: agl,
+                track_deg: track,
+                phase: phase_now,
+                on_ground,
+                crashed: ctx.bridge.get_dataref_value(HAS_CRASHED.name).is_some_and(|v| v >= 0.5),
+                bank_deg,
+                vs_fpm,
+            };
+            ctx.samples.lock().push(sample);
+            if let Some(schedule) = ctx.schedule.as_mut() {
+                let due = schedule.due(&sample, ctx.dt);
+                if !due.is_empty() {
+                    *ctx.sent_at.lock() = schedule.sent_at.clone();
+                }
+                for (i, m) in due {
+                    if let Some(text) = &m.atc {
+                        ctx.bus.push_log_kind(LogKind::System, format!("[scenario msg {i} t={sim_time_s:.0}s] ATC: {text}"));
+                        ctx.bus.push_radio(format!("[atc] {text}"));
+                        let _ = ctx.input_tx.send(IncomingMessage::atc(text.clone()));
+                    }
+                    if let Some(text) = &m.operator {
+                        ctx.bus.push_log_kind(LogKind::System, format!("[scenario msg {i} t={sim_time_s:.0}s] operator: {text}"));
+                        let _ = ctx.input_tx.send(IncomingMessage::operator(text.clone()));
+                    }
+                }
+            }
+            let end = ctx.scenario_end.unwrap();
+            if end.on_landed && been_airborne && on_ground && gs_kt < 3.0 {
+                let outcome = MissionOutcome::auto_success(format!("landed and stopped at t_sim={sim_time_s:.1}s"));
+                let _ = ctx.outcome_tx.try_send(outcome.clone());
+                return finish(&ctx, outcome, max_alt_agl_ft);
+            }
+            if end.after_s.is_some_and(|t| sim_time_s >= t) {
+                let outcome = MissionOutcome::auto_success(format!("scenario time reached at t_sim={sim_time_s:.1}s"));
+                let _ = ctx.outcome_tx.try_send(outcome.clone());
+                return finish(&ctx, outcome, max_alt_agl_ft);
+            }
         }
 
         // Sample the flight track at 1 Hz in sim-time. All extra field
@@ -674,9 +791,21 @@ fn run_control_loop(ctx: ControlLoopCtx) -> (MissionOutcome, f64, f64) {
 }
 
 pub fn run_eval(base_config: ConfigBundle, cfg: EvalConfig) -> Result<EvalResult> {
-    let resolved = resolve_start(&cfg).context("resolving eval start state")?;
     let transcript_path = cfg.output_dir.join(format!("{}.txt", cfg.session_stem));
     let brain = PilotBrain::build(cfg.llm_provider, &cfg.llm_model, Some(&transcript_path));
+    run_eval_with(base_config, cfg, brain)
+}
+
+/// `run_eval` with the brain supplied (tests script the pilot), still
+/// resolving the start from the apt.dat cache.
+pub fn run_eval_with(base_config: ConfigBundle, cfg: EvalConfig, brain: PilotBrain) -> Result<EvalResult> {
+    use crate::eval_scenario::Start;
+    let resolved = match cfg.scenario.as_ref().map(|s| &s.start) {
+        Some(Start::Airborne { airborne }) => resolve_start_runway(&cfg, &airborne.runway, Some(airborne.heading_deg)),
+        Some(Start::Runway { runway }) => resolve_start_runway(&cfg, &runway.runway, None),
+        _ => resolve_start(&cfg),
+    }
+    .context("resolving eval start state")?;
     run_eval_with_brain(base_config, cfg, resolved, brain)
 }
 
@@ -758,7 +887,8 @@ pub fn run_eval_with_brain(
     );
 
     // --- dynamics + bridge ---
-    let model = SimpleAircraftModel::new(eval_config.clone(), Vec2::ZERO);
+    let wind_kt = cfg.scenario.as_ref().and_then(|s| s.wind).map(|w| w.vector_kt()).unwrap_or(Vec2::ZERO);
+    let model = SimpleAircraftModel::new(eval_config.clone(), wind_kt);
     let mut dyn_initial = model.initial_state_at(
         Vec2::ZERO,
         resolved.parking_heading_deg,
@@ -766,6 +896,32 @@ pub fn run_eval_with_brain(
     );
     // Parked with the parking brake set, like a ramp start in X-Plane.
     dyn_initial.parking_brake = 1.0;
+    let airborne_start = cfg.scenario.as_ref().and_then(|s| match &s.start {
+        crate::eval_scenario::Start::Airborne { airborne } => Some(airborne.clone()),
+        _ => None,
+    });
+    if let Some(crate::eval_scenario::Start::Runway { runway }) = cfg.scenario.as_ref().map(|s| &s.start) {
+        let frame = crate::guidance::runway_geometry::RunwayFrame::new(eval_config.airport.runway.clone());
+        dyn_initial.position_ft = frame.to_world_frame(Vec2::new(runway.along_ft, 0.0));
+        dyn_initial.heading_deg = eval_config.airport.runway.course_deg;
+        dyn_initial.parking_brake = 0.0;
+    }
+    if let Some(a) = &airborne_start {
+        let frame = crate::guidance::runway_geometry::RunwayFrame::new(eval_config.airport.runway.clone());
+        dyn_initial.position_ft = frame.to_world_frame(Vec2::new(a.along_ft, a.right_ft));
+        dyn_initial.altitude_ft = a
+            .alt_msl_ft
+            .or(a.alt_agl_ft.map(|h| resolved.field_elevation_ft + h))
+            .unwrap_or(resolved.field_elevation_ft + eval_config.pattern.altitude_agl_ft);
+        dyn_initial.heading_deg = a.heading_deg;
+        dyn_initial.ias_kt = a.ias_kt;
+        dyn_initial.on_ground = false;
+        dyn_initial.parking_brake = 0.0;
+        dyn_initial.throttle_pos = 0.5;
+        dyn_initial.pitch_deg = 2.0;
+        dyn_initial.ground_velocity_ft_s =
+            crate::types::heading_to_vector(a.heading_deg, a.ias_kt * crate::types::KT_TO_FPS);
+    }
     let dynamics = Arc::new(PLMutex::new(dyn_initial));
     let bridge = Arc::new(SimpleToolBridge::new(
         dynamics.clone(),
@@ -830,15 +986,19 @@ pub fn run_eval_with_brain(
         bridge: Some(tool_bridge),
         config: Arc::new(PLMutex::new(eval_config.clone())),
         recent_broadcasts: Arc::new(PLMutex::new(Vec::new())),
+        radio_log: Arc::new(PLMutex::new(Vec::new())),
         apt_dat_cache_dir: Some(cfg.apt_dat_cache_dir.clone()),
         bus: Some(bus.clone()),
         runway_conn: Arc::new(Mutex::new(None)),
         heartbeat_pump: Some(pump.clone()),
-        mission_complete_tx: Some(outcome_tx.clone()),
+        // Scenarios end on their own conditions; mission_complete would
+        // only let the pilot stop early.
+        mission_complete_tx: cfg.scenario.is_none().then(|| outcome_tx.clone()),
         turn_counter: Some(turn_counter.clone()),
         tool_counters: Some(tool_counters.clone()),
         taxi_graphs: Default::default(),
         sim_atc: sim_atc.clone(),
+        tool_set: cfg.tool_set,
     });
 
     // Prime `latest_snapshot` so the LLM's first `get_status` returns
@@ -851,7 +1011,54 @@ pub fn run_eval_with_brain(
         let mut pilot = pilot_arc.lock();
         let dyn_state = dynamics.lock();
         let _ = pilot.update(&dyn_state, cfg.dt);
+        // An airborne start hands over with the autopilot holding
+        // heading, altitude and speed, so nothing coasts while the pilot
+        // reads the briefing.
+        if airborne_start.is_some() {
+            use crate::core::profiles::{AltitudeHoldProfile, HeadingHoldProfile, SpeedHoldProfile};
+            let _ = pilot.engage_profiles(vec![
+                Box::new(HeadingHoldProfile::new(dyn_state.heading_deg, eval_config.limits.max_bank_pattern_deg, None).unwrap()),
+                Box::new(AltitudeHoldProfile::new(dyn_state.altitude_ft)),
+                Box::new(SpeedHoldProfile::new(dyn_state.ias_kt)),
+            ]);
+            let _ = pilot.update(&dyn_state, cfg.dt);
+        }
     }
+
+    // Scenario plumbing: scripted messages (resolved against the same
+    // place list and runways the plan uses) and a per-tick track.
+    let scenario_resolver_parts = (georef, crate::llm::tools::DuckAirports { ctx: &tool_ctx });
+    let schedule = match &cfg.scenario {
+        Some(s) => {
+            let mut r = crate::plan::resolve::Resolver::new(
+                scenario_resolver_parts.0,
+                &crate::plan::gazetteer::GAZETTEER,
+                &scenario_resolver_parts.1,
+            );
+            Some(crate::eval_scenario::MessageSchedule::new(&s.messages, &mut r).context("scenario messages")?)
+        }
+        None => None,
+    };
+    let scripted_traffic = match &cfg.scenario {
+        Some(s) if !s.traffic.is_empty() => {
+            let mut r = crate::plan::resolve::Resolver::new(
+                scenario_resolver_parts.0,
+                &crate::plan::gazetteer::GAZETTEER,
+                &scenario_resolver_parts.1,
+            );
+            let t = crate::eval_scenario::ScriptedTraffic::new(&s.traffic, &cfg.airport, resolved.field_elevation_ft, &mut r)
+                .context("scenario traffic")?;
+            {
+                let mut pilot = pilot_arc.lock();
+                pilot.traffic.set(t.at(0.0));
+                pilot.refresh_traffic_status();
+            }
+            Some(Arc::new(t))
+        }
+        _ => None,
+    };
+    let samples: Arc<PLMutex<Vec<crate::eval_scenario::Sample>>> = Arc::new(PLMutex::new(Vec::new()));
+    let sent_at: Arc<PLMutex<Vec<Option<f64>>>> = Arc::new(PLMutex::new(Vec::new()));
 
     // --- deliver startup messages ---
     for msg in &cfg.startup_messages {
@@ -929,6 +1136,16 @@ pub fn run_eval_with_brain(
         track_recorder: track_recorder.clone(),
         track_wall_start,
         sim_atc: sim_atc.clone(),
+        schedule,
+        sent_at: sent_at.clone(),
+        input_tx: input_tx.clone(),
+        input_rx: input_rx.clone(),
+        samples: samples.clone(),
+        traffic: scripted_traffic.clone(),
+        scenario_end: cfg.scenario.as_ref().map(|s| ScenarioEnd {
+            on_landed: s.end_after_s.is_none(),
+            after_s: s.end_after_s,
+        }),
     };
     let (outcome, max_alt_agl_ft, final_fuel_kg) = run_control_loop(ctrl_ctx);
     if let Some(atc) = &sim_atc {
@@ -968,6 +1185,67 @@ pub fn run_eval_with_brain(
         }
     } else {
         false
+    };
+
+    // --- score scenario checks + ground track ---
+    let ground_svg_path = cfg.output_dir.join(format!("{}-ground.svg", cfg.session_stem));
+    let (checks, ground_svg) = match &cfg.scenario {
+        Some(s) => {
+            use crate::plan::resolve::AirportSource;
+            let samples = samples.lock().clone();
+            let sent = sent_at.lock().clone();
+            let airports = crate::llm::tools::DuckAirports { ctx: &tool_ctx };
+            let mut resolver =
+                crate::plan::resolve::Resolver::new(georef, &crate::plan::gazetteer::GAZETTEER, &airports);
+            let apt = airports.airport(&cfg.airport).ok();
+            let mut frame_for = |rwy: &str| -> Result<crate::guidance::runway_geometry::RunwayFrame> {
+                let apt = apt.as_ref().ok_or_else(|| anyhow!("no airport data for {}", cfg.airport))?;
+                let info = apt.runway(rwy).ok_or_else(|| anyhow!("no runway {rwy} at {}", cfg.airport))?;
+                Ok(crate::guidance::runway_geometry::RunwayFrame::new(crate::plan::compile::runway_from_info(
+                    info,
+                    georef,
+                    crate::types::TrafficSide::Left,
+                )))
+            };
+            let radio = tool_ctx.radio_log.lock().clone();
+            let extras = crate::eval_scenario::ScoreExtras { traffic: scripted_traffic.as_deref(), radio: &radio };
+            let checks =
+                crate::eval_scenario::score(&s.checks, &samples, &sent, &mut resolver, &mut frame_for, cfg.dt, &extras);
+            for c in &checks {
+                bus.push_log_kind(
+                    LogKind::System,
+                    format!("check {}: {} — {}", if c.pass { "PASS" } else { "FAIL" }, c.check, c.detail),
+                );
+            }
+            let runways: Vec<(String, Vec2, Vec2)> = apt
+                .as_ref()
+                .map(|a| {
+                    a.runways
+                        .iter()
+                        .map(|r| (r.ident.clone(), geodetic_offset_ft(r.lat, r.lon, georef), geodetic_offset_ft(r.far_lat, r.far_lon, georef)))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let title = format!("{} — {}", s.id, s.description.clone().unwrap_or_default());
+            let svg = match crate::eval_scenario::write_ground_svg(
+                &ground_svg_path,
+                &title,
+                &samples,
+                &sent,
+                &crate::plan::gazetteer::GAZETTEER,
+                &mut resolver,
+                &runways,
+                scripted_traffic.as_deref(),
+            ) {
+                Ok(()) => Some(ground_svg_path.clone()),
+                Err(e) => {
+                    bus.push_log_kind(LogKind::Error, format!("ground svg: {e:#}"));
+                    None
+                }
+            };
+            (checks, svg)
+        }
+        None => (Vec::new(), None),
     };
 
     // --- collect final metrics ---
@@ -1043,6 +1321,11 @@ pub fn run_eval_with_brain(
         "tool_calls": tool_stats.total,
         "tool_failures": tool_stats.failed,
         "tool_breakdown": tool_breakdown_json,
+        "tool_set": cfg.tool_set.label(),
+        "scenario": cfg.scenario.as_ref().map(|s| serde_json::json!({"id": s.id, "items": s.items})),
+        "checks": checks,
+        "checks_passed": checks.iter().filter(|c| c.pass).count(),
+        "checks_total": checks.len(),
     });
     std::fs::write(&summary_path, serde_json::to_string_pretty(&summary)?)
         .with_context(|| format!("writing {}", summary_path.display()))?;
@@ -1068,5 +1351,7 @@ pub fn run_eval_with_brain(
         summary_json: Some(summary_path),
         track_csv: track_recorder.as_ref().map(|_| track_csv_path),
         track_kml: track_kml_written.then_some(track_kml_path),
+        checks,
+        ground_svg,
     })
 }

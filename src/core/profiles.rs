@@ -119,6 +119,7 @@ pub struct ProfileContribution {
     pub target_speed_kt: Option<f64>,
     pub target_pitch_deg: Option<f64>,
     pub glidepath: Option<Glidepath>,
+    pub slip: Option<f64>,
     pub throttle_limit: Option<(f64, f64)>,
     pub flaps_cmd: Option<i32>,
     pub gear_down: Option<bool>,
@@ -235,6 +236,19 @@ pub trait GuidanceProfile: Send + AsAny {
 
     /// The landing's exit/arrival plan, for profiles that carry one.
     fn landing_plan_mut(&mut self) -> Option<&mut dyn LandingPlanHolder> {
+        None
+    }
+
+    /// Notable moments since the last call ("report due: 3 miles",
+    /// "constraint c1 not met"). `PilotCore` drains these every tick into
+    /// its event log, and the heartbeat pump wakes the LLM on new ones.
+    fn take_events(&mut self) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// Structured status for the heartbeat payload (the plan profile's
+    /// steps, constraints and open items). Default: none.
+    fn status_json(&self) -> Option<serde_json::Value> {
         None
     }
 }
@@ -471,6 +485,7 @@ pub(crate) fn guidance_to_contribution(g: GuidanceTargets) -> ProfileContributio
         target_speed_kt: g.target_speed_kt,
         target_pitch_deg: g.target_pitch_deg,
         glidepath: g.glidepath,
+        slip: g.slip,
         throttle_limit: g.throttle_limit,
         flaps_cmd: g.flaps_cmd,
         gear_down: g.gear_down,
@@ -753,6 +768,46 @@ pub struct PatternLegExtensions {
 }
 
 
+/// Go-around reason recorded at the bottom of a planned low approach.
+pub const LOW_APPROACH_REASON: &str = "planned low approach";
+
+/// The closest a base leg comes to the threshold (a short approach).
+const MIN_BASE_X_FT: f64 = 2000.0;
+
+/// Which pattern corners to fly square: a definite turn at a steady bank
+/// that starts a turn radius before the next leg and rolls out on it,
+/// instead of the follower's gradual intercept that rounds the corner off.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SquareCorners {
+    /// Downwind to base.
+    pub into_base: bool,
+    /// Base to final.
+    pub into_final: bool,
+}
+
+/// Bank for a squared turn onto base (the pattern limit is 30°).
+const SQUARE_BASE_BANK_DEG: f64 = 25.0;
+/// Bank for a squared turn onto final (the final limit is 20°).
+const SQUARE_FINAL_BANK_DEG: f64 = 20.0;
+/// Within this of the new leg's course the follower takes over.
+const SQUARE_ROLLOUT_DEG: f64 = 8.0;
+
+/// A squared corner in progress: hold `bank_deg` (signed, + right) until
+/// the track is within `SQUARE_ROLLOUT_DEG` of `course_deg`.
+#[derive(Debug, Clone, Copy)]
+struct CornerTurn {
+    phase: FlightPhase,
+    course_deg: f64,
+    bank_deg: f64,
+}
+
+/// Distance before a leg to start a squared 90° turn onto it at
+/// `bank_deg`: the turn radius (the roll-in and the early roll-out
+/// roughly cancel).
+fn square_lead_ft(gs_kt: f64, bank_deg: f64) -> f64 {
+    crate::guidance::geo::turn_radius_ft(gs_kt.max(40.0), bank_deg)
+}
+
 pub struct PatternFlyProfile {
     pub config: ConfigBundle,
     pub runway_frame: RunwayFrame,
@@ -776,6 +831,12 @@ pub struct PatternFlyProfile {
     pub arrival: Option<ArrivalPlan>,
     /// Continuous ground contact since touchdown (debounces the hand-off).
     ground_contact_s: f64,
+    /// Corners to fly square ("square your base").
+    pub square: SquareCorners,
+    corner: Option<CornerTurn>,
+    /// Reason to record for the next go-around instead of
+    /// "manual_trigger" (a planned low approach).
+    go_around_reason_override: Option<String>,
 }
 
 impl PatternFlyProfile {
@@ -813,10 +874,47 @@ impl PatternFlyProfile {
             preferred_exit: None,
             arrival: None,
             ground_contact_s: 0.0,
+            square: SquareCorners::default(),
+            corner: None,
+            go_around_reason_override: None,
+        }
+    }
+
+    /// A copy to fly ahead in a preview sim. Leaves out the arrival taxi
+    /// plan, which a preview never reaches (it stops at touchdown).
+    pub fn preview_copy(&self) -> Self {
+        Self {
+            config: self.config.clone(),
+            runway_frame: self.runway_frame.clone(),
+            clearances: self.clearances.clone(),
+            triggers: self.triggers.clone(),
+            leg_extensions: self.leg_extensions.clone(),
+            force_go_around_trigger: self.force_go_around_trigger,
+            touch_and_go_trigger: self.touch_and_go_trigger,
+            phase: self.phase,
+            last_go_around_reason: self.last_go_around_reason.clone(),
+            mode_manager: self.mode_manager.clone(),
+            safety_monitor: self.safety_monitor.clone(),
+            lateral_guidance: self.lateral_guidance.clone(),
+            pattern: self.pattern.clone(),
+            route_manager: self.route_manager.clone(),
+            preferred_exit: self.preferred_exit.clone(),
+            arrival: None,
+            ground_contact_s: self.ground_contact_s,
+            square: self.square,
+            corner: self.corner,
+            go_around_reason_override: self.go_around_reason_override.clone(),
         }
     }
 
     pub fn go_around(&mut self) { self.force_go_around_trigger = true; }
+
+    /// Go around as planned at the bottom of a low approach (not a
+    /// rejected landing): the reason says so.
+    pub fn low_approach_go_around(&mut self) {
+        self.force_go_around_trigger = true;
+        self.go_around_reason_override = Some(LOW_APPROACH_REASON.to_string());
+    }
 
     pub fn execute_touch_and_go(&mut self) { self.touch_and_go_trigger = true; }
 
@@ -889,6 +987,15 @@ impl PatternFlyProfile {
         Ok(new_total)
     }
 
+    /// Put the base leg at runway-frame `rx` (where the aircraft turned
+    /// or rolled out onto it), no closer than MIN_BASE_X_FT before the
+    /// threshold.
+    fn place_base_at(&mut self, rx: f64) {
+        let offset = self.config.pattern.downwind_offset_ft + self.leg_extensions.crosswind_ft.max(0.0);
+        self.leg_extensions.downwind_ft = (-rx - offset).max(MIN_BASE_X_FT - offset);
+        self.rebuild_pattern();
+    }
+
     fn rebuild_pattern(&mut self) {
         self.pattern = build_pattern_geometry(
             &self.runway_frame,
@@ -896,6 +1003,41 @@ impl PatternFlyProfile {
             self.leg_extensions.downwind_ft,
             self.leg_extensions.crosswind_ft,
         );
+    }
+
+    /// Start a squared corner on the turn onto base or final, and end it
+    /// on rolling out. A squared base leg is rebuilt where the turn
+    /// rolled out, so the follower holds it there instead of angling back
+    /// to the planned line.
+    fn update_corner(&mut self, state: &AircraftState, previous_phase: FlightPhase) {
+        let side = self.runway_frame.runway.traffic_side.sign();
+        let course = self.runway_frame.runway.course_deg;
+        if previous_phase != self.phase {
+            self.corner = match (previous_phase, self.phase) {
+                (FlightPhase::Downwind, FlightPhase::Base) if self.square.into_base => Some(CornerTurn {
+                    phase: FlightPhase::Base,
+                    course_deg: wrap_degrees_360(course - side * 90.0),
+                    bank_deg: side * SQUARE_BASE_BANK_DEG,
+                }),
+                (FlightPhase::Base, FlightPhase::Final) if self.square.into_final => Some(CornerTurn {
+                    phase: FlightPhase::Final,
+                    course_deg: course,
+                    bank_deg: side * SQUARE_FINAL_BANK_DEG,
+                }),
+                _ => None,
+            };
+        }
+        let Some(c) = self.corner else { return };
+        if c.phase != self.phase {
+            self.corner = None;
+        } else if wrap_degrees_180(c.course_deg - state.track_deg).abs() <= SQUARE_ROLLOUT_DEG {
+            self.corner = None;
+            if c.phase == FlightPhase::Base {
+                if let Some(rx) = state.runway_x_ft {
+                    self.place_base_at(rx);
+                }
+            }
+        }
     }
 
     fn go_around_climb_settled(&self, state: &AircraftState) -> bool {
@@ -945,7 +1087,15 @@ impl PatternFlyProfile {
         let pattern_alt = self.config.pattern_altitude_msl_ft();
         // Go-around is "committed to climb" — firewall the throttle and
         // hold it until pattern altitude is captured. Dropping throttle
-        // near the capture altitude produces discrete-regime bouncing.
+        // near the capture altitude produces discrete-regime bouncing, so
+        // the floor only lifts once within 150 ft of it; held all the way,
+        // the climb power carries the aircraft hundreds of feet high and
+        // the go-around never settles back into the pattern.
+        let near_pattern_alt = state.alt_msl_ft >= pattern_alt - 150.0;
+        let throttle_floor = if near_pattern_alt { 0.0 } else { 0.9 };
+        // Near pattern altitude, level off on the pattern's trim, not the
+        // climb trim (85% power, 6° nose up), which holds it high.
+        let tecs_phase_override = near_pattern_alt.then_some(FlightPhase::Downwind);
         GuidanceTargets {
             lateral_mode: LateralMode::TrackHold,
             vertical_mode: VerticalMode::Tecs,
@@ -954,8 +1104,8 @@ impl PatternFlyProfile {
             target_heading_deg: Some(course),
             target_altitude_ft: Some(pattern_alt),
             target_speed_kt: Some(self.config.performance.vy_kt),
-            throttle_limit: Some((0.9, 1.0)),
-            tecs_phase_override: None,
+            throttle_limit: Some((throttle_floor, 1.0)),
+            tecs_phase_override,
             flaps_cmd: Some(10),
             gear_down: Some(true),
             ..Default::default()
@@ -1068,6 +1218,8 @@ impl PatternFlyProfile {
                 altitude_ft: Some(self.config.pattern_altitude_msl_ft()),
             };
             self.lateral_guidance.direct_to(state, &join_waypoint, bank_limit)
+        } else if let Some(c) = self.corner.filter(|c| c.phase == phase) {
+            (c.course_deg, clamp(c.bank_deg, -bank_limit, bank_limit))
         } else {
             self.lateral_guidance.follow_leg(state, leg, bank_limit)
         };
@@ -1120,6 +1272,11 @@ impl PatternFlyProfile {
                 } else {
                     1.0
                 };
+                // Base only ever descends: with base far out (a long
+                // extended downwind) the glidepath there sits above
+                // pattern altitude, and climbing to it on base bleeds the
+                // speed final needs.
+                let base_end_alt = base_end_alt.min(pattern_alt);
                 let target_alt = pattern_alt + (base_end_alt - pattern_alt) * frac;
                 (
                     target_alt,
@@ -1269,12 +1426,31 @@ impl GuidanceProfile for PatternFlyProfile {
         // at the aircraft's *current* runway-frame position, not at a
         // stale precomputed point, or "extend then turn X" would leave
         // the next leg behind the aircraft.
+        // Squared corners start a turn radius early, so the turn rolls out
+        // on the next leg; the follower's own base-to-final point (65%
+        // along base) is replaced.
+        let mut clearances = self.clearances.clone();
+        if self.square.into_base && self.phase == FlightPhase::Downwind && clearances.turn_base && !self.triggers.turn_base {
+            if let Some(rx) = state.runway_x_ft {
+                if rx <= self.pattern.base_turn_x_ft + square_lead_ft(state.gs_kt, SQUARE_BASE_BANK_DEG) {
+                    self.triggers.turn_base = true;
+                }
+            }
+        }
+        if self.square.into_final && self.phase == FlightPhase::Base && clearances.turn_final {
+            clearances.turn_final = false;
+            if let Some(ry) = state.runway_y_ft {
+                let closing = wrap_degrees_180(state.track_deg - self.runway_frame.runway.course_deg).abs() < 150.0;
+                if closing && ry.abs() <= square_lead_ft(state.gs_kt, SQUARE_FINAL_BANK_DEG) {
+                    self.triggers.turn_final = true;
+                }
+            }
+        }
+        // An early base (a short approach) pulls the base leg in, to no
+        // closer than MIN_BASE_X_FT before the threshold.
         if self.triggers.turn_base && self.phase == FlightPhase::Downwind {
             if let Some(rx) = state.runway_x_ft {
-                let downwind_offset = self.config.pattern.downwind_offset_ft;
-                self.leg_extensions.downwind_ft =
-                    (-rx - downwind_offset - self.leg_extensions.crosswind_ft).max(0.0);
-                self.rebuild_pattern();
+                self.place_base_at(rx);
             }
         }
         if self.triggers.turn_downwind && self.phase == FlightPhase::Crosswind {
@@ -1297,7 +1473,7 @@ impl GuidanceProfile for PatternFlyProfile {
             pattern: &self.pattern,
             safety_status: &safety,
             triggers: &self.triggers,
-            clearances: &self.clearances,
+            clearances: &clearances,
             force_go_around: self.force_go_around_trigger,
             stay_in_pattern: true,
             touch_and_go: self.touch_and_go_trigger,
@@ -1340,7 +1516,9 @@ impl GuidanceProfile for PatternFlyProfile {
         if self.phase == FlightPhase::GoAround {
             self.force_go_around_trigger = false;
             if previous_phase != FlightPhase::GoAround {
-                self.last_go_around_reason = Some(if manual_go_around {
+                self.last_go_around_reason = Some(if let Some(r) = self.go_around_reason_override.take() {
+                    r
+                } else if manual_go_around {
                     "manual_trigger".to_string()
                 } else if let Some(r) = safety.reason.as_ref() {
                     r.clone()
@@ -1365,6 +1543,7 @@ impl GuidanceProfile for PatternFlyProfile {
             self.touch_and_go_trigger = false;
             self.rebuild_pattern();
         }
+        self.update_corner(state, previous_phase);
         let guidance = self.guidance_for_phase(state, self.phase);
         let guidance = self.safety_monitor.apply_limits(guidance, self.phase);
 

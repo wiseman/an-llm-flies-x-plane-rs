@@ -1,0 +1,32 @@
+# "Re-sequence number 2 behind the Cessna on short final." (H8) Called
+# abeam the 16R threshold on downwind with a Cessna on a 1 mile final.
+id: H8
+items: [H8]
+description: Re-sequence number 2 behind the Cessna on short final
+airport: KVNY
+tool_set: plan
+start:
+  airborne: {runway: 16R, along_ft: 500, right_ft: 6000, alt_msl_ft: 1800, heading_deg: 355.5, ias_kt: 85}
+briefing: >
+  You are Cessna 172SP, callsign "Skyhawk 2SP", on a right downwind for
+  runway 16R at Van Nuys (KVNY), at pattern altitude, talking to Van Nuys
+  Tower on 119.3. The autopilot is holding heading, altitude and speed
+  for now. Fly the tower's instructions and land.
+traffic:
+  - id: t1
+    type: Cessna
+    runway: 16R
+    speed_kt: 65
+    path:
+      - {along_ft: -6076, right_ft: 0, alt_agl_ft: 320}
+      - {along_ft: 1200, right_ft: 0, alt_agl_ft: 0}
+      - {along_ft: 3000, right_ft: 0, alt_agl_ft: 0}
+messages:
+  - at_s: 0
+    atc: "Skyhawk 2SP, re-sequence, number two behind the Cessna on short final, runway 16R cleared to land."
+max_sim_s: 1200
+checks:
+  - {check: separation}
+  - {check: landed, runway: 16R}
+  - {check: no_go_around}
+  - {check: no_crash}

@@ -106,6 +106,10 @@ struct HeartbeatState {
     last_seen_profiles: Option<Vec<String>>,
     last_seen_completed: Option<Vec<String>>,
     last_seen_has_crashed: Option<bool>,
+    /// Highest profile-event sequence number already delivered. Only
+    /// advanced when a heartbeat actually goes out, so a throttled tick
+    /// doesn't drop events.
+    last_seen_event_seq: Option<u64>,
     /// While `clock.now_secs_f64() < idle_suppress_until_s`, the idle-cadence
     /// heartbeat is suppressed. Set by the LLM via `sleep(suppress_idle_heartbeat_s=...)`
     /// when it's confident the current state is stable for a while. State-change
@@ -153,6 +157,7 @@ impl HeartbeatPump {
                 last_seen_profiles: None,
                 last_seen_completed: None,
                 last_seen_has_crashed: None,
+                last_seen_event_seq: None,
                 idle_suppress_until_s: 0.0,
             }),
         }
@@ -197,13 +202,22 @@ impl HeartbeatPump {
             st.last_llm_end_s = now;
         }
         st.was_llm_busy = llm_busy;
+        let latest_event_seq = snapshot.events.last().map(|e| e.0).unwrap_or(0);
         if st.last_seen_profiles.is_none() {
             st.last_seen_phase = current_phase;
             st.last_seen_profiles = Some(current_profiles);
             st.last_seen_completed = Some(current_completed);
             st.last_seen_has_crashed = current_has_crashed;
+            st.last_seen_event_seq = Some(latest_event_seq);
             return;
         }
+        let seen_seq = st.last_seen_event_seq.unwrap_or(0);
+        let new_events: Vec<String> = snapshot
+            .events
+            .iter()
+            .filter(|(seq, _)| *seq > seen_seq)
+            .map(|(_, text)| text.clone())
+            .collect();
         let phase_changed = st.last_seen_phase != current_phase;
         let profiles_changed = st.last_seen_profiles.as_deref() != Some(current_profiles.as_slice());
         // New completions only — if a profile that was already complete
@@ -220,7 +234,7 @@ impl HeartbeatPump {
             (Some(false), Some(true)) | (None, Some(true))
         );
 
-        if phase_changed || profiles_changed || completions_changed || crash_edge {
+        if phase_changed || profiles_changed || completions_changed || crash_edge || !new_events.is_empty() {
             if phase_changed
                 && current_phase == Some(FlightPhase::GoAround)
                 && st.last_seen_phase != Some(FlightPhase::GoAround)
@@ -252,6 +266,11 @@ impl HeartbeatPump {
                     &new_completions,
                     snapshot.go_around_reason.as_deref(),
                 );
+                if !new_events.is_empty() {
+                    let plan = format!("plan: {}", new_events.join("; "));
+                    reason = if reason == "state changed" { plan } else { format!("{reason}; {plan}") };
+                }
+                st.last_seen_event_seq = Some(latest_event_seq);
                 if crash_edge {
                     if reason == "state changed" {
                         reason = "aircraft crashed".to_string();
@@ -417,6 +436,8 @@ pub struct LiveRunConfig {
     /// Initial pilot persona. Can be swapped at runtime via the `/mode`
     /// TUI command.
     pub pilot_mode: PilotMode,
+    /// Which tools (and matching system prompt) the pilot LLM gets.
+    pub tool_set: crate::llm::tools::ToolSet,
 }
 
 pub fn run_live_xplane(base_config: ConfigBundle, runtime: LiveRunConfig) -> Result<()> {
@@ -589,6 +610,7 @@ pub fn run_live_xplane(base_config: ConfigBundle, runtime: LiveRunConfig) -> Res
         bridge: Some(tool_bridge),
         config: Arc::new(PLMutex::new(live_config.clone())),
         recent_broadcasts: Arc::new(PLMutex::new(Vec::new())),
+        radio_log: Arc::new(PLMutex::new(Vec::new())),
         apt_dat_cache_dir: runtime.apt_dat_cache_dir.clone(),
         bus: Some(bus.clone()),
         runway_conn: shared_duck_conn.clone(),
@@ -598,6 +620,7 @@ pub fn run_live_xplane(base_config: ConfigBundle, runtime: LiveRunConfig) -> Res
         tool_counters: None,
         taxi_graphs: Default::default(),
         sim_atc: None,
+        tool_set: runtime.tool_set,
     });
 
     let llm_stop = Arc::new(AtomicBool::new(false));

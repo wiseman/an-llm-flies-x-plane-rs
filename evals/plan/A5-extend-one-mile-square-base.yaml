@@ -1,0 +1,27 @@
+# "Extend downwind just one more mile and square your left base turn and
+# final; one departure prior to your arrival." (A5, KVNT in the corpus; at
+# Van Nuys here, on left traffic for 16L.) No landing clearance yet: that
+# comes once on base, after the departure.
+id: A5
+items: [A5]
+description: Extend downwind one more mile and square the base
+airport: KVNY
+tool_set: plan
+start:
+  airborne: {runway: 16L, along_ft: 4000, right_ft: -6000, alt_msl_ft: 1800, heading_deg: 355.5, ias_kt: 80}
+briefing: >
+  You are Cessna 172SP, callsign "Skyhawk 2SP", on a left downwind for
+  runway 16L at Van Nuys (KVNY), at pattern altitude, talking to Van Nuys
+  Tower on 119.3. The autopilot is holding heading, altitude and speed
+  for now. Fly the tower's instructions and land.
+messages:
+  - at_s: 0
+    atc: "Skyhawk 2SP, extend downwind just one more mile and square your left base turn and final, one departure prior to your arrival."
+  - {when: {cond: on_leg, leg: base}, delay_s: 5, atc: "Skyhawk 2SP, runway 16L cleared to land."}
+max_sim_s: 1200
+checks:
+  - {check: turn, leg: base, near: {ref: runway_frame, airport: KVNY, runway: 16L, along_ft: -12076, right_ft: -6000}, tol_ft: 2000}
+  - {check: square_base, runway: 16L}
+  - {check: landed, runway: 16L}
+  - {check: no_go_around}
+  - {check: no_crash}

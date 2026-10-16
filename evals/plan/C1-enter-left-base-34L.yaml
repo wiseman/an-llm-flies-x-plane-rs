@@ -1,0 +1,16 @@
+# Enter left base, runway 34L (C1)
+id: C1
+items: ["C1"]
+description: "Enter left base, runway 34L"
+airport: KVNY
+tool_set: plan
+start: {"airborne": {"runway": "34L", "along_ft": -18228.36, "right_ft": -24304.48, "alt_msl_ft": 2300, "heading_deg": 60, "ias_kt": 95}}
+briefing: "You are Cessna 172SP, callsign \"Skyhawk 2SP\", about 5 miles south-west of Van Nuys (KVNY) at 2300 ft, inbound, talking to Van Nuys Tower on 119.3. The autopilot is holding heading, altitude and speed for now. Fly the tower's instructions and land."
+messages:
+  - {"at_s": 0, "atc": "Skyhawk 2SP, Van Nuys Tower, enter left base runway 34L, cleared to land."}
+max_sim_s: 1200
+checks:
+  - {"check": "reached", "label": "flew base", "cond": {"cond": "on_leg", "leg": "base"}}
+  - {"check": "remain", "label": "no downwind", "holds": {"cond": "not", "of": {"cond": "on_leg", "leg": "downwind"}}}
+  - {"check": "landed", "runway": "34L"}
+  - {"check": "no_crash"}

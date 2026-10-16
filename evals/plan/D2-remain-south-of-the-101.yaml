@@ -1,0 +1,17 @@
+# Remain south of the 101 until advised (D2, D7)
+# The golf course is just north of the 101, so the direct track breaks the constraint until ATC lifts it.
+id: D2
+items: ["D2", "D7"]
+description: "Remain south of the 101 until advised"
+airport: KVNY
+tool_set: plan
+start: {"airborne": {"runway": "16R", "along_ft": 24304.48, "right_ft": 18228.36, "alt_msl_ft": 2500, "heading_deg": 60, "ias_kt": 95}}
+briefing: "You are Cessna 172SP, callsign \"Skyhawk 2SP\", about 5 miles south-west of Van Nuys (KVNY) at 2500 ft, south of the 101, talking to Van Nuys Tower on 119.3. The autopilot is holding heading, altitude and speed for now. Fly the tower's instructions and land."
+messages:
+  - {"at_s": 0, "atc": "Skyhawk 2SP, Van Nuys Tower, remain south of the 101 for traffic until advised, proceed direct the Woodley golf course."}
+  - {"at_s": 200, "atc": "Skyhawk 2SP, traffic no factor, proceed direct Woodley golf course, make right traffic runway 16R, cleared to land."}
+max_sim_s: 1200
+checks:
+  - {"check": "remain", "label": "south of the 101 until advised", "holds": {"cond": "side_of", "target": {"ref": "place", "name": "US-101"}, "side_deg": 180}, "until": {"cond": "elapsed", "s": 200}}
+  - {"check": "landed", "runway": "16R"}
+  - {"check": "no_crash"}

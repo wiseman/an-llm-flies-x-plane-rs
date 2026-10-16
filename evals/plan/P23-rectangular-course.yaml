@@ -1,0 +1,26 @@
+# Rectangular course (P23), as an instructor would ask for it: around the
+# Pierce College fields (Woodland Hills, about 5 miles west-southwest of
+# Van Nuys) at 1000 ft AGL, a constant distance from the field
+# boundaries, correcting for a 10 kt west wind. Two laps.
+id: P23
+items: [P23]
+description: Rectangular course around Pierce College
+airport: KVNY
+tool_set: plan
+wind: {from_deg: 270, kt: 10}
+start:
+  airborne: {runway: 16R, along_ft: 200, right_ft: 27400, alt_msl_ft: 2500, heading_deg: 180, ias_kt: 95}
+briefing: >
+  You are Cessna 172SP, callsign "Skyhawk 2SP", about 2 miles north of
+  Pierce College at 2500 ft, heading 180, clear of the Van Nuys Class D,
+  with your instructor, wind
+  270 at 10. The autopilot is holding heading, altitude and speed for
+  now.
+messages:
+  - at_s: 0
+    operator: "Let's do a rectangular course around the Pierce College fields, left turns, at 1000 feet AGL, two laps. Keep a constant distance from the field boundaries at constant altitude and airspeed, and correct for the wind."
+end_after_s: 700
+max_sim_s: 900
+checks:
+  - {check: rectangular_course, around: {ref: place, name: Pierce College}, min_laps: 2}
+  - {check: no_crash}

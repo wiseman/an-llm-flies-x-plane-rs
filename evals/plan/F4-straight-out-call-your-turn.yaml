@@ -1,0 +1,19 @@
+# Fly straight out, I'll call your turn (F4)
+id: F4
+items: ["F4"]
+description: "Fly straight out, I'll call your turn"
+airport: KVNY
+tool_set: plan
+start: {"runway": {"runway": "16R"}}
+briefing: "You are Cessna 172SP, callsign \"Skyhawk 2SP\", lined up on runway 16R at Van Nuys (KVNY), departing east, talking to Van Nuys Tower on 119.3. The engine is running and you're lined up, stopped. Fly the tower's instructions."
+messages:
+  - {"at_s": 0, "atc": "Skyhawk 2SP, Van Nuys Tower, runway 16R, fly straight out, I'll call your turn, cleared for takeoff."}
+  - {"when": {"cond": "distance_flown", "ft": 20000}, "atc": "Skyhawk 2SP, turn left heading 090, climb and maintain 3000."}
+max_sim_s: 600
+end_after_s: 420
+checks:
+  - {"check": "heading_held", "heading_deg": 175.5, "tol_deg": 10, "until": {"cond": "distance_flown", "ft": 20000}}
+  - {"check": "orbit", "dir": "left", "min_deg": 70}
+  - {"check": "reached", "label": "climbed to 3000", "cond": {"cond": "at_or_above", "altitude_ft": 2900}}
+  - {"check": "no_low_turns"}
+  - {"check": "no_crash"}

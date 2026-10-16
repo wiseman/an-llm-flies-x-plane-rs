@@ -32,6 +32,7 @@ use crate::core::profiles::{
 };
 use crate::core::safety_monitor::SafetyMonitor;
 use crate::core::spatial::{LabeledLeg, SpatialOverlay};
+use crate::guidance::geo::orbit_target_world_ft;
 use crate::guidance::lateral::L1PathFollower;
 use crate::guidance::pattern_manager::{
     build_pattern_geometry, PatternGeometry,
@@ -726,33 +727,6 @@ impl GuidanceProfile for DeadStickLandingProfile {
             _ => None,
         }
     }
-}
-
-/// Lyapunov-style orbit target: blends "head inward toward the circle"
-/// and "tangent along the circle" using `tanh(radial_error / radius)` —
-/// monotonic, never pulls the aircraft the wrong way around.
-fn orbit_target_world_ft(
-    aircraft_pos_ft: Vec2,
-    center_ft: Vec2,
-    radius_ft: f64,
-    lookahead_ft: f64,
-    ccw: bool,
-) -> Vec2 {
-    let radial = aircraft_pos_ft - center_ft;
-    let radial_len = radial.length().max(1.0);
-    let radial_unit = radial * (1.0 / radial_len);
-    // Rotate radial 90° (CCW for ccw orbit, CW otherwise) to get the
-    // tangent direction at the aircraft's projection on the circle.
-    let tangent = if ccw {
-        Vec2::new(-radial_unit.y, radial_unit.x)
-    } else {
-        Vec2::new(radial_unit.y, -radial_unit.x)
-    };
-    let inward = Vec2::new(-radial_unit.x, -radial_unit.y);
-    let inward_weight = ((radial_len - radius_ft) / radius_ft.max(1.0)).tanh();
-    let tangent_weight = (1.0 - inward_weight.abs()).max(0.0);
-    let desired_dir = (tangent * tangent_weight + inward * inward_weight).normalized();
-    aircraft_pos_ft + desired_dir * lookahead_ft.max(1.0)
 }
 
 /// Pick the entry phase for a fresh dead-stick engagement based on the

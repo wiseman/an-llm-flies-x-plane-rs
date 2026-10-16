@@ -101,6 +101,7 @@ mod tests {
             aileron: 0.0,
             elevator: 0.0,
             rudder: 0.0,
+            slip: 0.0,
             throttle: 0.0,
             flaps: None,
             gear_down: Some(true),

@@ -1,0 +1,17 @@
+# Extend upwind half a mile before crosswind (A3)
+id: A3
+items: ["A3"]
+description: "Extend upwind half a mile before crosswind"
+airport: KVNY
+tool_set: plan
+start: {"airborne": {"runway": "16R", "along_ft": 5500, "right_ft": 0, "alt_msl_ft": 1150, "heading_deg": 175.5, "ias_kt": 72}}
+briefing: "You are Cessna 172SP, callsign \"Skyhawk 2SP\", just airborne off runway 16R at Van Nuys (KVNY), climbing through about 1150 ft, talking to Van Nuys Tower on 119.3. The autopilot is holding heading, altitude and speed for now. Fly the tower's instructions and land."
+messages:
+  - {"at_s": 0, "atc": "Skyhawk 2SP, make right closed traffic, extend about another half mile on the upwind before you turn crosswind."}
+  - {"when": {"cond": "on_leg", "leg": "base"}, "delay_s": 5, "atc": "Skyhawk 2SP, runway 16R cleared to land."}
+max_sim_s: 1200
+checks:
+  - {"check": "turn", "leg": "crosswind", "near": {"ref": "runway_frame", "airport": "KVNY", "runway": "16R", "along_ft": 11058.06, "right_ft": 0}, "tol_ft": 2000}
+  - {"check": "no_low_turns"}
+  - {"check": "landed", "runway": "16R"}
+  - {"check": "no_crash"}

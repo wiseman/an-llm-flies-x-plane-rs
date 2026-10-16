@@ -8,6 +8,17 @@ use crate::types::{
     KT_TO_FPS,
 };
 
+/// Sideslip at full slip command, degrees.
+const SLIP_BETA_DEG: f64 = 20.0;
+/// How fast sideslip follows the command.
+const SLIP_TAU_S: f64 = 1.0;
+/// Side force per unit sin(sideslip), as a fraction of g: with 16° of
+/// sideslip about 15° of bank holds a straight path.
+const SLIP_SIDE_FORCE_K: f64 = 1.0;
+/// Drag from sideslip, kt/s per kt per sin²(β): a full forward slip at
+/// 65 kt adds about 2 kt/s, about 6° more descent at the same airspeed.
+const SLIP_DRAG_K: f64 = 0.40;
+
 #[derive(Debug, Clone)]
 pub struct DynamicsState {
     pub position_ft: Vec2,
@@ -31,6 +42,10 @@ pub struct DynamicsState {
     pub vertical_speed_ft_s: f64,
     pub flap_index: i32,
     pub gear_down: bool,
+    /// Sideslip, degrees (nose right of the flight path positive): a
+    /// forward slip. Only an intentional slip (`ActuatorCommands::slip`)
+    /// makes one in this model.
+    pub sideslip_deg: f64,
     /// Parking brake ratio (0 released, 1 set).
     pub parking_brake: f64,
 }
@@ -89,6 +104,7 @@ impl SimpleAircraftModel {
             vertical_speed_ft_s: 0.0,
             flap_index: 0,
             gear_down: true,
+            sideslip_deg: 0.0,
             parking_brake: 0.0,
         }
     }
@@ -114,6 +130,12 @@ impl SimpleAircraftModel {
         let pitch_limit_up = if state.on_ground { 12.0 } else { 15.0 };
         state.pitch_deg = clamp(state.pitch_deg + pitch_rate_deg_s * dt, -10.0, pitch_limit_up);
         state.q_rad_s = pitch_rate_deg_s.to_radians();
+
+        // Sideslip follows the slip command (ordinary rudder is taken as
+        // coordination); the wheels straighten it on the ground.
+        let beta_target = if state.on_ground { 0.0 } else { SLIP_BETA_DEG * commands.slip.clamp(-1.0, 1.0) };
+        let beta_before = state.sideslip_deg;
+        state.sideslip_deg += (beta_target - state.sideslip_deg) * (dt / SLIP_TAU_S).min(1.0);
 
         let thrust = 10.5 * state.throttle_pos;
         // Drag = parasitic (∝ IAS, scaled by throttle and flap) +
@@ -151,8 +173,10 @@ impl SimpleAircraftModel {
         } else {
             INDUCED_DRAG_K / state.ias_kt.max(INDUCED_IAS_FLOOR)
         };
+        let slip_drag = SLIP_DRAG_K * state.ias_kt * state.sideslip_deg.to_radians().sin().powi(2);
         let drag = parasitic_drag
             + induced_drag
+            + slip_drag
             + 0.025 * state.roll_deg.abs()
             + 0.1 * state.pitch_deg.max(0.0);
         // Gravity-along-flight-path component: descending converts PE→KE
@@ -204,9 +228,13 @@ impl SimpleAircraftModel {
                 state.altitude_ft += 1.0;
             }
         } else {
-            let desired_turn_rate_deg_s =
-                (G_FT_S2 * state.roll_deg.to_radians().tan() / airspeed_ft_s.max(80.0))
-                    .to_degrees();
+            // The flight path turns with bank; in a slip the fuselage's
+            // side force pushes back, so a forward slip's bank holds a
+            // straight path.
+            let desired_turn_rate_deg_s = (G_FT_S2
+                * (state.roll_deg.to_radians().tan() + SLIP_SIDE_FORCE_K * state.sideslip_deg.to_radians().sin())
+                / airspeed_ft_s.max(80.0))
+            .to_degrees();
             yaw_rate_deg_s = state.r_rad_s.to_degrees();
             yaw_rate_deg_s += (desired_turn_rate_deg_s - yaw_rate_deg_s) * (2.0 * dt).min(1.0);
             let climb_efficiency = clamp(
@@ -241,7 +269,9 @@ impl SimpleAircraftModel {
         }
 
         state.r_rad_s = yaw_rate_deg_s.to_radians();
-        state.heading_deg = wrap_degrees_360(state.heading_deg + yaw_rate_deg_s * dt);
+        // The nose is the flight path plus the sideslip.
+        state.heading_deg =
+            wrap_degrees_360(state.heading_deg + yaw_rate_deg_s * dt + (state.sideslip_deg - beta_before));
 
         // On the ground, relax ground velocity toward `heading × ias`
         // with a tire-grip time constant so heading rotations produce
@@ -256,7 +286,7 @@ impl SimpleAircraftModel {
             let alpha = (-dt / tau).exp();
             state.ground_velocity_ft_s * alpha + target_velocity * (1.0 - alpha)
         } else {
-            let air_velocity = heading_to_vector(state.heading_deg, airspeed_ft_s);
+            let air_velocity = heading_to_vector(state.heading_deg - state.sideslip_deg, airspeed_ft_s);
             air_velocity + self.wind_vector_ft_s
         };
 
@@ -283,6 +313,7 @@ mod tests {
             aileron: 0.0,
             elevator: 0.0,
             rudder: 0.0,
+            slip: 0.0,
             throttle: 0.0,
             flaps: None,
             gear_down: Some(true),

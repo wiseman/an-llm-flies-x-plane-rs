@@ -1,0 +1,17 @@
+# Turn base abeam the VA hospital (B3)
+# Left traffic for 16R is east of the runway; the VA is north-east of the field, about 2.3 nm out.
+id: B3
+items: ["B3"]
+description: "Turn base abeam the VA hospital"
+airport: KVNY
+tool_set: plan
+start: {"airborne": {"runway": "16R", "along_ft": 4000, "right_ft": -6000, "alt_msl_ft": 1800, "heading_deg": 355.5, "ias_kt": 80}}
+briefing: "You are Cessna 172SP, callsign \"Skyhawk 2SP\", on a left downwind for runway 16R at Van Nuys (KVNY), at pattern altitude, talking to Van Nuys Tower on 119.3. The autopilot is holding heading, altitude and speed for now. Fly the tower's instructions and land."
+messages:
+  - {"at_s": 0, "atc": "Skyhawk 2SP, Van Nuys Tower, turn base abeam the VA hospital, runway 16R cleared to land."}
+max_sim_s: 1200
+checks:
+  - {"check": "turn", "leg": "base", "near": {"ref": "place", "name": "VA Sepulveda Ambulatory Care Center"}, "tol_ft": 4000}
+  - {"check": "reached", "label": "abeam the VA before base", "cond": {"cond": "all", "conds": [{"cond": "on_leg", "leg": "downwind"}, {"cond": "abeam", "target": {"ref": "place", "name": "VA Sepulveda Ambulatory Care Center"}}]}}
+  - {"check": "landed", "runway": "16R"}
+  - {"check": "no_crash"}

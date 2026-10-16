@@ -548,6 +548,7 @@ fn altitude_hold_end_to_end_climb_through_pilot() {
         vertical_speed_ft_s: 0.0,
         flap_index: 0,
         gear_down: true,
+        sideslip_deg: 0.0,
         parking_brake: 0.0,
     };
     // Run enough ticks for TECS to integrate up toward its climb

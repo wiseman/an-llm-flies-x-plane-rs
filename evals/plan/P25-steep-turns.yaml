@@ -1,0 +1,25 @@
+# Steep turns (P25), as an instructor would ask for them: one each way at
+# 45° of bank, holding altitude (±100 ft) and rolling out on the entry
+# heading. Practice area west of Van Nuys at 3500.
+id: P25
+items: [P25]
+description: Steep turns, one each way
+airport: KVNY
+tool_set: plan
+start:
+  airborne: {runway: 16R, along_ft: 0, right_ft: 30000, alt_msl_ft: 3500, heading_deg: 270, ias_kt: 95}
+briefing: >
+  You are Cessna 172SP, callsign "Skyhawk 2SP", in the practice area
+  about 5 miles west of Van Nuys (KVNY) at 3500 ft, heading 270, with your
+  instructor. The autopilot is holding heading, altitude and speed for
+  now.
+messages:
+  - at_s: 0
+    operator: "Let's see a steep turn to the left, 45 degrees of bank, and then one to the right. Hold your altitude."
+end_after_s: 240
+max_sim_s: 400
+checks:
+  - {check: orbit, dir: left}
+  - {check: orbit, dir: right}
+  - {check: remain, label: altitude 3500 ±100, holds: {cond: all, conds: [{cond: at_or_above, altitude_ft: 3500}, {cond: at_or_below, altitude_ft: 3500}]}}
+  - {check: no_crash}

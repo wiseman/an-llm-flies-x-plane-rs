@@ -1,0 +1,17 @@
+# Go to the pier first and then eastbound (K2)
+id: K2
+items: ["K2"]
+description: "Go to the pier first and then eastbound"
+airport: KSMO
+tool_set: plan
+start: {"airborne": {"runway": "21", "along_ft": -18228.36, "right_ft": 24304.48, "alt_msl_ft": 2000, "heading_deg": 180, "ias_kt": 95}}
+briefing: "You are Cessna 172SP, callsign \"Skyhawk 2SP\", about 4 miles north-west of Santa Monica (KSMO) at 2000 ft, over Pacific Palisades, talking to Santa Monica Tower on 120.1. The autopilot is holding heading, altitude and speed for now. Fly the tower's instructions."
+messages:
+  - {"at_s": 0, "atc": "Skyhawk 2SP, Santa Monica Tower, go to the pier first and then eastbound, remain at or below 2000."}
+max_sim_s: 700
+end_after_s: 420
+checks:
+  - {"check": "reached", "label": "at the pier", "cond": {"cond": "within", "target": {"ref": "place", "name": "Santa Monica Pier"}, "distance_ft": 2500}}
+  - {"check": "reached", "label": "then east past Clover Park", "cond": {"cond": "side_of", "target": {"ref": "place", "name": "Clover Park"}, "side_deg": 90}}
+  - {"check": "remain", "holds": {"cond": "at_or_below", "altitude_ft": 2000}}
+  - {"check": "no_crash"}

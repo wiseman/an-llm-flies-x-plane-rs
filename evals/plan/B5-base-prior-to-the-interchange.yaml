@@ -1,0 +1,17 @@
+# Turn base prior to the 405/101 interchange (B5)
+# Right traffic for 34L is east of the runway, downwind southbound; the interchange is about 2.3 nm south of the threshold.
+id: B5
+items: ["B5"]
+description: "Turn base prior to the 405/101 interchange"
+airport: KVNY
+tool_set: plan
+start: {"airborne": {"runway": "34L", "along_ft": 9000, "right_ft": 6000, "alt_msl_ft": 1800, "heading_deg": 175.5, "ias_kt": 80}}
+briefing: "You are Cessna 172SP, callsign \"Skyhawk 2SP\", on a right downwind for runway 34L at Van Nuys (KVNY), at pattern altitude, talking to Van Nuys Tower on 119.3. The autopilot is holding heading, altitude and speed for now. Fly the tower's instructions and land."
+messages:
+  - {"at_s": 0, "atc": "Skyhawk 2SP, extend downwind, turn base prior to the 405/101 interchange, runway 34L cleared to land."}
+max_sim_s: 1200
+checks:
+  - {"check": "remain", "label": "base before the interchange", "holds": {"cond": "not", "of": {"cond": "all", "conds": [{"cond": "on_leg", "leg": "downwind"}, {"cond": "side_of", "target": {"ref": "intersection", "a": {"ref": "place", "name": "I-405"}, "b": {"ref": "place", "name": "US-101"}}, "side_deg": 180}]}}}
+  - {"check": "reached", "label": "flew base", "cond": {"cond": "on_leg", "leg": "base"}}
+  - {"check": "landed", "runway": "34L"}
+  - {"check": "no_crash"}

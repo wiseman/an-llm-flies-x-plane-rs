@@ -1,0 +1,29 @@
+# "Fly present heading to the 101, then make right traffic." (C9)
+# Inbound from the south, east of the 405, to runway 34L at Van Nuys;
+# right traffic for 34L is east of the runway.
+id: C9
+items: [C9]
+description: Fly present heading to the 101, then make right traffic 34L
+airport: KVNY
+tool_set: plan
+start:
+  airborne: {runway: 34L, along_ft: -36000, right_ft: 4000, alt_msl_ft: 2600, heading_deg: 350, ias_kt: 95}
+briefing: >
+  You are Cessna 172SP, callsign "Skyhawk 2SP", about 6 miles south of
+  Van Nuys (KVNY) at 2600 ft, inbound for landing, talking to Van Nuys
+  Tower on 119.3. The autopilot is holding heading, altitude and speed
+  for now. Fly the tower's instructions and land.
+messages:
+  - at_s: 0
+    atc: "Skyhawk 2SP, Van Nuys Tower, fly present heading to the 101, then make right traffic runway 34L, cleared to land."
+max_sim_s: 1500
+checks:
+  - check: heading_held
+    heading_deg: 350
+    tol_deg: 10
+    until: {cond: crossing, target: {ref: place, name: US-101}}
+  - check: reached
+    label: flew the downwind
+    cond: {cond: on_leg, leg: downwind}
+  - {check: landed, runway: 34L}
+  - {check: no_crash}

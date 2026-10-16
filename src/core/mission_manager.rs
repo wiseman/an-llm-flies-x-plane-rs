@@ -137,6 +137,15 @@ pub struct StatusSnapshot {
     pub lateral_owner_idx: Option<usize>,
     pub vertical_owner_idx: Option<usize>,
     pub speed_owner_idx: Option<usize>,
+    /// The active plan's status (`GuidanceProfile::status_json`), if a
+    /// profile publishes one.
+    pub plan_status: Option<serde_json::Value>,
+    /// Recent profile events, oldest first, each with a sequence number
+    /// so the heartbeat pump can tell new ones from old.
+    pub events: Vec<(u64, String)>,
+    /// Nearby traffic as the pilot would hear it called: type, where in
+    /// the pattern, clock position, distance, relative altitude.
+    pub traffic: Vec<serde_json::Value>,
 }
 
 impl StatusSnapshot {
@@ -154,6 +163,7 @@ impl StatusSnapshot {
                 aileron: 0.0,
                 elevator: 0.0,
                 rudder: 0.0,
+                slip: 0.0,
                 throttle: 0.0,
                 flaps: None,
                 gear_down: Some(true),
@@ -175,6 +185,9 @@ impl StatusSnapshot {
             lateral_owner_idx: None,
             vertical_owner_idx: None,
             speed_owner_idx: None,
+            plan_status: None,
+            events: Vec::new(),
+            traffic: Vec::new(),
         }
     }
 }
@@ -264,9 +277,58 @@ pub struct PilotCore {
     pub active_clearance: Option<ActiveClearance>,
     pub parking_brake: CockpitSetting<f64>,
     pub flaps: CockpitSetting<i32>,
+    /// Ring of the last `EVENT_LOG_LEN` profile events, with sequence numbers.
+    event_log: std::collections::VecDeque<(u64, String)>,
+    event_seq: u64,
+    /// Other aircraft, as sensed (scripted in evals). Plans read it
+    /// through `PlanProfile::with_traffic`.
+    pub traffic: crate::core::traffic::TrafficPicture,
 }
 
+/// How many profile events the status snapshot carries.
+const EVENT_LOG_LEN: usize = 32;
+
 impl PilotCore {
+    /// Traffic within listing range, nearest first, placed against the
+    /// reference runway's pattern.
+    fn traffic_status(&self, state: &AircraftState) -> Vec<serde_json::Value> {
+        use crate::core::traffic::{in_list_range, relative, view};
+        let mut targets = self.traffic.snapshot();
+        targets.retain(|t| in_list_range(state.position_ft, t));
+        targets.sort_by(|a, b| {
+            let da = a.position_ft.distance_to(state.position_ft);
+            let db = b.position_ft.distance_to(state.position_ft);
+            da.total_cmp(&db)
+        });
+        targets
+            .iter()
+            .map(|t| {
+                let v = view(&self.runway_frame, t);
+                serde_json::json!({
+                    "id": t.id,
+                    "type": t.kind,
+                    "callsign": t.callsign,
+                    "where": if v.where_.is_empty() { serde_json::Value::Null } else { v.where_.into() },
+                    "relative": relative(state.position_ft, state.track_deg, state.alt_msl_ft, t),
+                    "alt_msl_ft": (t.alt_msl_ft / 10.0).round() * 10.0,
+                    "track_deg": t.track_deg.round(),
+                    "gs_kt": t.gs_kt.round(),
+                })
+            })
+            .collect()
+    }
+
+    /// Re-list traffic in the latest snapshot (after the picture changed
+    /// outside a tick, e.g. an eval placing its traffic before the first).
+    pub fn refresh_traffic_status(&mut self) {
+        if let Some(state) = self.latest_snapshot.as_ref().map(|s| s.state.clone()) {
+            let traffic = self.traffic_status(&state);
+            if let Some(s) = self.latest_snapshot.as_mut() {
+                s.traffic = traffic;
+            }
+        }
+    }
+
     pub fn new(config: ConfigBundle) -> Self {
         let runway_frame = RunwayFrame::new(config.airport.runway.clone());
         let bank_controller = BankController::new(config.controllers.bank);
@@ -295,6 +357,9 @@ impl PilotCore {
             active_clearance: None,
             parking_brake: CockpitSetting::default(),
             flaps: CockpitSetting::default(),
+            event_log: std::collections::VecDeque::new(),
+            event_seq: 0,
+            traffic: Default::default(),
             config,
         }
     }
@@ -362,6 +427,15 @@ impl PilotCore {
         self.runway_frame = RunwayFrame::new(config.airport.runway.clone());
         self.config = config;
         Ok(self.install_profiles(new_profiles))
+    }
+
+    /// Make `config`'s runway the reference frame (the one `runway_x_ft`
+    /// / `runway_y_ft` are measured against) without touching the profile
+    /// stack. For a plan that moves its pattern to another runway in
+    /// place.
+    pub fn set_reference_config(&mut self, config: ConfigBundle) {
+        self.runway_frame = RunwayFrame::new(config.airport.runway.clone());
+        self.config = config;
     }
 
     /// Ask every active profile matching `affected` whether it may be
@@ -525,6 +599,7 @@ impl PilotCore {
             .active_profiles
             .iter()
             .find_map(|p| p.next_transition_hint(&state));
+        let plan_status = self.active_profiles.iter().find_map(|p| p.status_json());
         let lateral_owner_idx = self
             .active_profiles
             .iter()
@@ -557,6 +632,9 @@ impl PilotCore {
             lateral_owner_idx,
             vertical_owner_idx,
             speed_owner_idx,
+            plan_status,
+            events: self.event_log.iter().cloned().collect(),
+            traffic: self.traffic_status(&state),
         };
         self.latest_snapshot = Some(snapshot);
         (state, commands)
@@ -583,6 +661,13 @@ impl PilotCore {
             // reason=None ("unknown") even when a real cause was set.
             if metadata.is_none() {
                 metadata = profile.pattern_metadata();
+            }
+            for text in profile.take_events() {
+                self.event_seq += 1;
+                self.event_log.push_back((self.event_seq, text));
+                if self.event_log.len() > EVENT_LOG_LEN {
+                    self.event_log.pop_front();
+                }
             }
             contributions.push((owns, contribution));
             if let Some(ho) = hand_off {
@@ -612,6 +697,7 @@ impl PilotCore {
                 targets.target_altitude_ft = c.target_altitude_ft;
                 if let Some(p) = c.target_pitch_deg { targets.target_pitch_deg = Some(p); }
                 targets.glidepath = c.glidepath;
+                targets.slip = c.slip;
                 if let Some(t) = c.throttle_limit { targets.throttle_limit = Some(t); }
                 targets.flaps_cmd = c.flaps_cmd;
                 targets.gear_down = c.gear_down;
@@ -719,6 +805,7 @@ impl PilotCore {
         // final ActuatorCommands picks up the ground-speed controller's
         // brake instead of the profile-provided `guidance.brakes`.
         let mut taxi_brake_override: Option<f64> = None;
+        let slip = self.slip_command(state, guidance);
         let (pitch_cmd_deg, throttle_cmd) = if guidance.vertical_mode == VerticalMode::Taxi {
             let cmd = self.ground_speed_controller.update(
                 guidance.target_speed_kt.unwrap_or(0.0),
@@ -740,7 +827,7 @@ impl PilotCore {
             }
             let (target_altitude_ft, throttle_limit) = match guidance.glidepath {
                 Some(gp) if guidance.vertical_mode == VerticalMode::GlidepathTrack => {
-                    self.glidepath_targets(state, gp, throttle_limit)
+                    self.glidepath_targets_slipping(state, gp, throttle_limit, slip.abs() > 0.1)
                 }
                 _ => (guidance.target_altitude_ft.unwrap_or(state.alt_msl_ft), throttle_limit),
             };
@@ -772,6 +859,7 @@ impl PilotCore {
         };
 
         let elevator = self.pitch_controller.update(pitch_cmd_deg, state.pitch_deg, state.q_rad_s, state.dt);
+        let rudder = rudder + slip;
 
         self.parking_brake.profile_request(guidance.parking_brake);
         self.flaps.profile_request(guidance.flaps_cmd);
@@ -788,6 +876,7 @@ impl PilotCore {
             aileron: clamp(aileron, -1.0, 1.0),
             elevator: clamp(elevator, -1.0, 1.0),
             rudder: clamp(rudder, -1.0, 1.0),
+            slip,
             throttle: clamp(throttle_cmd, 0.0, 1.0),
             flaps: self.flaps.take_unsent(),
             gear_down: Some(true),
@@ -798,11 +887,64 @@ impl PilotCore {
     }
 }
 
-/// How far below the aircraft a glidepath capture may command: a
-/// controlled intercept instead of a dive when joining above the path.
+/// How far below (or above) the aircraft a glidepath capture may
+/// command: a controlled intercept instead of a dive when joining above
+/// the path, or a zoom when below it.
 const MAX_GLIDEPATH_CAPTURE_ERROR_FT: f64 = 25.0;
+/// The same while slipping.
+const SLIP_CAPTURE_ERROR_FT: f64 = 60.0;
+
+/// Forward slip on a high approach: none within `SLIP_START_FT` of the
+/// glidepath, full (`SLIP_MAX`) by `SLIP_FULL_FT` above it, and taken out
+/// between `SLIP_OFF_AGL_FT` and `SLIP_GONE_AGL_FT` so it's gone before
+/// the roundout.
+const SLIP_START_FT: f64 = 80.0;
+const SLIP_FULL_FT: f64 = 250.0;
+const SLIP_MAX: f64 = 0.8;
+const SLIP_OFF_AGL_FT: f64 = 250.0;
+const SLIP_GONE_AGL_FT: f64 = 120.0;
 
 impl PilotCore {
+    /// The slip to hold this tick: the profile's demand, else an automatic
+    /// forward slip when well above the glidepath on final. Left wing low,
+    /// right rudder; the track loop banks against the rudder to hold the
+    /// centerline.
+    fn slip_command(&self, state: &AircraftState, guidance: &GuidanceTargets) -> f64 {
+        if state.on_ground {
+            return 0.0;
+        }
+        let fade = ((state.alt_agl_ft - SLIP_GONE_AGL_FT) / (SLIP_OFF_AGL_FT - SLIP_GONE_AGL_FT)).clamp(0.0, 1.0);
+        if let Some(s) = guidance.slip {
+            return s.clamp(-1.0, 1.0) * fade;
+        }
+        let Some(gp) = guidance.glidepath.filter(|_| guidance.vertical_mode == VerticalMode::GlidepathTrack) else {
+            return 0.0;
+        };
+        let path_alt_ft = self.glidepath_alt_ft(state, gp);
+        // Only once established: lined up and on the centerline. A slip
+        // while still turning final fights the turn.
+        let course = self.runway_frame.runway.course_deg;
+        let lined_up = wrap_degrees_180(state.track_deg - course).abs() < 10.0
+            && state.runway_y_ft.is_some_and(|y| y.abs() < 300.0);
+        if !lined_up {
+            return 0.0;
+        }
+        let above = state.alt_msl_ft - path_alt_ft;
+        let amount = ((above - SLIP_START_FT) / (SLIP_FULL_FT - SLIP_START_FT)).clamp(0.0, 1.0);
+        // Never slip slow: it's a way down, not a way to lose airspeed.
+        // The gate sits below the power floor a slip keeps (Vref - 5), so
+        // the slip doesn't switch off and on at the floor.
+        let speed_ok = state.ias_kt >= self.config.performance.vref_kt - 8.0;
+        if speed_ok { SLIP_MAX * amount * fade } else { 0.0 }
+    }
+
+    /// The altitude of glidepath `gp` abeam the aircraft.
+    fn glidepath_alt_ft(&self, state: &AircraftState, gp: crate::types::Glidepath) -> f64 {
+        let distance_to_aim_ft = gp.aimpoint_ft_from_threshold - state.runway_x_ft.unwrap_or(-3000.0);
+        self.config.airport.field_elevation_ft
+            + (gp.threshold_crossing_height_ft + distance_to_aim_ft * gp.slope_deg.to_radians().tan()).max(0.0)
+    }
+
     /// TECS altitude target and throttle limits for tracking `gp` on the
     /// reference runway. Joining from above, the target sits at most
     /// `MAX_GLIDEPATH_CAPTURE_ERROR_FT` below the aircraft; that alone
@@ -818,15 +960,33 @@ impl PilotCore {
         gp: crate::types::Glidepath,
         throttle_limit: (f64, f64),
     ) -> (f64, (f64, f64)) {
-        let distance_to_aim_ft = gp.aimpoint_ft_from_threshold - state.runway_x_ft.unwrap_or(-3000.0);
-        let path_alt_ft = self.config.airport.field_elevation_ft
-            + (gp.threshold_crossing_height_ft
-                + distance_to_aim_ft * gp.slope_deg.to_radians().tan())
-            .max(0.0);
-        let target_alt_ft = path_alt_ft.max(state.alt_msl_ft - MAX_GLIDEPATH_CAPTURE_ERROR_FT);
+        self.glidepath_targets_slipping(state, gp, throttle_limit, false)
+    }
+
+    /// `glidepath_targets`; while slipping, power stays off down to 5 kt
+    /// below Vref (the slip's own floor) so the nose comes down to hold
+    /// speed instead of power cancelling the slip's drag.
+    fn glidepath_targets_slipping(
+        &self,
+        state: &AircraftState,
+        gp: crate::types::Glidepath,
+        throttle_limit: (f64, f64),
+        slipping: bool,
+    ) -> (f64, (f64, f64)) {
+        let path_alt_ft = self.glidepath_alt_ft(state, gp);
+        // Below the path (a long final behind an extended downwind) the
+        // target sits at most the same margin above the aircraft: hold
+        // roughly level and let the path come down to meet it, as a pilot
+        // intercepts a glideslope from below. Chasing it up with flaps
+        // out trades all the airspeed for a few feet.
+        // A slip's drag lets the nose come further down without speeding
+        // up, so it may aim lower.
+        let below = if slipping { SLIP_CAPTURE_ERROR_FT } else { MAX_GLIDEPATH_CAPTURE_ERROR_FT };
+        let target_alt_ft = path_alt_ft.clamp(state.alt_msl_ft - below, state.alt_msl_ft + MAX_GLIDEPATH_CAPTURE_ERROR_FT);
         let above_path_ft = state.alt_msl_ft - path_alt_ft;
         let high_ceiling = (1.0 - (above_path_ft - 30.0) / 40.0).clamp(0.0, 1.0);
-        let slow_floor = ((self.config.performance.vref_kt - state.ias_kt) / 5.0).clamp(0.0, 1.0);
+        let floor_kt = self.config.performance.vref_kt - if slipping { 5.0 } else { 0.0 };
+        let slow_floor = ((floor_kt - state.ias_kt) / 5.0).clamp(0.0, 1.0);
         let max_throttle = throttle_limit.1.min(high_ceiling.max(slow_floor));
         (target_alt_ft, (throttle_limit.0.min(max_throttle), max_throttle))
     }

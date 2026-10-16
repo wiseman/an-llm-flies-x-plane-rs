@@ -1,0 +1,16 @@
+# Turn base now, change to runway 16L (I2)
+id: I2
+items: ["I2"]
+description: "Turn base now, change to runway 16L"
+airport: KVNY
+tool_set: plan
+start: {"airborne": {"runway": "16R", "along_ft": 4000, "right_ft": -7000, "alt_msl_ft": 1800, "heading_deg": 355.5, "ias_kt": 80}}
+briefing: "You are Cessna 172SP, callsign \"Skyhawk 2SP\", on a left downwind for runway 16R at Van Nuys (KVNY), at pattern altitude, talking to Van Nuys Tower on 119.3. The autopilot is holding heading, altitude and speed for now. Fly the tower's instructions and land."
+messages:
+  - {"at_s": 0, "atc": "Skyhawk 2SP, Van Nuys Tower, continue downwind, number two."}
+  - {"when": {"cond": "past", "target": {"ref": "runway", "airport": "KVNY", "runway": "16R", "part": "threshold"}}, "delay_s": 40, "atc": "Skyhawk 2SP, turn base now, change to runway 16L, cleared to land."}
+max_sim_s: 1200
+checks:
+  - {"check": "turn_after_message", "leg": "base", "message": 1, "within_s": 20}
+  - {"check": "landed", "runway": "16L"}
+  - {"check": "no_crash"}

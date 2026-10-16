@@ -88,6 +88,7 @@ fn run_dead_stick_scenario(
         vertical_speed_ft_s: 0.0,
         flap_index: 0,
         gear_down: true,
+        sideslip_deg: 0.0,
         parking_brake: 0.0,
     };
 

@@ -86,7 +86,10 @@ pub fn build_pattern_geometry(
     let downwind_y_ft = side_sign * effective_offset_ft;
     let join_x_ft = effective_offset_ft * 1.1;
     let base_turn_x_ft = -(effective_offset_ft + downwind_extension_ft);
-    let final_start_x_ft = -(10000.0f64).max(effective_offset_ft * 2.5);
+    // Final starts at least as far out as the base leg, so a far-out base
+    // (a long extended downwind) turns onto the centerline instead of
+    // cutting diagonally to a fixed point 2.5 offsets out.
+    let final_start_x_ft = (-(10000.0f64).max(effective_offset_ft * 2.5)).min(base_turn_x_ft - 1000.0);
 
     let entry_start_rf = Vec2::new(
         join_x_ft + effective_offset_ft,
