@@ -488,12 +488,6 @@ impl PlanProfile {
         out
     }
 
-    /// The pattern being flown right now, for the tools that act on one
-    /// (go-around, runway exit, arrival planning).
-    pub fn pattern_fly_mut(&mut self) -> Option<&mut PatternFlyProfile> {
-        self.pattern.as_mut().map(|r| &mut r.pf)
-    }
-
     /// The runway the plan's current or next pattern uses, as
     /// (airport, runway).
     pub fn pattern_runway(&self) -> Option<(String, String)> {
@@ -1140,7 +1134,6 @@ fn apply_pattern_edit(run: &mut PatternRun, edit: RPattern) {
 }
 
 fn apply_extensions(pf: &mut PatternFlyProfile, rp: &RPattern) {
-    use crate::core::profiles::ExtendMode;
     let dw = match rp.extensions.get(&Leg::Downwind) {
         Some(Extension::Ft(ft)) => *ft,
         _ => pf.config.pattern.default_extension_ft,
@@ -1149,8 +1142,7 @@ fn apply_extensions(pf: &mut PatternFlyProfile, rp: &RPattern) {
         Some(Extension::Ft(ft)) => *ft,
         _ => 0.0,
     };
-    let _ = pf.extend_leg(PatternLeg::Crosswind, xw, ExtendMode::Set);
-    let _ = pf.extend_leg(PatternLeg::Downwind, dw, ExtendMode::Set);
+    pf.set_leg_extensions(xw, dw);
     pf.square = rp.square();
 }
 
@@ -1393,6 +1385,10 @@ impl GuidanceProfile for PlanProfile {
 
     fn landing_plan_mut(&mut self) -> Option<&mut dyn LandingPlanHolder> {
         self.pattern.as_mut().map(|r| &mut r.pf as &mut dyn LandingPlanHolder)
+    }
+
+    fn pattern_fly_mut(&mut self) -> Option<&mut PatternFlyProfile> {
+        self.pattern.as_mut().map(|r| &mut r.pf)
     }
 
     fn mode_line_suffix(&self, _state: &AircraftState) -> Option<String> {

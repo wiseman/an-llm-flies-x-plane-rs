@@ -3,7 +3,6 @@ id: A3
 items: ["A3"]
 description: "Extend upwind half a mile before crosswind"
 airport: KVNY
-tool_set: plan
 start: {"airborne": {"runway": "16R", "along_ft": 5500, "right_ft": 0, "alt_msl_ft": 1150, "heading_deg": 175.5, "ias_kt": 72}}
 briefing: "You are Cessna 172SP, callsign \"Skyhawk 2SP\", just airborne off runway 16R at Van Nuys (KVNY), climbing through about 1150 ft, talking to Van Nuys Tower on 119.3. The autopilot is holding heading, altitude and speed for now. Fly the tower's instructions and land."
 messages:

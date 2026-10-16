@@ -3,7 +3,6 @@ id: C2
 items: ["C2", "P7"]
 description: "Fly over the field, then enter right downwind"
 airport: KVNY
-tool_set: plan
 start: {"airborne": {"runway": "34L", "along_ft": 4000, "right_ft": -30380.6, "alt_msl_ft": 2500, "heading_deg": 90, "ias_kt": 95}}
 briefing: "You are Cessna 172SP, callsign \"Skyhawk 2SP\", about 5 miles west of Van Nuys (KVNY) at 2500 ft, inbound, talking to Van Nuys Tower on 119.3. The autopilot is holding heading, altitude and speed for now. Fly the tower's instructions and land."
 messages:

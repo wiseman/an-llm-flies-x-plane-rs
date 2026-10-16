@@ -19,7 +19,6 @@ use xplane_pilot::data::{apt_dat, parquet as data_parquet};
 use xplane_pilot::eval_runner::{run_eval, EvalConfig};
 use xplane_pilot::llm::backend::LlmProvider;
 use xplane_pilot::llm::conversation::{IncomingMessage, PilotMode};
-use xplane_pilot::llm::tools::ToolSet;
 use xplane_pilot::tui::parse_input_source;
 
 #[derive(Parser, Debug)]
@@ -41,11 +40,6 @@ struct Cli {
     /// the flown track. Replaces --airport/--parking/--initial-prompt.
     #[arg(long)]
     scenario: Option<PathBuf>,
-
-    /// Pilot toolbox: `legacy` (pattern/hold tools) or `plan` (`fly(code)`
-    /// with the pilot vocabulary). Default: the scenario's, else legacy.
-    #[arg(long = "tool-set", value_enum)]
-    tool_set: Option<CliToolSet>,
 
     /// LLM vendor — mirrors the x-plane harness's flag name.
     #[arg(long = "pilot-llm-provider", value_enum, default_value_t = LlmProvider::OpenAi)]
@@ -142,12 +136,6 @@ struct Cli {
 }
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
-enum CliToolSet {
-    Legacy,
-    Plan,
-}
-
-#[derive(Copy, Clone, Debug, ValueEnum)]
 enum CliPilotMode {
     Normal,
     Realistic,
@@ -219,12 +207,6 @@ fn main() -> Result<()> {
         Some(p) => Some(xplane_pilot::eval_scenario::load(p)?),
         None => None,
     };
-    let tool_set = match (args.tool_set, scenario.as_ref().and_then(|s| s.tool_set.as_deref())) {
-        (Some(CliToolSet::Plan), _) => ToolSet::Plan,
-        (Some(CliToolSet::Legacy), _) => ToolSet::Legacy,
-        (None, Some(t)) => ToolSet::parse(t).ok_or_else(|| anyhow!("scenario tool_set {t:?}: expected plan or legacy"))?,
-        (None, None) => ToolSet::Legacy,
-    };
     // Scenario runs often start together (run_plan_scenarios.py), so the
     // id keeps their directories apart.
     let session_stem = match &scenario {
@@ -233,7 +215,7 @@ fn main() -> Result<()> {
     };
     let session_dir = args.output_dir.join(&session_stem);
     if let Some(s) = &scenario {
-        return run_scenario(args, s.clone(), tool_set, provider, model, pilot_mode, apt_dat_cache_dir, session_stem, session_dir);
+        return run_scenario(args, s.clone(), provider, model, pilot_mode, apt_dat_cache_dir, session_stem, session_dir);
     }
     let initial_prompt = args.initial_prompt.clone().unwrap_or_default();
     let (source, text) = parse_input_source(&initial_prompt);
@@ -282,7 +264,6 @@ fn main() -> Result<()> {
         session_stem,
         verbose: args.verbose,
         sim_atc_model: args.sim_atc.then_some(args.sim_atc_model.clone()),
-        tool_set,
         scenario: None,
     };
 
@@ -294,7 +275,6 @@ fn main() -> Result<()> {
 fn run_scenario(
     args: Cli,
     scenario: xplane_pilot::eval_scenario::Scenario,
-    tool_set: ToolSet,
     provider: LlmProvider,
     model: String,
     pilot_mode: PilotMode,
@@ -315,7 +295,6 @@ fn run_scenario(
     println!("scenario:     {} {:?}", scenario.id, scenario.items);
     println!("airport:      {}", scenario.airport);
     println!("llm:          {} / {}", provider.as_str(), model);
-    println!("tool set:     {}", tool_set.label());
     println!();
     let cfg = EvalConfig {
         airport: scenario.airport.clone(),
@@ -335,7 +314,6 @@ fn run_scenario(
         session_stem,
         verbose: args.verbose,
         sim_atc_model: args.sim_atc.then_some(args.sim_atc_model),
-        tool_set,
         scenario: Some(scenario),
     };
     let result = run_eval(load_default_config_bundle(), cfg)?;

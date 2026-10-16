@@ -19,18 +19,12 @@ use crate::types::{clamp, wrap_degrees_180, AircraftState, FlightPhase};
 /// [`PatternTriggers`], not by flipping a clearance) and a profile's own
 /// turn policy (dead-stick holds the base turn until its energy says
 /// go).
-///
-/// `land` defaults to `true` and is informational only — the mode
-/// machine does not enforce landing clearance. The LLM reads it in the
-/// status snapshot and decides whether to go around.
 #[derive(Debug, Clone)]
 pub struct PatternClearances {
     pub turn_crosswind: bool,
     pub turn_downwind: bool,
     pub turn_base: bool,
     pub turn_final: bool,
-    pub land: bool,
-    pub landing_runway: Option<String>,
 }
 
 impl Default for PatternClearances {
@@ -40,8 +34,6 @@ impl Default for PatternClearances {
             turn_downwind: true,
             turn_base: true,
             turn_final: true,
-            land: true,
-            landing_runway: None,
         }
     }
 }

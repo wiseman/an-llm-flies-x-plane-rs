@@ -15,8 +15,10 @@ use crate::plan::ir::{
 use crate::plan::resolve::{Feature, Geom, Resolver};
 use crate::types::{Runway, TrafficSide, Vec2, NM_TO_FT};
 
-/// Same synthesized touchdown zone the pattern tools use, so a plan's
-/// pattern lands where `engage_pattern_fly` would.
+/// Touchdown zone given to runways looked up from apt.dat (plans and the
+/// runway tools alike): the aim point is half of it, 600 ft past the
+/// landing threshold, room for the flare float without overrunning short
+/// strips.
 pub const TOUCHDOWN_ZONE_FT: f64 = 1200.0;
 
 #[derive(Debug, Clone)]

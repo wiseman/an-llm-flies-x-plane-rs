@@ -5,7 +5,6 @@ id: H1
 items: [H1]
 description: Turn downwind, number two, follow the Falcon on a 6 mile final
 airport: KVNY
-tool_set: plan
 start:
   airborne: {runway: 16R, along_ft: 9000, right_ft: 2500, alt_msl_ft: 1650, heading_deg: 265.5, ias_kt: 80}
 briefing: >

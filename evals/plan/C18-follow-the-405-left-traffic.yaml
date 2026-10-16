@@ -4,7 +4,6 @@ id: C18
 items: ["C18"]
 description: "Follow the 405, keep it off your left wing, left traffic 16L"
 airport: KVNY
-tool_set: plan
 start: {"airborne": {"runway": "16L", "along_ft": 28800, "right_ft": -7700, "alt_msl_ft": 2300, "heading_deg": 355, "ias_kt": 95}}
 briefing: "You are Cessna 172SP, callsign \"Skyhawk 2SP\", about 5 miles south of Van Nuys (KVNY) over the Sepulveda Pass at 2300 ft, northbound, just east of the 405, talking to Van Nuys Tower on 119.3. The autopilot is holding heading, altitude and speed for now. Fly the tower's instructions and land."
 messages:

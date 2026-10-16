@@ -3,7 +3,6 @@ id: L1
 items: ["L1"]
 description: "Turn left heading 230, maintain at or above 4000"
 airport: KVNY
-tool_set: plan
 start: {"airborne": {"runway": "16R", "along_ft": -36456.72, "right_ft": 0, "alt_msl_ft": 4500, "heading_deg": 300, "ias_kt": 100}}
 briefing: "You are Cessna 172SP, callsign \"Skyhawk 2SP\", about 6 miles north of Van Nuys (KVNY) at 4500 ft, heading 300, talking to Van Nuys Tower on 119.3. The autopilot is holding heading, altitude and speed for now. Fly the tower's instructions."
 messages:

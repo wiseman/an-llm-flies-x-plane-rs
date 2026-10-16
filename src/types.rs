@@ -144,29 +144,6 @@ impl FlightPhase {
             _ => return None,
         })
     }
-
-    pub fn all() -> &'static [FlightPhase] {
-        &[
-            FlightPhase::Preflight,
-            FlightPhase::TakeoffRoll,
-            FlightPhase::Rotate,
-            FlightPhase::InitialClimb,
-            FlightPhase::Crosswind,
-            FlightPhase::EnrouteClimb,
-            FlightPhase::Cruise,
-            FlightPhase::Descent,
-            FlightPhase::PatternEntry,
-            FlightPhase::Downwind,
-            FlightPhase::Base,
-            FlightPhase::Final,
-            FlightPhase::Roundout,
-            FlightPhase::Flare,
-            FlightPhase::Rollout,
-            FlightPhase::RunwayExit,
-            FlightPhase::TaxiClear,
-            FlightPhase::GoAround,
-        ]
-    }
 }
 
 impl fmt::Display for FlightPhase {

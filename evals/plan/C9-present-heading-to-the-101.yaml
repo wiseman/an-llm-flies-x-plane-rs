@@ -5,7 +5,6 @@ id: C9
 items: [C9]
 description: Fly present heading to the 101, then make right traffic 34L
 airport: KVNY
-tool_set: plan
 start:
   airborne: {runway: 34L, along_ft: -36000, right_ft: 4000, alt_msl_ft: 2600, heading_deg: 350, ias_kt: 95}
 briefing: >

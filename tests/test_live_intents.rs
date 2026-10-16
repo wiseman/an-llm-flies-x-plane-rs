@@ -7,7 +7,7 @@ use xplane_pilot::core::mission_manager::PilotCore;
 use xplane_pilot::core::mode_manager::{
     ModeManager, ModeManagerUpdate, PatternClearances, PatternTriggers,
 };
-use xplane_pilot::core::profiles::{ExtendMode, PatternFlyProfile, PatternLeg};
+use xplane_pilot::core::profiles::PatternFlyProfile;
 use xplane_pilot::core::safety_monitor::SafetyStatus;
 use xplane_pilot::guidance::pattern_manager::build_pattern_geometry;
 use xplane_pilot::guidance::route_manager::RouteManager;
@@ -30,7 +30,8 @@ fn extend_downwind_rebuilds_pattern_geometry() {
         .unwrap();
     pilot
         .profile_mut::<PatternFlyProfile>().map(|p| {
-            p.extend_leg(PatternLeg::Downwind, 2400.0, ExtendMode::Add).unwrap()
+            let dw = p.leg_extensions.downwind_ft;
+            p.set_leg_extensions(p.leg_extensions.crosswind_ft, dw + 2400.0)
         })
         .unwrap();
     let (new_ext, new_base) = pilot

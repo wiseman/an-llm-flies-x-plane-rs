@@ -7,7 +7,6 @@ id: C6
 items: ["C5", "C6"]
 description: "Report over the 210/118 interchange for a left base runway 12"
 airport: KWHP
-tool_set: plan
 start: {"airborne": {"runway": "12", "along_ft": -12000, "right_ft": -30000, "alt_msl_ft": 3000, "heading_deg": 215, "ias_kt": 95}}
 briefing: "You are Cessna 172SP, callsign \"Skyhawk 2SP\", about 5 miles north-east of Whiteman (KWHP) at 3000 ft, inbound, talking to Whiteman Tower on 135.0. The autopilot is holding heading, altitude and speed for now. Fly the tower's instructions and land."
 traffic:

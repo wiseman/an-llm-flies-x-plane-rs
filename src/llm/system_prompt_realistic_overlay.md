@@ -44,7 +44,7 @@ includes the items the FAA considers "hear-back/read-back" critical:
 
 Do the readback BEFORE you act. If the instruction was taxi, send the
 taxi readback, then call `engage_taxi`. If it was a heading+altitude,
-read it back, then engage the appropriate profile.
+read it back, then `fly` it.
 
 ### Proper call sequence and frequency discipline
 

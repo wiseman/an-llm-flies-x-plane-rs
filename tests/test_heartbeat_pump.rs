@@ -398,7 +398,7 @@ fn integration_heartbeat_sees_profile_change_from_live_pilot_update() {
 
     pilot
         .lock()
-        .engage_profile(Box::new(HeadingHoldProfile::new(270.0, 25.0, None).unwrap())).unwrap();
+        .engage_profile(Box::new(HeadingHoldProfile::new(270.0, 25.0))).unwrap();
     pilot.lock().update(&raw, 0.2);
     clock.advance_secs(3.0);
     pump.check_and_emit();

@@ -5,7 +5,6 @@ id: A8
 items: [A8]
 description: Keep your base square, following a Sport Cruiser
 airport: KVNY
-tool_set: plan
 start:
   airborne: {runway: 16R, along_ft: 4000, right_ft: 6000, alt_msl_ft: 1800, heading_deg: 355.5, ias_kt: 85}
 briefing: >

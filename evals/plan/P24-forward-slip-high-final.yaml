@@ -7,7 +7,6 @@ id: P24
 items: [P24]
 description: High on a 1.5 mile final, cleared to land
 airport: KVNY
-tool_set: plan
 start:
   airborne: {runway: 16R, along_ft: -9114, right_ft: 0, alt_agl_ft: 1350, heading_deg: 175.5, ias_kt: 70}
 briefing: >

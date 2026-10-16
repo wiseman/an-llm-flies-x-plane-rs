@@ -14,7 +14,7 @@ use xplane_pilot::config::load_default_config_bundle;
 use xplane_pilot::core::landing_rollout::LandingRolloutProfile;
 use xplane_pilot::core::mission_manager::{PilotCore, StatusSnapshot};
 use xplane_pilot::core::profiles::{
-    GuidanceProfile, HeadingHoldProfile, PatternFlyProfile, TakeoffProfile,
+    GuidanceProfile, HeadingHoldProfile,
 };
 use xplane_pilot::llm::tools::{dispatch_tool, ToolBridge, ToolContext};
 use xplane_pilot::sim::xplane_bridge::GeoReference;
@@ -180,98 +180,18 @@ fn unknown_tool_returns_error() {
 #[test]
 fn invalid_arguments_json_returns_error() {
     let ctx = make_ctx(None, None);
-    let r = dispatch_tool("engage_heading_hold", "not-json", &ctx);
+    let r = dispatch_tool("set_flaps", "not-json", &ctx);
     assert!(!r.ok);
 }
 
 #[test]
 fn missing_required_arg_returns_error() {
     let ctx = make_ctx(None, None);
-    let r = dispatch("engage_heading_hold", json!({}), &ctx);
+    let r = dispatch("set_flaps", json!({}), &ctx);
     assert!(r.starts_with("error:"));
 }
 
 // ---------- profiles ----------
-
-#[test]
-fn engage_heading_hold_engages_profile() {
-    let ctx = make_ctx(None, None);
-    let r = dispatch("engage_heading_hold", json!({"heading_deg": 270.0}), &ctx);
-    assert!(r.contains("heading_hold"));
-    let names = ctx.pilot.lock().list_profile_names();
-    assert!(names.contains(&"heading_hold".to_string()));
-    assert!(!names.contains(&"idle_lateral".to_string()));
-}
-
-#[test]
-fn engage_cruise_installs_three_holds_atomically() {
-    let ctx = make_ctx(None, None);
-    let r = dispatch(
-            "engage_cruise",
-            json!({"heading_deg": 130.0, "altitude_ft": 2500.0, "speed_kt": 95.0}),
-        &ctx);
-    assert!(r.contains("engaged cruise"));
-    let mut names = ctx.pilot.lock().list_profile_names();
-    names.sort();
-    assert_eq!(
-        names,
-        vec![
-            "altitude_hold".to_string(),
-            "heading_hold".to_string(),
-            "speed_hold".to_string()
-        ]
-    );
-}
-
-#[test]
-fn engage_cruise_from_takeoff_displaces_three_axis_profile() {
-    let ctx = make_ctx(None, None);
-    // Engage takeoff directly — the tool now requires airport/runway args
-    // and a real snapshot; this test only cares about the axis-displace
-    // behaviour of engage_cruise, so bypass the tool surface.
-    {
-        let mut p = ctx.pilot.lock();
-        let cfg = ctx.config.lock().clone();
-        let rf = p.runway_frame.clone();
-        p.engage_profile(Box::new(TakeoffProfile::new(cfg, rf))).unwrap();
-    }
-    assert_eq!(ctx.pilot.lock().list_profile_names(), vec!["takeoff"]);
-    let r = dispatch(
-            "engage_cruise",
-            json!({"heading_deg": 180.0, "altitude_ft": 3000.0, "speed_kt": 100.0}),
-        &ctx);
-    assert!(r.contains("displaced"));
-    assert!(r.contains("takeoff"));
-}
-
-#[test]
-fn execute_touch_and_go_arms_pattern_fly_flag() {
-    let ctx = make_ctx(None, None);
-    {
-        let mut p = ctx.pilot.lock();
-        let cfg = ctx.config.lock().clone();
-        let rf = p.runway_frame.clone();
-        p.engage_profile(Box::new(PatternFlyProfile::new(cfg, rf))).unwrap();
-    }
-    let r = dispatch("execute_touch_and_go", json!({}), &ctx);
-    assert!(r.contains("touch-and-go armed"));
-}
-
-#[test]
-fn execute_touch_and_go_without_pattern_fly_errors() {
-    let ctx = make_ctx(None, None);
-    let r = dispatch("execute_touch_and_go", json!({}), &ctx);
-    assert!(r.starts_with("error:"));
-    assert!(r.contains("pattern_fly"));
-}
-
-#[test]
-fn engage_pattern_fly_without_required_args_errors() {
-    let ctx = make_ctx(None, None);
-    let r = dispatch("engage_pattern_fly", json!({}), &ctx);
-    assert!(r.starts_with("error:"));
-    assert!(!ctx.pilot.lock().has_profile("pattern_fly"));
-}
 
 #[test]
 fn engage_takeoff_refuses_when_parking_brake_set() {
@@ -350,7 +270,7 @@ fn disengage_profile_readds_idles() {
     let ctx = make_ctx(None, None);
     {
         let mut p = ctx.pilot.lock();
-        p.engage_profile(Box::new(HeadingHoldProfile::new(270.0, 25.0, None).unwrap())).unwrap();
+        p.engage_profile(Box::new(HeadingHoldProfile::new(270.0, 25.0))).unwrap();
     }
     let r = dispatch("disengage_profile", json!({"name": "heading_hold"}), &ctx);
     assert!(r.contains("heading_hold"));
@@ -367,84 +287,6 @@ fn list_profiles_returns_comma_separated() {
 }
 
 #[test]
-fn extend_pattern_leg_downwind_with_pattern_fly_succeeds() {
-    let ctx = make_ctx(None, None);
-    {
-        let mut p = ctx.pilot.lock();
-        let cfg = ctx.config.lock().clone();
-        let rf = p.runway_frame.clone();
-        p.engage_profile(Box::new(PatternFlyProfile::new(cfg, rf))).unwrap();
-    }
-    let r = dispatch(
-            "extend_pattern_leg",
-            json!({"leg": "downwind", "extension_ft": 1500.0, "mode": "add"}),
-        &ctx);
-    assert!(r.contains("downwind leg extension"));
-}
-
-#[test]
-fn extend_pattern_leg_base_returns_error() {
-    let ctx = make_ctx(None, None);
-    {
-        let mut p = ctx.pilot.lock();
-        let cfg = ctx.config.lock().clone();
-        let rf = p.runway_frame.clone();
-        p.engage_profile(Box::new(PatternFlyProfile::new(cfg, rf))).unwrap();
-    }
-    let r = dispatch(
-            "extend_pattern_leg",
-            json!({"leg": "base", "extension_ft": 500.0, "mode": "add"}),
-        &ctx);
-    assert!(r.starts_with("error:"));
-}
-
-#[test]
-fn execute_pattern_turn_base_sets_trigger() {
-    let ctx = make_ctx(None, None);
-    {
-        let mut p = ctx.pilot.lock();
-        let cfg = ctx.config.lock().clone();
-        let rf = p.runway_frame.clone();
-        p.engage_profile(Box::new(PatternFlyProfile::new(cfg, rf))).unwrap();
-    }
-    let r = dispatch("execute_pattern_turn", json!({"leg": "base"}), &ctx);
-    assert!(r.contains("turn to base triggered"));
-}
-
-#[test]
-fn set_pattern_clearance_revokes_base() {
-    let ctx = make_ctx(None, None);
-    {
-        let mut p = ctx.pilot.lock();
-        let cfg = ctx.config.lock().clone();
-        let rf = p.runway_frame.clone();
-        p.engage_profile(Box::new(PatternFlyProfile::new(cfg, rf))).unwrap();
-    }
-    let r = dispatch(
-            "set_pattern_clearance",
-            json!({"gate": "turn_base", "granted": false, "runway_id": null}),
-        &ctx);
-    assert!(r.contains("turn_base clearance revoked"));
-}
-
-#[test]
-fn set_pattern_clearance_cleared_to_land() {
-    let ctx = make_ctx(None, None);
-    {
-        let mut p = ctx.pilot.lock();
-        let cfg = ctx.config.lock().clone();
-        let rf = p.runway_frame.clone();
-        p.engage_profile(Box::new(PatternFlyProfile::new(cfg, rf))).unwrap();
-    }
-    let r = dispatch(
-            "set_pattern_clearance",
-            json!({"gate": "land", "granted": true, "runway_id": "16L"}),
-        &ctx);
-    assert!(r.contains("cleared to land"));
-    assert!(r.contains("16L"));
-}
-
-#[test]
 fn go_around_without_pattern_fly_errors() {
     let ctx = make_ctx(None, None);
     let r = dispatch("go_around", json!({}), &ctx);
@@ -457,175 +299,6 @@ fn make_ctx_with_parquet(cache_dir: &std::path::Path) -> (ToolContext, Arc<FakeB
     let bridge = FakeBridge::new(&[], 47.4638, -122.308);
     let ctx = make_ctx(Some(bridge.clone() as Arc<dyn ToolBridge>), Some(cache_dir.to_path_buf()));
     (ctx, bridge)
-}
-
-#[test]
-fn engage_pattern_fly_for_takeoff_roll() {
-    use xplane_pilot::types::Vec2;
-
-    let dir = TempDir::new().unwrap();
-    build_fake_parquet(dir.path(), &[]);
-    let (ctx, _bridge) = make_ctx_with_parquet(dir.path());
-    // Takeoff-roll start now runs position guards; staged snapshot gives
-    // the validator something to read. override=true bypasses the
-    // centerline/heading checks since this test just verifies the
-    // profile engages.
-    stage_stopped_snapshot(&ctx, Vec2::new(0.0, 0.0), 0.0);
-    let r = dispatch(
-        "engage_pattern_fly",
-        json!({
-            "airport_ident": "KSEA",
-            "runway_ident": "16L",
-            "side": "left",
-            "start_phase": "takeoff_roll",
-            "override": true,
-        }),
-        &ctx,
-    );
-    assert!(!r.contains("error"), "got {}", r);
-    assert_eq!(ctx.pilot.lock().list_profile_names(), vec!["pattern_fly"]);
-}
-
-#[test]
-fn engage_pattern_fly_takeoff_roll_refuses_off_centerline() {
-    use xplane_pilot::types::Vec2;
-
-    let dir = TempDir::new().unwrap();
-    build_fake_parquet(dir.path(), &[]);
-    let (ctx, _bridge) = make_ctx_with_parquet(dir.path());
-    stage_stopped_snapshot(&ctx, Vec2::new(500.0, 0.0), 180.0);
-    let r = dispatch(
-        "engage_pattern_fly",
-        json!({
-            "airport_ident": "KSEA",
-            "runway_ident": "16L",
-            "side": "left",
-            "start_phase": "takeoff_roll",
-        }),
-        &ctx,
-    );
-    assert!(r.starts_with("error:"), "got: {}", r);
-    assert!(
-        r.contains("centerline") || r.contains("along-track"),
-        "expected a position-check error, got: {}",
-        r
-    );
-    // override=true should let the same call through.
-    let r = dispatch(
-        "engage_pattern_fly",
-        json!({
-            "airport_ident": "KSEA",
-            "runway_ident": "16L",
-            "side": "left",
-            "start_phase": "takeoff_roll",
-            "override": true,
-        }),
-        &ctx,
-    );
-    assert!(
-        r.starts_with("engaged pattern_fly"),
-        "override=true should bypass position checks, got: {}",
-        r
-    );
-}
-
-#[test]
-fn engage_pattern_fly_anchors_at_pavement_end_and_exposes_displacement() {
-    // Runway "09" pavement end coincides with the georef anchor
-    // (47.4638, -122.308) and extends due east, so pavement_end_ft is
-    // (0, 0). The runway frame anchors at the pavement end — NOT at
-    // the displaced landing threshold — and stores the displacement
-    // separately so takeoff and landing can use the same frame
-    // consistently.
-    let dir = TempDir::new().unwrap();
-    let disp_ft = 88.0_f64 * 3.280_839_895_013_123;
-    let extra = [
-        "1 0 0 0 KTEST KTEST Test Airport\n\
-         100 22.86 1 0 0.25 0 2 0 \
-         09 47.463800 -122.308000 88.00 0 0 0 0 0 \
-         27 47.463800 -122.287000 0.00 0 0 0 0 0\n"
-            .to_string(),
-    ];
-    build_fake_parquet(dir.path(), &extra);
-    let (ctx, _bridge) = make_ctx_with_parquet(dir.path());
-    let r = dispatch(
-            "engage_pattern_fly",
-            json!({
-                "airport_ident": "KTEST",
-                "runway_ident": "09",
-                "side": "left",
-                "start_phase": "pattern_entry",
-            }),
-        &ctx);
-    assert!(!r.contains("error"), "got {}", r);
-    let pilot = ctx.pilot.lock();
-    let threshold = pilot.runway_frame.runway.threshold_ft;
-    // Threshold = pavement end (georef anchor), not displacement-shifted.
-    assert!(threshold.x.abs() < 1.0, "east: got {}", threshold.x);
-    assert!(threshold.y.abs() < 1.0, "north: got {}", threshold.y);
-    // Displacement is exposed as its own field.
-    assert!(
-        (pilot.runway_frame.runway.displaced_threshold_ft - disp_ft).abs() < 1.0,
-        "displaced_threshold_ft: got {}, want {}",
-        pilot.runway_frame.runway.displaced_threshold_ft,
-        disp_ft
-    );
-    // Aim point = displaced_threshold + 600 ft: 600 ft past the painted
-    // landing threshold, leaving room for roundout/flare float without
-    // overrunning on short strips.
-    let aim = pilot.runway_frame.touchdown_runway_x_ft();
-    assert!(
-        (aim - (disp_ft + 600.0)).abs() < 1.0,
-        "aim: got {}, want {}",
-        aim,
-        disp_ft + 600.0
-    );
-}
-
-#[test]
-fn engage_pattern_fly_unknown_airport_errors() {
-    let dir = TempDir::new().unwrap();
-    build_fake_parquet(dir.path(), &[]);
-    let (ctx, _bridge) = make_ctx_with_parquet(dir.path());
-    let r = dispatch(
-            "engage_pattern_fly",
-            json!({
-                "airport_ident": "NOWHERE",
-                "runway_ident": "16L",
-                "side": "left",
-                "start_phase": "pattern_entry",
-            }),
-        &ctx);
-    assert!(r.starts_with("error:"));
-    assert!(r.contains("not found"));
-}
-
-#[test]
-fn engage_pattern_fly_invalid_start_phase() {
-    let dir = TempDir::new().unwrap();
-    build_fake_parquet(dir.path(), &[]);
-    let (ctx, _bridge) = make_ctx_with_parquet(dir.path());
-    let r = dispatch(
-            "engage_pattern_fly",
-            json!({
-                "airport_ident": "KSEA",
-                "runway_ident": "16L",
-                "side": "left",
-                "start_phase": "barrel_roll",
-            }),
-        &ctx);
-    assert!(r.starts_with("error:"));
-    assert!(r.contains("unknown start_phase"));
-}
-
-#[test]
-fn join_pattern_without_pattern_fly_errors() {
-    let dir = TempDir::new().unwrap();
-    build_fake_parquet(dir.path(), &[]);
-    let (ctx, _bridge) = make_ctx_with_parquet(dir.path());
-    let r = dispatch("join_pattern", json!({"runway_id": "30"}), &ctx);
-    assert!(r.starts_with("error:"));
-    assert!(r.contains("engage_pattern_fly"));
 }
 
 // ---------- radio/brake ----------
@@ -1857,16 +1530,7 @@ fn choose_runway_exit_picks_intersection_past_touchdown() {
     ];
     build_fake_parquet(dir.path(), &extra);
     let (ctx, _bridge) = make_ctx_with_parquet(dir.path());
-    dispatch(
-        "engage_pattern_fly",
-        json!({
-            "airport_ident": "KEXIT",
-            "runway_ident": "09",
-            "side": "left",
-            "start_phase": "pattern_entry",
-        }),
-        &ctx,
-    );
+    fly_pattern(&ctx, "KEXIT", "09");
     let listed = dispatch(
         "list_runway_exits",
         json!({"airport_ident": "KEXIT", "runway_ident": "09"}),
@@ -1905,17 +1569,14 @@ fn build_arrival_fixture_parquet(dir: &std::path::Path) -> PathBuf {
     build_fake_parquet(dir, &extra)
 }
 
-fn engage_ktest_pattern(ctx: &ToolContext) {
-    let r = dispatch(
-        "engage_pattern_fly",
-        json!({
-            "airport_ident": "KTEST",
-            "runway_ident": "09",
-            "side": "left",
-            "start_phase": "pattern_entry",
-        }),
-        ctx,
-    );
+/// Fly the left traffic pattern for `runway` at `airport` with a plan,
+/// from an airborne snapshot if none is staged.
+fn fly_pattern(ctx: &ToolContext, airport: &str, runway: &str) {
+    if ctx.pilot.lock().latest_snapshot.is_none() {
+        stage_airborne_snapshot(ctx, Vec2::new(0.0, 6076.0), 2000.0, 1500.0, 180.0, 80.0);
+    }
+    let code = format!("p = pattern(apt.runway('{runway}'), LEFT)\njoin(p)");
+    let r = dispatch("fly", json!({"code": code, "airport": airport, "preview": null}), ctx);
     assert!(!r.starts_with("error"), "{r}");
 }
 
@@ -1924,7 +1585,7 @@ fn plan_arrival_auto_selects_exit_and_stores_taxi_plan() {
     let dir = TempDir::new().unwrap();
     build_arrival_fixture_parquet(dir.path());
     let (ctx, _bridge) = make_ctx_with_parquet(dir.path());
-    engage_ktest_pattern(&ctx);
+    fly_pattern(&ctx, "KTEST", "09");
 
     let r = dispatch("plan_arrival", json!({"parking_name": "GA Tie-Down 1"}), &ctx);
     assert!(!r.starts_with("error"), "{r}");
@@ -1934,10 +1595,11 @@ fn plan_arrival_auto_selects_exit_and_stores_taxi_plan() {
     let (exit, parking) = ctx
         .pilot
         .lock()
-        .profile_mut::<PatternFlyProfile>().map(|p| {
+        .landing_plan_mut()
+        .map(|p| {
             (
-                p.preferred_exit.as_ref().map(|e| e.taxiway_name.clone()),
-                p.arrival.as_ref().map(|a| a.parking_name.clone()),
+                p.preferred_exit().map(|e| e.taxiway_name.clone()),
+                p.arrival().map(|a| a.parking_name.clone()),
             )
         })
         .unwrap();
@@ -1950,7 +1612,8 @@ fn plan_arrival_auto_selects_exit_and_stores_taxi_plan() {
     let has_arrival = ctx
         .pilot
         .lock()
-        .profile_mut::<PatternFlyProfile>().map(|p| p.arrival.is_some())
+        .landing_plan_mut()
+        .map(|p| p.arrival().is_some())
         .unwrap();
     assert!(!has_arrival);
 }
@@ -1963,7 +1626,7 @@ fn plan_arrival_ignores_where_an_airborne_aircraft_projects_onto_the_runway() {
     let dir = TempDir::new().unwrap();
     build_arrival_fixture_parquet(dir.path());
     let (ctx, bridge) = make_ctx_with_parquet(dir.path());
-    engage_ktest_pattern(&ctx);
+    fly_pattern(&ctx, "KTEST", "09");
     bridge.values.lock().insert("sim/flightmodel/position/latitude".into(), 37.004);
     bridge.values.lock().insert("sim/flightmodel/position/longitude".into(), -121.980);
 
@@ -1983,9 +1646,9 @@ fn plan_arrival_with_named_exit_and_bad_inputs() {
     let (ctx, _bridge) = make_ctx_with_parquet(dir.path());
 
     let r = dispatch("plan_arrival", json!({"parking_name": "GA Tie-Down 1"}), &ctx);
-    assert!(r.starts_with("error") && r.contains("pattern_fly"), "{r}");
+    assert!(r.starts_with("error") && r.contains("no pattern"), "{r}");
 
-    engage_ktest_pattern(&ctx);
+    fly_pattern(&ctx, "KTEST", "09");
     let r = dispatch(
         "plan_arrival",
         json!({"parking_name": "GA Tie-Down 1", "exit_taxiway": "E"}),
@@ -2031,16 +1694,7 @@ fn choose_runway_exit_records_preference_on_pattern_profile() {
     ];
     build_fake_parquet(dir.path(), &extra);
     let (ctx, _bridge) = make_ctx_with_parquet(dir.path());
-    dispatch(
-        "engage_pattern_fly",
-        json!({
-            "airport_ident": "KEXIT",
-            "runway_ident": "09",
-            "side": "left",
-            "start_phase": "pattern_entry",
-        }),
-        &ctx,
-    );
+    fly_pattern(&ctx, "KEXIT", "09");
     let r = dispatch("choose_runway_exit", json!({"taxiway_name": "A5"}), &ctx);
     assert!(r.contains("A5"), "got: {}", r);
     assert!(r.contains("preferred"), "got: {}", r);
@@ -2076,21 +1730,50 @@ fn choose_runway_exit_rejects_unknown_exit_with_valid_list() {
     ];
     build_fake_parquet(dir.path(), &extra);
     let (ctx, _bridge) = make_ctx_with_parquet(dir.path());
-    dispatch(
-        "engage_pattern_fly",
-        json!({
-            "airport_ident": "KEXIT",
-            "runway_ident": "09",
-            "side": "left",
-            "start_phase": "pattern_entry",
-        }),
-        &ctx,
-    );
+    fly_pattern(&ctx, "KEXIT", "09");
     let r = dispatch("choose_runway_exit", json!({"taxiway_name": "Z"}), &ctx);
     assert!(r.starts_with("error"), "got: {}", r);
     assert!(r.contains("\"Z\""), "got: {}", r);
     assert!(r.contains("A5"), "valid list missing A5: {}", r);
     assert!(r.contains("A7"), "valid list missing A7: {}", r);
+}
+
+#[test]
+fn a_plan_pattern_anchors_at_pavement_end_and_exposes_displacement() {
+    // Runway "09" pavement end coincides with the georef anchor
+    // (47.4638, -122.308) and extends due east, so pavement_end_ft is
+    // (0, 0). The runway frame anchors at the pavement end — NOT at
+    // the displaced landing threshold — and stores the displacement
+    // separately so takeoff and landing can use the same frame
+    // consistently.
+    let dir = TempDir::new().unwrap();
+    let disp_ft = 88.0_f64 * 3.280_839_895_013_123;
+    let extra = [
+        "1 0 0 0 KTEST KTEST Test Airport\n\
+         100 22.86 1 0 0.25 0 2 0 \
+         09 47.463800 -122.308000 88.00 0 0 0 0 0 \
+         27 47.463800 -122.287000 0.00 0 0 0 0 0\n"
+            .to_string(),
+    ];
+    build_fake_parquet(dir.path(), &extra);
+    let (ctx, _bridge) = make_ctx_with_parquet(dir.path());
+    fly_pattern(&ctx, "KTEST", "09");
+    let pilot = ctx.pilot.lock();
+    let threshold = pilot.runway_frame.runway.threshold_ft;
+    // Threshold = pavement end (georef anchor), not displacement-shifted.
+    assert!(threshold.x.abs() < 1.0, "east: got {}", threshold.x);
+    assert!(threshold.y.abs() < 1.0, "north: got {}", threshold.y);
+    // Displacement is exposed as its own field.
+    assert!(
+        (pilot.runway_frame.runway.displaced_threshold_ft - disp_ft).abs() < 1.0,
+        "displaced_threshold_ft: got {}, want {}",
+        pilot.runway_frame.runway.displaced_threshold_ft,
+        disp_ft
+    );
+    // Aim point = displaced_threshold + 600 ft: 600 ft past the painted
+    // landing threshold.
+    let aim = pilot.runway_frame.touchdown_runway_x_ft();
+    assert!((aim - (disp_ft + 600.0)).abs() < 1.0, "aim: got {}, want {}", aim, disp_ft + 600.0);
 }
 
 #[test]
@@ -2100,7 +1783,7 @@ fn choose_runway_exit_errors_when_pattern_fly_not_active() {
     let (ctx, _bridge) = make_ctx_with_parquet(dir.path());
     let r = dispatch("choose_runway_exit", json!({"taxiway_name": "A5"}), &ctx);
     assert!(r.starts_with("error"), "got: {}", r);
-    assert!(r.contains("pattern_fly"));
+    assert!(r.contains("no pattern"), "got: {}", r);
 }
 
 #[test]
@@ -2353,22 +2036,13 @@ fn engage_dead_stick_landing_engages_profile_when_reachable() {
 
 #[test]
 fn engage_dead_stick_landing_displaces_existing_pattern_fly() {
-    // First engage pattern_fly, then engage dead-stick — pattern_fly must
-    // be displaced (both own all axes).
+    // First fly a pattern plan, then engage dead-stick — the plan must be
+    // displaced (both own all axes).
     let dir = TempDir::new().unwrap();
     build_fake_parquet(dir.path(), &[]);
     let (ctx, _bridge) = make_ctx_with_parquet(dir.path());
     stage_airborne_snapshot(&ctx, Vec2::new(0.0, 6076.0), 5500.0, 5000.0, 180.0, 70.0);
-    let _ = dispatch(
-        "engage_pattern_fly",
-        json!({
-            "airport_ident": "KSEA",
-            "runway_ident": "16L",
-            "side": "left",
-            "start_phase": "downwind",
-        }),
-        &ctx,
-    );
+    fly_pattern(&ctx, "KSEA", "16L");
     let r = dispatch(
         "engage_dead_stick_landing",
         json!({"airport_ident": "KSEA", "runway_ident": "16L", "side": "left"}),
@@ -2382,8 +2056,8 @@ fn engage_dead_stick_landing_displaces_existing_pattern_fly() {
         names
     );
     assert!(
-        !names.contains(&"pattern_fly".to_string()),
-        "pattern_fly should have been displaced, got {:?}",
+        !names.contains(&"plan".to_string()),
+        "the plan should have been displaced, got {:?}",
         names
     );
 }

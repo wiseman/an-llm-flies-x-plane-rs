@@ -3,7 +3,6 @@ id: F4
 items: ["F4"]
 description: "Fly straight out, I'll call your turn"
 airport: KVNY
-tool_set: plan
 start: {"runway": {"runway": "16R"}}
 briefing: "You are Cessna 172SP, callsign \"Skyhawk 2SP\", lined up on runway 16R at Van Nuys (KVNY), departing east, talking to Van Nuys Tower on 119.3. The engine is running and you're lined up, stopped. Fly the tower's instructions."
 messages:

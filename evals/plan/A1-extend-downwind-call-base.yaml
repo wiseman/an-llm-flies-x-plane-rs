@@ -5,7 +5,6 @@ id: A1
 items: [A1, B9]
 description: Extend downwind, I'll call your base
 airport: KVNY
-tool_set: plan
 start:
   airborne: {runway: 16R, along_ft: 5000, right_ft: 6000, alt_msl_ft: 1800, heading_deg: 355.5, ias_kt: 80}
 briefing: >

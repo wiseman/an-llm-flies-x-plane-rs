@@ -7,7 +7,6 @@ and print a pass/fail table.
 
     uv run scripts/eval/run_plan_scenarios.py                 # all, 4 at a time
     uv run scripts/eval/run_plan_scenarios.py B1 A1 -j 2      # by id prefix
-    uv run scripts/eval/run_plan_scenarios.py --tool-set legacy
 
 Each run's log, transcript, track and ground-track SVG land in
 output/eval-<stamp>/. Builds the eval binary first (release).
@@ -29,8 +28,6 @@ def run(path: Path, args) -> dict:
            "--pilot-llm-provider", args.provider]
     if args.model:
         cmd += ["--pilot-llm-model", args.model]
-    if args.tool_set:
-        cmd += ["--tool-set", args.tool_set]
     try:
         proc = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True, timeout=args.timeout)
     except subprocess.TimeoutExpired:
@@ -58,7 +55,6 @@ def main() -> int:
     ap.add_argument("-j", "--jobs", type=int, default=4)
     ap.add_argument("--provider", default="claude-code")
     ap.add_argument("--model", default="claude-sonnet-5-5")
-    ap.add_argument("--tool-set")
     ap.add_argument("--timeout", type=int, default=1800)
     args = ap.parse_args()
 

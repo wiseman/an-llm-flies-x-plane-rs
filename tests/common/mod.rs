@@ -105,7 +105,6 @@ pub fn make_eval_config(tmp: &TempDir, stem: &str) -> EvalConfig {
         session_stem: stem.to_string(),
         verbose: false,
         sim_atc_model: None,
-        tool_set: Default::default(),
         scenario: None,
     }
 }

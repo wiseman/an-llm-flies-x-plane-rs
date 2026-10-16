@@ -436,8 +436,6 @@ pub struct LiveRunConfig {
     /// Initial pilot persona. Can be swapped at runtime via the `/mode`
     /// TUI command.
     pub pilot_mode: PilotMode,
-    /// Which tools (and matching system prompt) the pilot LLM gets.
-    pub tool_set: crate::llm::tools::ToolSet,
 }
 
 pub fn run_live_xplane(base_config: ConfigBundle, runtime: LiveRunConfig) -> Result<()> {
@@ -620,7 +618,6 @@ pub fn run_live_xplane(base_config: ConfigBundle, runtime: LiveRunConfig) -> Res
         tool_counters: None,
         taxi_graphs: Default::default(),
         sim_atc: None,
-        tool_set: runtime.tool_set,
     });
 
     let llm_stop = Arc::new(AtomicBool::new(false));

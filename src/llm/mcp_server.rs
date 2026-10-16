@@ -147,7 +147,7 @@ pub fn handle_jsonrpc(message: &Value, ctx: &ToolContext, bus: Option<&SimBus>) 
         }),
         "ping" => json!({}),
         "tools/list" => {
-            let tools: Vec<Value> = crate::llm::tools::tool_schemas_for(ctx.tool_set, ctx.mission_complete_tx.is_some())
+            let tools: Vec<Value> = crate::llm::tools::tool_schemas(ctx.mission_complete_tx.is_some())
                 .into_iter()
                 .map(|t| json!({ "name": t.name, "description": t.description, "inputSchema": t.parameters }))
                 .collect();

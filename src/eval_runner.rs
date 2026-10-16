@@ -179,8 +179,6 @@ pub struct EvalConfig {
     /// Model for a simulated controller that answers the pilot's radio
     /// calls (see `llm::sim_atc`). `None` = nobody answers.
     pub sim_atc_model: Option<String>,
-    /// Which tools (and matching system prompt) the pilot LLM gets.
-    pub tool_set: crate::llm::tools::ToolSet,
     /// A scripted scenario (`evals/plan/*.yaml`): start state, timed or
     /// triggered ATC calls, end condition and checks. `None` = the
     /// classic parked-start mission eval.
@@ -304,8 +302,8 @@ fn resolve_start(cfg: &EvalConfig) -> Result<ResolvedStart> {
 
     // Pick the first runway at the airport as the initial RunwayFrame
     // anchor. The LLM discovers runways via sql_query and picks its
-    // own when it calls engage_takeoff / engage_pattern_fly — those
-    // tools build their own frame from the LLM-chosen runway, so the
+    // own when it flies a plan (or calls engage_takeoff) — those
+    // build their own frame from the LLM-chosen runway, so the
     // initial anchor is just scaffolding for the idle-state pilot.
     #[allow(clippy::type_complexity)]
     let (runway_ident, rw_lat, rw_lon, rw_hdg, rw_len, rw_disp, rw_width): (
@@ -998,7 +996,6 @@ pub fn run_eval_with_brain(
         tool_counters: Some(tool_counters.clone()),
         taxi_graphs: Default::default(),
         sim_atc: sim_atc.clone(),
-        tool_set: cfg.tool_set,
     });
 
     // Prime `latest_snapshot` so the LLM's first `get_status` returns
@@ -1017,7 +1014,7 @@ pub fn run_eval_with_brain(
         if airborne_start.is_some() {
             use crate::core::profiles::{AltitudeHoldProfile, HeadingHoldProfile, SpeedHoldProfile};
             let _ = pilot.engage_profiles(vec![
-                Box::new(HeadingHoldProfile::new(dyn_state.heading_deg, eval_config.limits.max_bank_pattern_deg, None).unwrap()),
+                Box::new(HeadingHoldProfile::new(dyn_state.heading_deg, eval_config.limits.max_bank_pattern_deg)),
                 Box::new(AltitudeHoldProfile::new(dyn_state.altitude_ft)),
                 Box::new(SpeedHoldProfile::new(dyn_state.ias_kt)),
             ]);
@@ -1321,7 +1318,6 @@ pub fn run_eval_with_brain(
         "tool_calls": tool_stats.total,
         "tool_failures": tool_stats.failed,
         "tool_breakdown": tool_breakdown_json,
-        "tool_set": cfg.tool_set.label(),
         "scenario": cfg.scenario.as_ref().map(|s| serde_json::json!({"id": s.id, "items": s.items})),
         "checks": checks,
         "checks_passed": checks.iter().filter(|c| c.pass).count(),

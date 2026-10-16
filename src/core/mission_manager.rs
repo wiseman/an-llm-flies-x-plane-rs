@@ -424,8 +424,7 @@ impl PilotCore {
             .iter()
             .fold(AxisSet::NONE, |acc, p| acc.union(p.owns()));
         self.check_preemptible(|existing| !existing.owns().is_disjoint(claimed))?;
-        self.runway_frame = RunwayFrame::new(config.airport.runway.clone());
-        self.config = config;
+        self.set_reference_config(config);
         Ok(self.install_profiles(new_profiles))
     }
 
@@ -523,6 +522,12 @@ impl PilotCore {
     /// The active profile carrying the landing's exit/arrival plan.
     pub fn landing_plan_mut(&mut self) -> Option<&mut dyn LandingPlanHolder> {
         self.active_profiles.iter_mut().find_map(|p| p.landing_plan_mut())
+    }
+
+    /// The traffic pattern being flown, if any (a plan's or a bare
+    /// pattern profile's).
+    pub fn pattern_fly_mut(&mut self) -> Option<&mut crate::core::profiles::PatternFlyProfile> {
+        self.active_profiles.iter_mut().find_map(|p| p.pattern_fly_mut())
     }
 
     /// Geometry for the TUI spatial view: the first active profile's

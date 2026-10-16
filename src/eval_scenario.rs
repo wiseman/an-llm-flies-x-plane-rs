@@ -29,10 +29,6 @@ pub struct Scenario {
     pub description: Option<String>,
     pub airport: String,
     pub start: Start,
-    /// Default tool set for the run (`plan` / `legacy`); `--tool-set`
-    /// overrides.
-    #[serde(default)]
-    pub tool_set: Option<String>,
     /// Operator message delivered at the start.
     #[serde(default)]
     pub briefing: Option<String>,

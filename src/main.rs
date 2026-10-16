@@ -67,12 +67,6 @@ struct Cli {
     #[arg(long = "pilot-mode", value_enum, default_value_t = CliPilotMode::Normal)]
     pilot_mode: CliPilotMode,
 
-    /// Pilot toolbox. `legacy` is the fixed set of pattern/hold/takeoff
-    /// tools; `plan` replaces the pattern and hold tools with `fly(code)`,
-    /// which takes a plan written in the pilot vocabulary (Python).
-    #[arg(long = "tool-set", value_enum, default_value_t = CliToolSet::Legacy)]
-    tool_set: CliToolSet,
-
     /// Optional reasoning effort hint passed to the pilot LLM (e.g. "low",
     /// "medium", "high"). When unset, no reasoning field is sent and the
     /// model uses its provider default.
@@ -164,21 +158,6 @@ enum Backend {
 enum CliPilotMode {
     Normal,
     Realistic,
-}
-
-#[derive(Debug, Clone, Copy, clap::ValueEnum)]
-enum CliToolSet {
-    Legacy,
-    Plan,
-}
-
-impl From<CliToolSet> for xplane_pilot::llm::tools::ToolSet {
-    fn from(t: CliToolSet) -> Self {
-        match t {
-            CliToolSet::Legacy => Self::Legacy,
-            CliToolSet::Plan => Self::Plan,
-        }
-    }
 }
 
 impl From<CliPilotMode> for PilotMode {
@@ -386,7 +365,6 @@ fn main() -> Result<()> {
                     heartbeat_enabled: !args.no_heartbeat,
                     voice_enabled: !args.no_voice,
                     pilot_mode,
-                    tool_set: args.tool_set.into(),
                 },
             )?;
         }

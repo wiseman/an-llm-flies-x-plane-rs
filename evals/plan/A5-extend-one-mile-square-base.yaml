@@ -6,7 +6,6 @@ id: A5
 items: [A5]
 description: Extend downwind one more mile and square the base
 airport: KVNY
-tool_set: plan
 start:
   airborne: {runway: 16L, along_ft: 4000, right_ft: -6000, alt_msl_ft: 1800, heading_deg: 355.5, ias_kt: 80}
 briefing: >

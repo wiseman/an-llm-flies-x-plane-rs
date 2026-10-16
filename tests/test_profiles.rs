@@ -6,8 +6,8 @@ use approx::assert_abs_diff_eq;
 use xplane_pilot::config::load_default_config_bundle;
 use xplane_pilot::core::mission_manager::PilotCore;
 use xplane_pilot::core::profiles::{
-    build_rotate_guidance, build_takeoff_roll_guidance, AltitudeHoldProfile, ExtendMode,
-    GuidanceProfile, HeadingHoldProfile, PatternFlyProfile, PatternLeg,
+    build_rotate_guidance, build_takeoff_roll_guidance, AltitudeHoldProfile,
+    GuidanceProfile, HeadingHoldProfile, PatternFlyProfile,
     SpeedHoldProfile, TakeoffProfile, TaxiProfile,
 };
 use xplane_pilot::guidance::pattern_manager::glidepath_target_altitude_ft_default;
@@ -36,7 +36,7 @@ fn new_pilot_starts_with_three_idle_profiles() {
 fn engaging_heading_hold_displaces_idle_lateral_only() {
     let (_, mut pilot) = make_pilot();
     let displaced = pilot.engage_profile(Box::new(
-        HeadingHoldProfile::new(270.0, 25.0, None).unwrap(),
+        HeadingHoldProfile::new(270.0, 25.0),
     )).unwrap();
     assert_eq!(displaced, vec!["idle_lateral"]);
     let names: BTreeSet<String> = pilot.list_profile_names().into_iter().collect();
@@ -91,7 +91,7 @@ fn engage_profiles_atomically_replaces_pattern_fly() {
     let rf = pilot.runway_frame.clone();
     pilot.engage_profile(Box::new(PatternFlyProfile::new(cfg.clone(), rf))).unwrap();
     let displaced = pilot.engage_profiles(vec![
-        Box::new(HeadingHoldProfile::new(90.0, 25.0, None).unwrap()),
+        Box::new(HeadingHoldProfile::new(90.0, 25.0)),
         Box::new(AltitudeHoldProfile::new(3000.0)),
         Box::new(SpeedHoldProfile::new(95.0)),
     ]).unwrap();
@@ -268,7 +268,7 @@ fn takeoff_profile_initial_climb_uses_l1_and_banks_toward_centerline() {
 
 #[test]
 fn shortest_path_default_goes_left_from_060_to_290() {
-    let mut profile = HeadingHoldProfile::new(290.0, 25.0, None).unwrap();
+    let mut profile = HeadingHoldProfile::new(290.0, 25.0);
     let state = AircraftState {
         track_deg: 60.0,
         heading_deg: 60.0,
@@ -278,25 +278,6 @@ fn shortest_path_default_goes_left_from_060_to_290() {
     use xplane_pilot::core::profiles::GuidanceProfile;
     let tick = profile.contribute(&state, 0.2);
     assert!(tick.contribution.target_bank_deg.unwrap() < 0.0);
-}
-
-#[test]
-fn forced_right_direction_banks_right_even_when_left_is_shorter() {
-    let mut profile = HeadingHoldProfile::new(290.0, 25.0, Some("right")).unwrap();
-    let state = AircraftState {
-        track_deg: 60.0,
-        heading_deg: 60.0,
-        ground_velocity_ft_s: heading_to_vector(60.0, 90.0 * KT_TO_FPS),
-        ..AircraftState::synthetic_default()
-    };
-    use xplane_pilot::core::profiles::GuidanceProfile;
-    let tick = profile.contribute(&state, 0.2);
-    assert!(tick.contribution.target_bank_deg.unwrap() > 0.0);
-}
-
-#[test]
-fn invalid_direction_raises() {
-    assert!(HeadingHoldProfile::new(270.0, 25.0, Some("backwards")).is_err());
 }
 
 #[test]
@@ -382,7 +363,7 @@ fn downwind_holds_pattern_altitude_regardless_of_position() {
 fn extended_base_descent_varies_continuously_with_leg_progress() {
     let (cfg, pilot) = make_pilot();
     let mut profile = PatternFlyProfile::new(cfg.clone(), pilot.runway_frame.clone());
-    profile.extend_leg(PatternLeg::Downwind, 6000.0, ExtendMode::Set).unwrap();
+    profile.set_leg_extensions(0.0, 6000.0);
     let pattern_alt = cfg.pattern_altitude_msl_ft();
     let base_turn_x = profile.pattern.base_turn_x_ft;
     let downwind_y = profile.pattern.downwind_y_ft;
@@ -754,8 +735,9 @@ fn settled_go_around_reenters_the_pattern_instead_of_handing_off() {
         on_ground: false,
         ..AircraftState::synthetic_default()
     };
-    profile.extend_leg(PatternLeg::Downwind, 3000.0, ExtendMode::Add).unwrap();
-    profile.execute_touch_and_go();
+    let dw = profile.leg_extensions.downwind_ft;
+    profile.set_leg_extensions(0.0, dw + 3000.0);
+    profile.touch_and_go_trigger = true;
     let tick = profile.contribute(&settled, 0.2);
     assert!(tick.hand_off.is_none(), "pattern_fly keeps flying");
     assert_eq!(profile.phase, FlightPhase::Crosswind);

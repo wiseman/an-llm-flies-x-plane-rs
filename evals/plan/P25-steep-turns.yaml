@@ -5,7 +5,6 @@ id: P25
 items: [P25]
 description: Steep turns, one each way
 airport: KVNY
-tool_set: plan
 start:
   airborne: {runway: 16R, along_ft: 0, right_ft: 30000, alt_msl_ft: 3500, heading_deg: 270, ias_kt: 95}
 briefing: >

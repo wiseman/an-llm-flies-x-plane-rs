@@ -1,5 +1,5 @@
-//! Tests for the ATC-aware pattern tool refactor: clearance gates,
-//! turn triggers, and per-leg extensions.
+//! The pattern's ATC hooks, which plans drive: turn clearance gates,
+//! one-shot turn triggers, and per-leg extensions.
 
 mod common;
 use common::state_with;
@@ -8,7 +8,7 @@ use xplane_pilot::config::load_default_config_bundle;
 use xplane_pilot::core::mode_manager::{
     ModeManager, ModeManagerUpdate, PatternClearances, PatternTriggers,
 };
-use xplane_pilot::core::profiles::{ExtendMode, PatternClearanceGate, PatternFlyProfile, PatternLeg};
+use xplane_pilot::core::profiles::{PatternFlyProfile, PatternLeg};
 use xplane_pilot::core::safety_monitor::SafetyStatus;
 use xplane_pilot::guidance::pattern_manager::build_pattern_geometry;
 use xplane_pilot::guidance::route_manager::RouteManager;
@@ -29,9 +29,8 @@ fn extend_crosswind_widens_effective_downwind_offset() {
     let rf = RunwayFrame::new(cfg.airport.runway.clone());
     let mut profile = PatternFlyProfile::new(cfg.clone(), rf);
     let nominal_y = profile.pattern.downwind_y_ft;
-    let _ = profile
-        .extend_leg(PatternLeg::Crosswind, 1500.0, ExtendMode::Add)
-        .unwrap();
+    let dw = profile.leg_extensions.downwind_ft;
+    profile.set_leg_extensions(1500.0, dw);
     let widened_y = profile.pattern.downwind_y_ft;
     assert!(
         widened_y.abs() > nominal_y.abs(),
@@ -40,34 +39,6 @@ fn extend_crosswind_widens_effective_downwind_offset() {
         widened_y
     );
     assert!((widened_y.abs() - nominal_y.abs() - 1500.0).abs() < 1e-6);
-}
-
-#[test]
-fn extend_pattern_leg_set_mode_replaces_not_accumulates() {
-    let cfg = load_default_config_bundle();
-    let rf = RunwayFrame::new(cfg.airport.runway.clone());
-    let mut profile = PatternFlyProfile::new(cfg, rf);
-    let _ = profile
-        .extend_leg(PatternLeg::Crosswind, 1000.0, ExtendMode::Add)
-        .unwrap();
-    let after_set = profile
-        .extend_leg(PatternLeg::Crosswind, 500.0, ExtendMode::Set)
-        .unwrap();
-    assert_eq!(after_set, 500.0);
-    assert_eq!(profile.leg_extensions.crosswind_ft, 500.0);
-}
-
-#[test]
-fn extend_leg_rejects_base_and_final() {
-    let cfg = load_default_config_bundle();
-    let rf = RunwayFrame::new(cfg.airport.runway.clone());
-    let mut profile = PatternFlyProfile::new(cfg, rf);
-    assert!(profile
-        .extend_leg(PatternLeg::Base, 500.0, ExtendMode::Add)
-        .is_err());
-    assert!(profile
-        .extend_leg(PatternLeg::Final, 500.0, ExtendMode::Add)
-        .is_err());
 }
 
 #[test]
@@ -191,54 +162,6 @@ fn revoked_downwind_clearance_holds_on_crosswind() {
 }
 
 #[test]
-fn set_clearance_land_records_runway_but_does_not_enforce() {
-    let cfg = load_default_config_bundle();
-    let rf = RunwayFrame::new(cfg.airport.runway.clone());
-    let mut profile = PatternFlyProfile::new(cfg.clone(), rf.clone());
-    // Revoke land clearance, then verify the mode machine still lets
-    // Flare -> Rollout fire (record-only semantics).
-    profile.set_clearance(PatternClearanceGate::Land, false, None);
-    assert!(!profile.clearances.land);
-    assert!(profile.clearances.landing_runway.is_none());
-
-    let mm = ModeManager::new(cfg.clone());
-    let pattern = build_pattern_geometry(&rf, cfg.pattern.downwind_offset_ft, 0.0, 0.0);
-    let on_runway = state_with(|s| {
-        s.on_ground = true;
-        s.runway_x_ft = Some(-300.0);
-        s.runway_y_ft = Some(0.0);
-        s.alt_agl_ft = 0.0;
-        s.gs_kt = 40.0;
-    });
-    let route = RouteManager::new(vec![]);
-    let safe = safe_status(cfg.limits.max_bank_pattern_deg);
-    let triggers = PatternTriggers::default();
-    // Clone the profile's (revoked) clearances — Flare -> Rollout must still fire.
-    let phase = mm.update(&ModeManagerUpdate {
-        phase: FlightPhase::Flare,
-        state: &on_runway,
-        route_manager: &route,
-        pattern: &pattern,
-        safety_status: &safe,
-        triggers: &triggers,
-        clearances: &profile.clearances,
-        force_go_around: false,
-        stay_in_pattern: true,
-        touch_and_go: false,
-    });
-    assert_eq!(
-        phase,
-        FlightPhase::Rollout,
-        "land clearance is record-only; mode machine must not block landing"
-    );
-
-    // Granting clearance with a runway id records it.
-    profile.set_clearance(PatternClearanceGate::Land, true, Some("16L".to_string()));
-    assert!(profile.clearances.land);
-    assert_eq!(profile.clearances.landing_runway.as_deref(), Some("16L"));
-}
-
-#[test]
 fn execute_turn_base_after_extended_downwind_rebuilds_base_leg_from_current_position() {
     // After extending downwind and flying past the original base-turn
     // point, firing turn_base must push the base leg to start at the
@@ -247,9 +170,8 @@ fn execute_turn_base_after_extended_downwind_rebuilds_base_leg_from_current_posi
     let rf = RunwayFrame::new(cfg.airport.runway.clone());
     let mut profile = PatternFlyProfile::new(cfg.clone(), rf);
     profile.phase = FlightPhase::Downwind;
-    let _ = profile
-        .extend_leg(PatternLeg::Downwind, 2000.0, ExtendMode::Add)
-        .unwrap();
+    let dw = profile.leg_extensions.downwind_ft;
+    profile.set_leg_extensions(0.0, dw + 2000.0);
     let before_base_turn_x = profile.pattern.base_turn_x_ft;
     let current_rx = before_base_turn_x - 1500.0;
 

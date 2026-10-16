@@ -3,7 +3,6 @@ id: C13
 items: ["C13", "P8"]
 description: "Direct midfield, cross midfield, enter right downwind 34R"
 airport: KVNY
-tool_set: plan
 start: {"airborne": {"runway": "34R", "along_ft": 2000, "right_ft": -30380.6, "alt_msl_ft": 1800, "heading_deg": 90, "ias_kt": 95}}
 briefing: "You are Cessna 172SP, callsign \"Skyhawk 2SP\", about 5 miles west of Van Nuys (KVNY) at 1800 ft, inbound, talking to Van Nuys Tower on 119.3. The autopilot is holding heading, altitude and speed for now. Fly the tower's instructions and land."
 messages:

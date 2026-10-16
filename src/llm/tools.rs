@@ -24,10 +24,7 @@ use crate::core::mission_manager::{
     ActiveClearance, ClearanceSource, MissionGoal, PilotCore, StatusSnapshot,
 };
 use crate::core::landing_rollout::ArrivalPlan;
-use crate::core::profiles::{
-    AltitudeHoldProfile, ExtendMode, GuidanceProfile, HeadingHoldProfile, PatternClearanceGate, PatternFlyProfile,
-    PatternLeg, RunwayExitPlan, SpeedHoldProfile, TakeoffProfile, TaxiProfile,
-};
+use crate::core::profiles::{GuidanceProfile, RunwayExitPlan, TakeoffProfile, TaxiProfile};
 use crate::data::airspace_query::{self, AircraftSnapshot, AirspaceSource};
 use crate::data::parquet::{
     AIRPORTS_FILE, AIRSPACES_FILE, COMMS_FILE, PARKING_SPOTS_FILE, RUNWAYS_FILE, TAXI_EDGES_FILE,
@@ -49,6 +46,9 @@ pub const SQL_QUERY_MAX_ROWS: usize = 50;
 /// Prefix every tool handler uses for error returns. Checked at the
 /// dispatch boundary (one place) to derive `ToolResult.ok`.
 pub const TOOL_ERROR_PREFIX: &str = "error:";
+
+/// Error from the tools that act on the pattern being flown.
+const NO_PATTERN: &str = "error: no pattern is being flown; fly a plan with join(p) first";
 
 /// Structured return of `dispatch_tool`. `output` is the exact string
 /// handed back to the LLM; `ok` is the structural success flag the
@@ -175,49 +175,7 @@ pub struct ToolContext {
     /// Eval harness: a simulated controller that hears `broadcast_on_radio`
     /// calls and answers them. `None` everywhere else.
     pub sim_atc: Option<Arc<crate::llm::sim_atc::SimAtc>>,
-    /// Which tools the LLM gets (and which system prompt goes with them).
-    pub tool_set: ToolSet,
 }
-
-/// The LLM's toolbox. `Plan` swaps the pattern and hold tools for
-/// `fly(code)`, the pilot-vocabulary plan builder.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum ToolSet {
-    #[default]
-    Legacy,
-    Plan,
-}
-
-impl ToolSet {
-    pub fn parse(raw: &str) -> Option<Self> {
-        match raw.trim().to_ascii_lowercase().as_str() {
-            "legacy" => Some(ToolSet::Legacy),
-            "plan" => Some(ToolSet::Plan),
-            _ => None,
-        }
-    }
-
-    pub fn label(self) -> &'static str {
-        match self {
-            ToolSet::Legacy => "legacy",
-            ToolSet::Plan => "plan",
-        }
-    }
-}
-
-/// Tools the plan tool set replaces with `fly`.
-pub const PLAN_HIDDEN_TOOLS: &[&str] = &[
-    "engage_heading_hold",
-    "engage_altitude_hold",
-    "engage_speed_hold",
-    "engage_cruise",
-    "engage_pattern_fly",
-    "extend_pattern_leg",
-    "execute_pattern_turn",
-    "set_pattern_clearance",
-    "join_pattern",
-    "execute_touch_and_go",
-];
 
 impl ToolContext {
     pub fn new(
@@ -239,7 +197,6 @@ impl ToolContext {
             tool_counters: None,
             taxi_graphs: Default::default(),
             sim_atc: None,
-            tool_set: ToolSet::Legacy,
         }
     }
 }
@@ -270,46 +227,33 @@ fn format_displaced(displaced: &[String]) -> String {
     }
 }
 
-/// Engage `profiles`. `Ok` carries the " (displaced: …)" suffix for the
+/// Engage `profile`. `Ok` carries the " (displaced: …)" suffix for the
 /// tool result, `Err` the refusal as a tool error.
-fn engage(ctx: &ToolContext, profiles: Vec<Box<dyn GuidanceProfile>>) -> Result<String, String> {
+fn engage(ctx: &ToolContext, profile: Box<dyn GuidanceProfile>) -> Result<String, String> {
     let displaced = ctx
         .pilot
         .lock()
-        .engage_profiles(profiles)
+        .engage_profile(profile)
         .map_err(|e| format!("error: {e}"))?;
     Ok(format_displaced(&displaced))
 }
 
-/// `engage` for profiles flown against a newly looked-up runway
-/// (`config_for_runway`): the runway becomes the pilot's reference only if
+/// `engage` for a profile flown against a newly looked-up runway
+/// (`runway_config`): the runway becomes the pilot's reference only if
 /// the engage goes through.
 fn engage_on_runway(
     ctx: &ToolContext,
     config: ConfigBundle,
-    profiles: Vec<Box<dyn GuidanceProfile>>,
+    profile: Box<dyn GuidanceProfile>,
 ) -> Result<String, String> {
     let airport = config.airport.clone();
     let displaced = ctx
         .pilot
         .lock()
-        .engage_profiles_with_config(config, profiles)
+        .engage_profiles_with_config(config, vec![profile])
         .map_err(|e| format!("error: {e}"))?;
     ctx.config.lock().airport = airport;
     Ok(format_displaced(&displaced))
-}
-
-fn pilot_reference_label(ctx: &ToolContext) -> String {
-    let cfg = ctx.config.lock();
-    let mut parts: Vec<String> = Vec::new();
-    if let Some(a) = &cfg.airport.airport {
-        parts.push(format!("airport={}", a));
-    }
-    if let Some(r) = &cfg.airport.runway.id {
-        parts.push(format!("runway={}", r));
-    }
-    parts.push(format!("course={:.0}deg", cfg.airport.runway.course_deg));
-    parts.join(" ")
 }
 
 /// Read the three fuel datarefs (`m_fuel_total`, `acf_m_fuel_tot`, engine-0
@@ -608,7 +552,7 @@ pub fn tool_sleep(ctx: &ToolContext, args: &Map<String, Value>) -> String {
     // profile is flying it. `sleep` yields the turn and relies on the
     // active profiles to keep flying — with only `idle_*` profiles
     // engaged, dozing off just lets the aircraft coast uncontrolled.
-    // Once a real profile (pattern_fly, taxi, park, takeoff, any hold)
+    // Once a real profile (a plan, taxi, park, takeoff)
     // owns the aircraft, sleep is the right thing to do even at speed.
     let snapshot = ctx.pilot.lock().latest_snapshot.clone();
     if let Some(snap) = snapshot {
@@ -618,7 +562,7 @@ pub fn tool_sleep(ctx: &ToolContext, args: &Map<String, Value>) -> String {
             .all(|n| n.starts_with("idle_"));
         if only_idle && snap.state.gs_kt > SLEEP_STATIONARY_GS_KT {
             return format!(
-                "error: aircraft is moving at {:.1} kt groundspeed with only idle profiles active — sleep is only allowed when a control profile is flying the aircraft, or when stationary. Engage a control profile (engage_pattern_fly / engage_park / engage_taxi) or bring the aircraft to a stop before sleeping.",
+                "error: aircraft is moving at {:.1} kt groundspeed with only idle profiles active — sleep is only allowed when a control profile is flying the aircraft, or when stationary. Fly a plan (fly) or engage a ground profile (engage_taxi / engage_park), or bring the aircraft to a stop before sleeping.",
                 snap.state.gs_kt,
             );
         }
@@ -673,101 +617,6 @@ fn radio_dataref(radio: &str) -> Result<&'static str, String> {
         "com2" => Ok(COM2_FREQUENCY_HZ_833.name),
         other => Err(format!("unknown radio {:?} (expected com1, com2)", other)),
     }
-}
-
-pub fn tool_engage_heading_hold(ctx: &ToolContext, args: &Map<String, Value>) -> String {
-    let heading = match arg_f64(args, "heading_deg") {
-        Ok(v) => v,
-        Err(e) => return format!("error: {}", e),
-    };
-    let direction = args
-        .get("turn_direction")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
-    let max_bank = ctx.config.lock().limits.max_bank_enroute_deg;
-    let profile = match HeadingHoldProfile::new(heading, max_bank, direction.as_deref()) {
-        Ok(p) => p,
-        Err(e) => return format!("error: {}", e),
-    };
-    let heading = profile.heading_deg;
-    let displaced = match engage(ctx, vec![Box::new(profile)]) {
-        Ok(d) => d,
-        Err(e) => return e,
-    };
-    let direction_note = direction
-        .as_deref()
-        .map(|d| format!(" via {}", d))
-        .unwrap_or_default();
-    format!(
-        "engaged heading_hold heading={:.1}deg{}{}",
-        heading,
-        direction_note,
-        displaced
-    )
-}
-
-pub fn tool_engage_altitude_hold(ctx: &ToolContext, args: &Map<String, Value>) -> String {
-    let altitude = match arg_f64(args, "altitude_ft") {
-        Ok(v) => v,
-        Err(e) => return format!("error: {}", e),
-    };
-    let displaced = match engage(ctx, vec![Box::new(AltitudeHoldProfile::new(altitude))]) {
-        Ok(d) => d,
-        Err(e) => return e,
-    };
-    format!(
-        "engaged altitude_hold altitude={:.0}ft{}",
-        altitude,
-        displaced
-    )
-}
-
-pub fn tool_engage_speed_hold(ctx: &ToolContext, args: &Map<String, Value>) -> String {
-    let speed = match arg_f64(args, "speed_kt") {
-        Ok(v) => v,
-        Err(e) => return format!("error: {}", e),
-    };
-    let displaced = match engage(ctx, vec![Box::new(SpeedHoldProfile::new(speed))]) {
-        Ok(d) => d,
-        Err(e) => return e,
-    };
-    format!(
-        "engaged speed_hold speed={:.0}kt{}",
-        speed,
-        displaced
-    )
-}
-
-pub fn tool_engage_cruise(ctx: &ToolContext, args: &Map<String, Value>) -> String {
-    let heading = match arg_f64(args, "heading_deg") { Ok(v) => v, Err(e) => return format!("error: {}", e) };
-    let altitude = match arg_f64(args, "altitude_ft") { Ok(v) => v, Err(e) => return format!("error: {}", e) };
-    let speed = match arg_f64(args, "speed_kt") { Ok(v) => v, Err(e) => return format!("error: {}", e) };
-    let max_bank = ctx.config.lock().limits.max_bank_enroute_deg;
-    let profiles: Vec<Box<dyn crate::core::profiles::GuidanceProfile>> = vec![
-        Box::new(HeadingHoldProfile::new(heading, max_bank, None).unwrap()),
-        Box::new(AltitudeHoldProfile::new(altitude)),
-        Box::new(SpeedHoldProfile::new(speed)),
-    ];
-    let displaced = match engage(ctx, profiles) {
-        Ok(d) => d,
-        Err(e) => return e,
-    };
-    format!(
-        "engaged cruise heading={:.0}deg alt={:.0}ft speed={:.0}kt{}",
-        heading,
-        altitude,
-        speed,
-        displaced
-    )
-}
-
-/// Touchdown zone length (feet) used when the runway is installed dynamically
-/// from a query — `RunwayFrame::touchdown_runway_x_ft` halves this and then
-/// clamps to `[500, length/3]` to produce the aim-point. Returning 1200 here
-/// targets an aim point 600 ft past the landing threshold, which leaves room
-/// for the roundout/flare float without overrunning on short strips.
-fn synthesize_touchdown_zone_ft(_length_ft: f64) -> f64 {
-    1200.0
 }
 
 pub fn ensure_runway_conn(ctx: &ToolContext) -> Result<()> {
@@ -873,12 +722,9 @@ fn dir_join(sibling: &std::path::Path, name: &str) -> PathBuf {
     sibling.parent().unwrap_or_else(|| std::path::Path::new("")).join(name)
 }
 
-fn lookup_runway_for_pattern(
-    ctx: &ToolContext,
-    airport_ident: &str,
-    runway_ident: &str,
-    side: &str,
-) -> Result<(Runway, f64)> {
+/// The pilot's config with `airport_ident`'s runway `runway_ident` (from
+/// apt.dat) as its reference runway, flown with `side` traffic.
+fn runway_config(ctx: &ToolContext, airport_ident: &str, runway_ident: &str, side: &str) -> Result<ConfigBundle> {
     let bridge = ctx
         .bridge
         .as_ref()
@@ -899,19 +745,22 @@ fn lookup_runway_for_pattern(
     // think the aircraft is off the runway at the pavement end.
     let pavement_end_ft =
         geodetic_offset_ft(end.threshold_lat_deg, end.threshold_lon_deg, bridge.georef());
-    Ok((
-        Runway {
-            id: Some(runway_ident.to_string()),
-            threshold_ft: pavement_end_ft,
-            course_deg: end.course_deg,
-            length_ft: end.length_ft,
-            touchdown_zone_ft: synthesize_touchdown_zone_ft(end.length_ft),
-            displaced_threshold_ft: end.displaced_threshold_ft,
-            width_ft: end.width_ft,
-            traffic_side,
-        },
-        end.elevation_ft,
-    ))
+    let mut cfg = ctx.config.lock().clone();
+    cfg.airport.airport = Some(airport_ident.to_string());
+    cfg.airport.field_elevation_ft = end.elevation_ft;
+    cfg.airport.runway = Runway {
+        id: Some(runway_ident.to_string()),
+        threshold_ft: pavement_end_ft,
+        course_deg: end.course_deg,
+        length_ft: end.length_ft,
+        // Aim 600 ft past the landing threshold, as a plan's
+        // pattern does.
+        touchdown_zone_ft: crate::plan::compile::TOUCHDOWN_ZONE_FT,
+        displaced_threshold_ft: end.displaced_threshold_ft,
+        width_ft: end.width_ft,
+        traffic_side,
+    };
+    Ok(cfg)
 }
 
 /// One end of a runway, from the `runways` table.
@@ -989,19 +838,6 @@ pub fn query_runway_end(
 /// The tool config with `runway` at `airport_ident` as the reference
 /// runway, to build profiles against before `engage_on_runway` installs
 /// it in the pilot.
-fn config_for_runway(
-    ctx: &ToolContext,
-    airport_ident: &str,
-    runway: Runway,
-    field_elevation_ft: f64,
-) -> ConfigBundle {
-    let mut cfg = ctx.config.lock().clone();
-    cfg.airport.airport = Some(airport_ident.to_string());
-    cfg.airport.field_elevation_ft = field_elevation_ft;
-    cfg.airport.runway = runway;
-    cfg
-}
-
 /// Airport and runway data for plan resolution, from the apt.dat views.
 pub struct DuckAirports<'a> {
     pub ctx: &'a ToolContext,
@@ -1224,8 +1060,8 @@ pub fn tool_fly(ctx: &ToolContext, args: &Map<String, Value>) -> String {
             let mut profile = PlanProfile::new(base.clone(), &state).with_traffic(traffic);
             let notes = profile.apply(delta, &state);
             let engaged = match reference {
-                Some(cfg) => engage_on_runway(ctx, cfg, vec![Box::new(profile)]),
-                None => engage(ctx, vec![Box::new(profile)]),
+                Some(cfg) => engage_on_runway(ctx, cfg, Box::new(profile)),
+                None => engage(ctx, Box::new(profile)),
             };
             match engaged {
                 Ok(displaced) => reply(format!("plan engaged{displaced}:"), notes),
@@ -1236,72 +1072,6 @@ pub fn tool_fly(ctx: &ToolContext, args: &Map<String, Value>) -> String {
     };
     out.extend(printed);
     out.join("\n")
-}
-
-pub fn tool_engage_pattern_fly(ctx: &ToolContext, args: &Map<String, Value>) -> String {
-    let airport = match arg_str(args, "airport_ident") {
-        Ok(s) => s.to_string(),
-        Err(e) => return format!("error: {}", e),
-    };
-    let runway_ident = match arg_str(args, "runway_ident") {
-        Ok(s) => s.to_string(),
-        Err(e) => return format!("error: {}", e),
-    };
-    let side = match arg_str(args, "side") {
-        Ok(s) => s.to_string(),
-        Err(e) => return format!("error: {}", e),
-    };
-    let start_phase = match arg_str(args, "start_phase") {
-        Ok(s) => s.to_string(),
-        Err(e) => return format!("error: {}", e),
-    };
-    let override_position = args
-        .get("override")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-    let (runway, field_elev) = match lookup_runway_for_pattern(ctx, &airport, &runway_ident, &side) {
-        Ok(v) => v,
-        Err(e) => return format!("error: {}", e),
-    };
-    let config = config_for_runway(ctx, &airport, runway, field_elev);
-    let runway_frame = RunwayFrame::new(config.airport.runway.clone());
-
-    let resolved_phase = match FlightPhase::from_str(&start_phase.to_ascii_lowercase()) {
-        Some(p) => p,
-        None => {
-            let valid: Vec<&'static str> = FlightPhase::all().iter().map(|p| p.value()).collect();
-            return format!("error: unknown start_phase {:?}; valid values are {:?}", start_phase, valid);
-        }
-    };
-    // Ground-start phases drive a takeoff roll from the current position.
-    // Apply the same position guards as engage_takeoff so we don't roll
-    // from the ramp onto nothing.
-    if matches!(resolved_phase, FlightPhase::Preflight | FlightPhase::TakeoffRoll) {
-        if let Some(msg) = parking_brake_refusal(ctx, "engage_pattern_fly") {
-            return msg;
-        }
-        if let Err(msg) = validate_takeoff_position(
-            ctx,
-            &runway_frame,
-            &runway_ident,
-            override_position,
-            "engage_pattern_fly",
-        ) {
-            return msg;
-        }
-    }
-
-    let mut profile = PatternFlyProfile::new(config.clone(), runway_frame);
-    profile.phase = resolved_phase;
-    let displaced = match engage_on_runway(ctx, config, vec![Box::new(profile)]) {
-        Ok(d) => d,
-        Err(e) => return e,
-    };
-    format!(
-        "engaged pattern_fly {}{}",
-        pilot_reference_label(ctx),
-        displaced
-    )
 }
 
 /// Fast path brake check — returns an error string if the parking brake
@@ -1320,9 +1090,9 @@ fn parking_brake_refusal(ctx: &ToolContext, tool_name: &str) -> Option<String> {
     }
 }
 
-/// Shared takeoff-position gate for engage_takeoff and engage_pattern_fly
-/// (the latter when starting on the ground in takeoff_roll / preflight),
-/// against the runway about to be engaged.
+/// Shared takeoff-position gate for engage_takeoff and a `fly` plan that
+/// starts on the ground (takeoff or closed traffic), against the runway
+/// about to be engaged.
 ///
 /// Returns `(start_along_ft, usable_length_ft)` on success. `tool_name`
 /// is the name of the calling tool, baked into error messages so the
@@ -1414,8 +1184,8 @@ pub fn tool_engage_takeoff(ctx: &ToolContext, args: &Map<String, Value>) -> Stri
     // course, and length, not whatever was grabbed at startup from the
     // aircraft's boot heading. The rollout centerline controller tracks
     // that course to keep the aircraft on centerline during the roll.
-    let config = match lookup_runway_for_pattern(ctx, &airport, &runway_ident, "left") {
-        Ok((rwy, field_elev)) => config_for_runway(ctx, &airport, rwy, field_elev),
+    let config = match runway_config(ctx, &airport, &runway_ident, "left") {
+        Ok(cfg) => cfg,
         Err(e) => return format!("error: {}", e),
     };
     let runway_frame = RunwayFrame::new(config.airport.runway.clone());
@@ -1437,7 +1207,7 @@ pub fn tool_engage_takeoff(ctx: &ToolContext, args: &Map<String, Value>) -> Stri
         usable_length_ft,
         start_along_ft,
     ));
-    let displaced = match engage_on_runway(ctx, config, vec![profile]) {
+    let displaced = match engage_on_runway(ctx, config, profile) {
         Ok(d) => d,
         Err(e) => return e,
     };
@@ -1717,17 +1487,16 @@ pub fn tool_engage_dead_stick_landing(ctx: &ToolContext, args: &Map<String, Valu
         return "error: aircraft is on the ground; dead-stick landing requires being airborne".to_string();
     }
 
-    let (runway, field_elev) =
-        match lookup_runway_for_pattern(ctx, &airport, &runway_ident, &side) {
-            Ok(v) => v,
-            Err(e) => return format!("error: {}", e),
-        };
+    let config = match runway_config(ctx, &airport, &runway_ident, &side) {
+        Ok(cfg) => cfg,
+        Err(e) => return format!("error: {}", e),
+    };
 
     // Reach validation: refuse runways that aren't physically makeable
     // in the still-air glide.
     let alt_agl_ft = snap.state.alt_agl_ft.max(0.0);
     let reach_ft = alt_agl_ft * glide_ratio;
-    let dist_ft = (snap.state.position_ft - runway.threshold_ft).length();
+    let dist_ft = (snap.state.position_ft - config.airport.runway.threshold_ft).length();
     let reach_nm = reach_ft / NM_TO_FT;
     let dist_nm = dist_ft / NM_TO_FT;
     if dist_ft > reach_ft * REACH_BUFFER_FACTOR {
@@ -1737,14 +1506,13 @@ pub fn tool_engage_dead_stick_landing(ctx: &ToolContext, args: &Map<String, Valu
         );
     }
 
-    let config = config_for_runway(ctx, &airport, runway, field_elev);
     let profile = crate::core::dead_stick_profile::DeadStickLandingProfile::new(
         config.clone(),
         RunwayFrame::new(config.airport.runway.clone()),
         &snap.state,
     );
     let entry_phase = profile.phase;
-    let displaced = match engage_on_runway(ctx, config, vec![Box::new(profile)]) {
+    let displaced = match engage_on_runway(ctx, config, Box::new(profile)) {
         Ok(d) => d,
         Err(e) => return e,
     };
@@ -1827,7 +1595,7 @@ pub fn tool_takeoff_checklist(ctx: &ToolContext, _args: &Map<String, Value>) -> 
             ));
         } else {
             lines.push(format!(
-                "  [ACTION] heading {:.0}° is {:.0}° off runway course {:.0}° — run engage_line_up and wait for it to finish (aircraft stopped, pointed down the runway) before engage_takeoff",
+                "  [ACTION] heading {:.0}° is {:.0}° off runway course {:.0}° — run engage_line_up and wait for it to finish (aircraft stopped, pointed down the runway) before taking off",
                 state.heading_deg, heading_err, runway_course
             ));
             action_needed = true;
@@ -1836,7 +1604,7 @@ pub fn tool_takeoff_checklist(ctx: &ToolContext, _args: &Map<String, Value>) -> 
 
     if state.gs_kt > 3.0 {
         lines.push(format!(
-            "  [ACTION] still moving at {:.1} kt ground speed — wait for engage_line_up to finish and the aircraft to stop before engage_takeoff",
+            "  [ACTION] still moving at {:.1} kt ground speed — wait for engage_line_up to finish and the aircraft to stop before taking off",
             state.gs_kt
         ));
         action_needed = true;
@@ -1853,7 +1621,7 @@ pub fn tool_takeoff_checklist(ctx: &ToolContext, _args: &Map<String, Value>) -> 
         .active_profiles
         .iter()
         .map(|s| s.as_str())
-        .filter(|p| *p == "takeoff" || *p == "pattern_fly")
+        .filter(|p| matches!(*p, "takeoff" | "pattern_fly" | "plan"))
         .collect();
     if !active.is_empty() {
         lines.push(format!("  [INFO]   already engaged: {}", active.join(", ")));
@@ -1863,9 +1631,9 @@ pub fn tool_takeoff_checklist(ctx: &ToolContext, _args: &Map<String, Value>) -> 
     lines.push("  [REMINDER] acknowledge takeoff clearance on the radio (broadcast_on_radio) if ATC has issued one".to_string());
     lines.push("".to_string());
     if action_needed {
-        lines.push("One or more items need action. Fix them, then re-run this checklist or proceed to engage_takeoff.".to_string());
+        lines.push("One or more items need action. Fix them, then re-run this checklist or proceed with the takeoff.".to_string());
     } else {
-        lines.push("All items OK. Call engage_takeoff() to begin the roll.".to_string());
+        lines.push("All items OK. Fly the takeoff clearance (fly: takeoff(rwy).then(...)) to begin the roll.".to_string());
     }
     lines.join("\n")
 }
@@ -1894,114 +1662,12 @@ pub fn tool_list_profiles(ctx: &ToolContext, _args: &Map<String, Value>) -> Stri
     ctx.pilot.lock().list_profile_names().join(", ")
 }
 
-fn with_pattern_profile<R>(ctx: &ToolContext, f: impl FnOnce(&mut PatternFlyProfile) -> R) -> Option<R> {
-    let mut pilot = ctx.pilot.lock();
-    if pilot.profile_mut::<PatternFlyProfile>().is_some() {
-        return pilot.profile_mut::<PatternFlyProfile>().map(f);
-    }
-    // A plan flying a pattern counts: go-around, touch-and-go and the
-    // runway-exit tools act on its pattern.
-    pilot
-        .profile_mut::<crate::core::plan_profile::PlanProfile>()
-        .and_then(|p| p.pattern_fly_mut())
-        .map(f)
-}
-
-pub fn tool_extend_pattern_leg(ctx: &ToolContext, args: &Map<String, Value>) -> String {
-    let leg_str = match arg_str(args, "leg") {
-        Ok(s) => s.to_string(),
-        Err(e) => return format!("error: {}", e),
-    };
-    let Some(leg) = PatternLeg::from_str(&leg_str) else {
-        return format!(
-            "error: unknown leg {:?} (expected one of: crosswind, downwind)",
-            leg_str
-        );
-    };
-    let feet = match arg_f64(args, "extension_ft") {
-        Ok(v) => v,
-        Err(e) => return format!("error: {}", e),
-    };
-    let mode_str = arg_str(args, "mode").unwrap_or("add").to_string();
-    let mode = match mode_str.to_ascii_lowercase().as_str() {
-        "add" => ExtendMode::Add,
-        "set" => ExtendMode::Set,
-        other => return format!("error: unknown mode {:?} (expected 'add' or 'set')", other),
-    };
-    let result = with_pattern_profile(ctx, |p| p.extend_leg(leg, feet, mode));
-    match result {
-        Some(Ok(total)) => format!(
-            "{} leg extension now {:.0}ft (mode={})",
-            leg.as_str(),
-            total,
-            match mode {
-                ExtendMode::Add => "add",
-                ExtendMode::Set => "set",
-            }
-        ),
-        Some(Err(msg)) => format!("error: {}", msg),
-        None => "error: pattern_fly profile is not active; call engage_pattern_fly (or fly a plan with join(p)) first".to_string(),
-    }
-}
-
-pub fn tool_execute_pattern_turn(ctx: &ToolContext, args: &Map<String, Value>) -> String {
-    let leg_str = match arg_str(args, "leg") {
-        Ok(s) => s.to_string(),
-        Err(e) => return format!("error: {}", e),
-    };
-    let Some(leg) = PatternLeg::from_str(&leg_str) else {
-        return format!(
-            "error: unknown leg {:?} (expected one of: crosswind, downwind, base, final)",
-            leg_str
-        );
-    };
-    match with_pattern_profile(ctx, |p| p.execute_turn(leg)) {
-        Some(_) => format!("turn to {} triggered", leg.as_str()),
-        None => "error: pattern_fly profile is not active; call engage_pattern_fly (or fly a plan with join(p)) first".to_string(),
-    }
-}
-
-pub fn tool_set_pattern_clearance(ctx: &ToolContext, args: &Map<String, Value>) -> String {
-    let gate_str = match arg_str(args, "gate") {
-        Ok(s) => s.to_string(),
-        Err(e) => return format!("error: {}", e),
-    };
-    let Some(gate) = PatternClearanceGate::from_str(&gate_str) else {
-        return format!(
-            "error: unknown gate {:?} (expected one of: turn_crosswind, turn_downwind, turn_base, turn_final, land)",
-            gate_str
-        );
-    };
-    let granted = match args.get("granted").and_then(|v| v.as_bool()) {
-        Some(b) => b,
-        None => return "error: missing required bool argument 'granted'".to_string(),
-    };
-    let runway_id = args
-        .get("runway_id")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
-    match with_pattern_profile(ctx, |p| p.set_clearance(gate, granted, runway_id.clone())) {
-        Some(_) => match (gate, granted) {
-            (PatternClearanceGate::Land, true) => format!(
-                "cleared to land{}",
-                runway_id
-                    .as_ref()
-                    .map(|r| format!(" runway={}", r))
-                    .unwrap_or_default()
-            ),
-            (PatternClearanceGate::Land, false) => "landing clearance revoked".to_string(),
-            (_, true) => format!("{} clearance granted", gate.as_str()),
-            (_, false) => format!("{} clearance revoked — ATC will call", gate.as_str()),
-        },
-        None => "error: pattern_fly profile is not active; call engage_pattern_fly (or fly a plan with join(p)) first".to_string(),
-    }
-}
-
 pub fn tool_go_around(ctx: &ToolContext, _args: &Map<String, Value>) -> String {
-    match with_pattern_profile(ctx, |p| p.go_around()) {
+    let triggered = ctx.pilot.lock().pattern_fly_mut().map(|p| p.go_around());
+    match triggered {
         Some(()) => "go_around triggered".to_string(),
-        None if landed(ctx) => "error: already on the ground after landing; a go-around is no longer possible (arm execute_touch_and_go before touchdown instead)".to_string(),
-        None => "error: pattern_fly profile is not active; call engage_pattern_fly (or fly a plan with join(p)) first".to_string(),
+        None if landed(ctx) => "error: already on the ground after landing; a go-around is no longer possible (for a touch-and-go, fly the pattern with land=TOUCH_AND_GO before touchdown)".to_string(),
+        None => NO_PATTERN.to_string(),
     }
 }
 
@@ -2013,25 +1679,6 @@ fn landed(ctx: &ToolContext) -> bool {
         ctx.pilot.lock().phase(),
         FlightPhase::Rollout | FlightPhase::RunwayExit | FlightPhase::TaxiClear
     )
-}
-
-pub fn tool_execute_touch_and_go(ctx: &ToolContext, _args: &Map<String, Value>) -> String {
-    match with_pattern_profile(ctx, |p| p.execute_touch_and_go()) {
-        Some(_) => "touch-and-go armed; landing will transition to takeoff_roll instead of rollout".to_string(),
-        None => "error: pattern_fly profile is not active; call engage_pattern_fly (or fly a plan with join(p)) first".to_string(),
-    }
-}
-
-pub fn tool_join_pattern(ctx: &ToolContext, args: &Map<String, Value>) -> String {
-    let runway = match arg_str(args, "runway_id") {
-        Ok(s) => s.to_string(),
-        Err(e) => return format!("error: {}", e),
-    };
-    let pilot = ctx.pilot.lock();
-    if !pilot.has_profile("pattern_fly") {
-        return "error: pattern_fly profile is not active; engage_pattern_fly(airport_ident, runway_ident) first".to_string();
-    }
-    format!("pattern entry acknowledged runway={}", runway)
 }
 
 pub fn tool_tune_radio(ctx: &ToolContext, args: &Map<String, Value>) -> String {
@@ -2100,8 +1747,8 @@ pub fn tool_set_flaps(ctx: &ToolContext, args: &Map<String, Value>) -> String {
     }
     let mut pilot = ctx.pilot.lock();
     pilot.flaps.note_written(degrees);
-    let warning = if pilot.has_profile("pattern_fly") {
-        " (note: pattern_fly manages flaps per phase — it will set them again at its next flap change)"
+    let warning = if pilot.pattern_fly_mut().is_some() {
+        " (note: the pattern manages flaps per phase — it will set them again at its next flap change)"
     } else {
         ""
     };
@@ -2270,8 +1917,8 @@ pub fn tool_engage_line_up(ctx: &ToolContext, args: &Map<String, Value>) -> Stri
     // Engage on the resolved runway so later tools (engage_takeoff's
     // alignment guard) compare against the runway we're lining up on,
     // not whatever startup-default runway was in the config.
-    let config = match lookup_runway_for_pattern(ctx, &airport, &runway, "left") {
-        Ok((rwy, field_elev)) => config_for_runway(ctx, &airport, rwy, field_elev),
+    let config = match runway_config(ctx, &airport, &runway, "left") {
+        Ok(cfg) => cfg,
         Err(e) => return format!("error: {}", e),
     };
 
@@ -2370,7 +2017,7 @@ pub fn tool_engage_line_up(ctx: &ToolContext, args: &Map<String, Value>) -> Stri
     let names = vec!["(entering runway)".to_string(), format!("rwy {}", runway)];
 
     let profile = Box::new(TaxiProfile::new_line_up(legs_ft, names));
-    let displaced = match engage_on_runway(ctx, config, vec![profile]) {
+    let displaced = match engage_on_runway(ctx, config, profile) {
         Ok(d) => d,
         Err(e) => return e,
     };
@@ -2520,7 +2167,7 @@ pub fn tool_engage_taxi(ctx: &ToolContext, args: &Map<String, Value>) -> String 
     if let Some(pose) = final_pose {
         profile = profile.with_final_pose(pose);
     }
-    let displaced = match engage(ctx, vec![Box::new(profile)]) {
+    let displaced = match engage(ctx, Box::new(profile)) {
         Ok(d) => d,
         Err(e) => return e,
     };
@@ -2689,7 +2336,7 @@ pub fn tool_engage_park(ctx: &ToolContext, args: &Map<String, Value>) -> String 
         Ok(r) => r,
         Err(e) => return format!("error: {e}"),
     };
-    let displaced = match engage(ctx, vec![Box::new(route.profile)]) {
+    let displaced = match engage(ctx, Box::new(route.profile)) {
         Ok(d) => d,
         Err(e) => return e,
     };
@@ -2801,7 +2448,7 @@ pub fn tool_choose_runway_exit(ctx: &ToolContext, args: &Map<String, Value>) -> 
         Some(other) => return format!("error: taxiway_name must be a string or null, got {other}"),
     };
 
-    // Must have pattern_fly (before touchdown) or landing_rollout (after)
+    // Must have a plan flying a pattern (before touchdown) or landing_rollout (after)
     // engaged to set a preference. Check first so the error message is
     // unambiguous (validation-before-engage would give confusing "runway
     // not found" errors for a pilot who hasn't even engaged a profile yet).
@@ -2811,7 +2458,7 @@ pub fn tool_choose_runway_exit(ctx: &ToolContext, args: &Map<String, Value>) -> 
             h.arrival().map(|a| (a.parking_name.clone(), a.via_taxiways.clone())),
         )
     }) else {
-        return "error: pattern_fly profile is not active; call engage_pattern_fly (or fly a plan with join(p)) first".to_string();
+        return NO_PATTERN.to_string();
     };
 
     // Resolve the selected taxi edge into its exact graph path now;
@@ -2857,7 +2504,7 @@ pub fn tool_choose_runway_exit(ctx: &ToolContext, args: &Map<String, Value>) -> 
     match ctx.pilot.lock().landing_plan_mut().map(|h| h.set_landing_plan(exit_plan, arrival)) {
         Some(Ok(())) => display,
         Some(Err(e)) => format!("error: {e}"),
-        None => "error: pattern_fly profile is not active; call engage_pattern_fly (or fly a plan with join(p)) first".to_string(),
+        None => NO_PATTERN.to_string(),
     }
 }
 
@@ -2883,7 +2530,7 @@ pub fn tool_plan_arrival(ctx: &ToolContext, args: &Map<String, Value>) -> String
         .landing_plan_mut()
         .map(|h| h.runway_frame().touchdown_runway_x_ft())
     else {
-        return "error: no pattern is being flown; plan_arrival is for an upcoming landing (engage_pattern_fly, or fly a plan with join(p), first)".to_string();
+        return "error: no pattern is being flown; plan_arrival is for an upcoming landing (fly a plan with join(p) first)".to_string();
     };
     let (airport, runway) = match active_runway(ctx) {
         Ok(v) => v,
@@ -2927,7 +2574,7 @@ pub fn tool_plan_arrival(ctx: &ToolContext, args: &Map<String, Value>) -> String
     match ctx.pilot.lock().landing_plan_mut().map(|h| h.set_landing_plan(Some(plan), Some(arrival))) {
         Some(Ok(())) => reply,
         Some(Err(e)) => format!("error: {e}"),
-        None => "error: pattern_fly profile is not active; call engage_pattern_fly (or fly a plan with join(p)) first".to_string(),
+        None => NO_PATTERN.to_string(),
     }
 }
 
@@ -3513,32 +3160,17 @@ pub fn dispatch_tool(name: &str, arguments: &str, ctx: &ToolContext) -> ToolResu
     let Value::Object(map) = args else {
         return ToolResult::from_output("error: arguments must be an object".to_string());
     };
-    if ctx.tool_set == ToolSet::Plan && PLAN_HIDDEN_TOOLS.contains(&name) {
-        return ToolResult::from_output(format!(
-            "error: {name} is not available in this session; describe the maneuver with fly(code)"
-        ));
-    }
     let output = match name {
         "fly" => tool_fly(ctx, &map),
         "get_status" => tool_get_status(ctx, &map),
         "sleep" => tool_sleep(ctx, &map),
-        "engage_heading_hold" => tool_engage_heading_hold(ctx, &map),
-        "engage_altitude_hold" => tool_engage_altitude_hold(ctx, &map),
-        "engage_speed_hold" => tool_engage_speed_hold(ctx, &map),
-        "engage_cruise" => tool_engage_cruise(ctx, &map),
-        "engage_pattern_fly" => tool_engage_pattern_fly(ctx, &map),
         "engage_takeoff" => tool_engage_takeoff(ctx, &map),
         "find_dead_stick_candidates" => tool_find_dead_stick_candidates(ctx, &map),
         "engage_dead_stick_landing" => tool_engage_dead_stick_landing(ctx, &map),
         "takeoff_checklist" => tool_takeoff_checklist(ctx, &map),
         "disengage_profile" => tool_disengage_profile(ctx, &map),
         "list_profiles" => tool_list_profiles(ctx, &map),
-        "extend_pattern_leg" => tool_extend_pattern_leg(ctx, &map),
-        "execute_pattern_turn" => tool_execute_pattern_turn(ctx, &map),
-        "set_pattern_clearance" => tool_set_pattern_clearance(ctx, &map),
         "go_around" => tool_go_around(ctx, &map),
-        "execute_touch_and_go" => tool_execute_touch_and_go(ctx, &map),
-        "join_pattern" => tool_join_pattern(ctx, &map),
         "tune_radio" => tool_tune_radio(ctx, &map),
         "broadcast_on_radio" => tool_broadcast_on_radio(ctx, &map),
         "set_parking_brake" => tool_set_parking_brake(ctx, &map),
@@ -3564,42 +3196,6 @@ pub fn dispatch_tool(name: &str, arguments: &str, ctx: &ToolContext) -> ToolResu
 
 // ---------- tool schemas ----------
 
-/// Schemas for a tool set: the legacy list, or (for `Plan`) the legacy
-/// list without the pattern/hold tools plus `fly`.
-pub fn tool_schemas_for(set: ToolSet, include_mission_complete: bool) -> Vec<ToolDef> {
-    let mut tools = tool_schemas(include_mission_complete);
-    if set == ToolSet::Plan {
-        tools.retain(|t| !PLAN_HIDDEN_TOOLS.contains(&t.name.as_str()));
-        tools.insert(
-            0,
-            ToolDef {
-                name: "fly".to_string(),
-                description: FLY_DESCRIPTION.to_string(),
-                parameters: json!({
-                    "type": "object",
-                    "properties": {
-                        "code": {
-                            "type": "string",
-                            "description": "Python using the pilot vocabulary (see the system prompt). Builds or amends the plan; runs once."
-                        },
-                        "airport": {
-                            "type": ["string", "null"],
-                            "description": "Airport ident whose runways and places the code refers to. null = the plan's airport, else the pilot's current reference airport, else the nearest airport."
-                        },
-                        "preview": {
-                            "type": ["boolean", "null"],
-                            "description": "true = simulate the change from now and report what would happen, without flying it. null/false = fly it."
-                        }
-                    },
-                    "required": ["code", "airport", "preview"],
-                    "additionalProperties": false,
-                }),
-            },
-        );
-    }
-    tools
-}
-
 /// How far ahead a `fly(preview=true)` looks.
 const PREVIEW_HORIZON_S: f64 = 900.0;
 
@@ -3624,6 +3220,25 @@ pub fn tool_schemas(include_mission_complete: bool) -> Vec<ToolDef> {
     }
     let mut schemas = vec![
         schema(
+            "fly",
+            FLY_DESCRIPTION,
+            json!({
+                "code": {
+                    "type": "string",
+                    "description": "Python using the pilot vocabulary (see the system prompt). Builds or amends the plan; runs once."
+                },
+                "airport": {
+                    "type": ["string", "null"],
+                    "description": "Airport ident whose runways and places the code refers to. null = the plan's airport, else the pilot's current reference airport, else the nearest airport."
+                },
+                "preview": {
+                    "type": ["boolean", "null"],
+                    "description": "true = simulate the change from now and report what would happen, without flying it. null/false = fly it."
+                }
+            }),
+            &["code", "airport", "preview"],
+        ),
+        schema(
             "get_status",
             "Return a JSON snapshot of aircraft state, phase, and active profiles. Completes immediately. Heartbeat messages already embed this payload — only call get_status when you have changed state within the same turn and need fresh values.",
             json!({}),
@@ -3641,55 +3256,8 @@ pub fn tool_schemas(include_mission_complete: bool) -> Vec<ToolDef> {
             &["suppress_idle_heartbeat_s"],
         ),
         schema(
-            "engage_heading_hold",
-            "Engage heading-hold on the lateral axis. By default takes the shortest-path turn to the target heading; pass turn_direction='left'|'right' to force that direction when ATC or the operator specifies one (the direction lock auto-clears within 5° of target so the autopilot will not overshoot). Completes by engaging a holding loop; remains active until displaced by another lateral-axis profile.",
-            json!({
-                "heading_deg": {"type": "number", "description": "Target heading in degrees true, 0-360."},
-                "turn_direction": {
-                    "type": ["string", "null"],
-                    "enum": ["left", "right", null],
-                    "description": "Optional forced turn direction: 'left', 'right', or null for shortest-path (default)."
-                }
-            }),
-            &["heading_deg", "turn_direction"],
-        ),
-        schema(
-            "engage_altitude_hold",
-            "Engage altitude-hold on the vertical axis (TECS). Completes by engaging a holding loop; remains active until displaced by another vertical-axis profile.",
-            json!({"altitude_ft": {"type": "number", "description": "Target altitude in feet MSL."}}),
-            &["altitude_ft"],
-        ),
-        schema(
-            "engage_speed_hold",
-            "Engage speed-hold on the speed axis. Completes by engaging a holding loop; remains active until displaced by another speed-axis profile.",
-            json!({"speed_kt": {"type": "number", "description": "Target indicated airspeed in knots."}}),
-            &["speed_kt"],
-        ),
-        schema(
-            "engage_cruise",
-            "Atomically install heading_hold + altitude_hold + speed_hold in one call. Use when transitioning out of a three-axis profile (takeoff, pattern_fly) into a steady cross-country leg — engaging the three single-axis holds separately briefly leaves the vertical and speed axes uncovered between calls, while this installs all three under one lock. Displaces any lateral-, vertical-, or speed-axis profile currently engaged (including takeoff and pattern_fly, which own all three). Completes by engaging three holding loops; each remains active until displaced.",
-            json!({
-                "heading_deg": {"type": "number", "description": "Target true heading, 0-360."},
-                "altitude_ft": {"type": "number", "description": "Target altitude MSL in feet."},
-                "speed_kt": {"type": "number", "description": "Target indicated airspeed in knots."}
-            }),
-            &["heading_deg", "altitude_ft", "speed_kt"],
-        ),
-        schema(
-            "engage_pattern_fly",
-            "Engage the deterministic mission pilot anchored at a specific runway; owns all three axes and runs the full phase machine (takeoff_roll → rotate → climb → pattern legs → flare → rollout → taxi_clear). Preconditions: runway must exist in apt.dat; if you don't know which runway you're on, call get_status + the closest-runway sql_query first. Pick start_phase to match the aircraft's CURRENT physical state — the phase machine auto-advances when the aircraft reaches each leg's trigger altitude/position, so skipping ahead (e.g. start_phase='crosswind' while still climbing on upwind) forces an immediate premature turn. When start_phase='takeoff_roll' the same position guards as engage_takeoff apply (parking brake released, on centerline within 100 ft, inside the along-track length, heading within 15° of course, ground speed < 3 kt, ≥1000 ft usable runway ahead); override=true bypasses the centerline/along-track/heading checks for off-field, bush, or taxiway departures (brake/GS/length guards still apply). Completes by driving the phase machine; state-change heartbeats fire on every phase transition. At touchdown pattern_fly hands off to the landing_rollout profile. With a chosen runway exit, landing_rollout follows the exit, stops clear of the runway, and auto-releases to idle (`taxi_clear`). With no exit chosen or a missed exit, it brakes to a stop on the runway centerline and keeps holding there in `rollout`; engage_park takes over from that point. There is no `completed:` heartbeat for either; the hand-off and the later release show up as changes to active_profiles. start_phase picks: 'takeoff_roll' (on the ground), 'initial_climb' (just airborne below pattern altitude — right choice when handing off from engage_takeoff), 'pattern_entry' (joining from cruise, not aligned with a specific leg), 'crosswind'/'downwind'/'base'/'final' only when physically established on that leg. Typical calls: engage_pattern_fly(airport_ident='KSEA', runway_ident='16L', side='left', start_phase='takeoff_roll') for a ground takeoff; same args with start_phase='initial_climb' when handing off from engage_takeoff; same args with start_phase='pattern_entry' when joining mid-flight from cruise.",
-            json!({
-                "airport_ident": {"type": "string", "description": "ICAO airport code (e.g. 'KSEA')."},
-                "runway_ident": {"type": "string", "description": "Runway end identifier (e.g. '16L', '34R')."},
-                "side": {"type": "string", "description": "Traffic pattern side: 'left' (standard US) or 'right'."},
-                "start_phase": {"type": "string", "description": "Initial phase for the phase machine. Pick the leg the aircraft is currently on, not the one it's about to transition to — the phase machine auto-advances. 'takeoff_roll' on the ground, 'initial_climb' airborne but below pattern altitude, 'pattern_entry' joining from cruise, 'crosswind'/'downwind'/'base'/'final' only when physically established on that leg. Skipping ahead (e.g. 'crosswind' while still on upwind) forces an immediate premature turn."},
-                "override": {"type": ["boolean", "null"], "description": "Only meaningful when start_phase='takeoff_roll'. Pass true to bypass the centerline, along-track, and heading-alignment checks for off-field / bush / taxiway departures. Pass null (or false) otherwise."}
-            }),
-            &["airport_ident", "runway_ident", "side", "start_phase", "override"],
-        ),
-        schema(
             "engage_takeoff",
-            "Start the takeoff sequence on the named airport + runway: full power, hold centerline via the rollout controller, rotate at Vr, climb at Vy along the runway track. Owns all three axes. DO NOT call this if you are not already lined up on the runway centerline and stopped. The full departure sequence from a parking spot is engage_taxi → wait for `completed: taxi` → engage_line_up → wait for `completed: line_up` → engage_takeoff; if you skip engage_line_up, this tool will refuse because the aircraft is not on the centerline. Refuses with an error naming the failing check if any of these aren't met: parking brake released, on the named runway's centerline within 100 ft, inside the along-track length, heading within 15° of course, ground speed < 3 kt, ≥1000 ft usable runway ahead. override=true bypasses centerline/along-track/heading for off-field, bush, or taxiway departures; brake, ground-speed, and length guards still apply. Does NOT auto-disengage — transition out by engaging another profile once safely airborne (engage_pattern_fly with start_phase='initial_climb', engage_cruise, or a single-axis hold), which displaces takeoff via axis-ownership conflict. Call takeoff_checklist first to see a human-readable readiness summary.",
+            "Start the takeoff sequence on the named airport + runway: full power, hold centerline via the rollout controller, rotate at Vr, climb at Vy along the runway track. Owns all three axes. DO NOT call this if you are not already lined up on the runway centerline and stopped. The full departure sequence from a parking spot is engage_taxi → wait for `completed: taxi` → engage_line_up → wait for `completed: line_up` → engage_takeoff; if you skip engage_line_up, this tool will refuse because the aircraft is not on the centerline. Refuses with an error naming the failing check if any of these aren't met: parking brake released, on the named runway's centerline within 100 ft, inside the along-track length, heading within 15° of course, ground speed < 3 kt, ≥1000 ft usable runway ahead. override=true bypasses centerline/along-track/heading for off-field, bush, or taxiway departures; brake, ground-speed, and length guards still apply. Does NOT auto-disengage — once safely airborne, fly a plan for what comes next, which displaces takeoff. Usually simpler: fly takeoff(rwy).then(...) instead of this tool. Call takeoff_checklist first to see a human-readable readiness summary.",
             json!({
                 "airport_ident": {"type": "string", "description": "Airport identifier as stored in apt.dat (e.g. 'KSFO')."},
                 "runway_ident": {"type": "string", "description": "Runway end ident you're departing on (e.g. '12', '28R')."},
@@ -3713,7 +3281,7 @@ pub fn tool_schemas(include_mission_complete: bool) -> Vec<ToolDef> {
         ),
         schema(
             "engage_dead_stick_landing",
-            "Engage the engine-out / dead-stick landing profile on the named runway. Owns all three axes. Glides at best-glide speed (vbg) toward the Low Key fix (abeam touchdown on the pattern side at ~1000 ft AGL), then runs Downwind → Base → Final → Roundout → Flare → Rollout with throttle locked at zero throughout. There is NO go-around — a powerless aircraft can't climb. Use when the operator declares engine failure or pulls power to idle and asks you to land. Refuses if the aircraft is on the ground or if the chosen runway is outside still-air glide range (use find_dead_stick_candidates to enumerate reachable options first). Bias toward candidates with margin_nm > 1 so you have buffer for headwinds and pattern maneuvering. After engaging, do NOT call engage_pattern_fly or any hold — talk to ATC, brief the operator, and let the autopilot fly. At touchdown it hands off to landing_rollout, which keeps the throttle closed and brakes to a stop on the centerline.",
+            "Engage the engine-out / dead-stick landing profile on the named runway. Owns all three axes. Glides at best-glide speed (vbg) toward the Low Key fix (abeam touchdown on the pattern side at ~1000 ft AGL), then runs Downwind → Base → Final → Roundout → Flare → Rollout with throttle locked at zero throughout. There is NO go-around — a powerless aircraft can't climb. Use when the operator declares engine failure or pulls power to idle and asks you to land. Refuses if the aircraft is on the ground or if the chosen runway is outside still-air glide range (use find_dead_stick_candidates to enumerate reachable options first). Bias toward candidates with margin_nm > 1 so you have buffer for headwinds and pattern maneuvering. After engaging, do NOT fly a plan — talk to ATC, brief the operator, and let the autopilot fly. At touchdown it hands off to landing_rollout, which keeps the throttle closed and brakes to a stop on the centerline.",
             json!({
                 "airport_ident": {"type": "string", "description": "ICAO airport code of the chosen runway (e.g. 'KSEA')."},
                 "runway_ident": {"type": "string", "description": "Runway end identifier (e.g. '16L', '34R')."},
@@ -3730,7 +3298,7 @@ pub fn tool_schemas(include_mission_complete: bool) -> Vec<ToolDef> {
         schema(
             "disengage_profile",
             "Remove the profile with the given name; orphaned axes fall back to idle profiles. Completes immediately.",
-            json!({"name": {"type": "string", "description": "Profile name, e.g. 'heading_hold'."}}),
+            json!({"name": {"type": "string", "description": "Profile name, e.g. 'plan' or 'taxi'."}}),
             &["name"],
         ),
         schema(
@@ -3740,50 +3308,10 @@ pub fn tool_schemas(include_mission_complete: bool) -> Vec<ToolDef> {
             &[],
         ),
         schema(
-            "extend_pattern_leg",
-            "Lengthen a traffic-pattern leg. Only 'crosswind' and 'downwind' are extensible: crosswind extension widens the effective downwind offset (the pattern is flown further out to the side); downwind extension pushes the base-turn point further past the threshold. mode='add' (default) accumulates onto the current extension; mode='set' replaces it with the exact value. Preconditions: pattern_fly must be active. Completes immediately — the next pattern loop tick applies the extension.",
-            json!({
-                "leg": {"type": "string", "enum": ["crosswind", "downwind"], "description": "Which leg to extend."},
-                "extension_ft": {"type": "number", "description": "Extension in feet. With mode='add' adds to the current extension; with mode='set' replaces it (clamped to >= 0)."},
-                "mode": {"type": ["string", "null"], "enum": ["add", "set", null], "description": "How to apply the value. 'add' (default) or 'set'. null means 'add'."}
-            }),
-            &["leg", "extension_ft", "mode"],
-        ),
-        schema(
-            "execute_pattern_turn",
-            "Force an immediate pattern-phase turn, bypassing the automatic geometric trigger. Valid legs: crosswind (InitialClimb→Crosswind), downwind (Crosswind→Downwind), base (Downwind→Base), final (Base→Final). For 'base' in the DOWNWIND phase the base leg is rebuilt dynamically from the aircraft's current runway-frame position, so this works correctly even after an extended downwind. Preconditions: pattern_fly must be active. Completes by executing the turn on the next control loop tick.",
-            json!({
-                "leg": {"type": "string", "enum": ["crosswind", "downwind", "base", "final"], "description": "The turn to execute immediately."}
-            }),
-            &["leg"],
-        ),
-        schema(
-            "set_pattern_clearance",
-            "Grant or revoke an ATC clearance gate for a pattern-phase transition. Revoking a gate holds the aircraft on its current leg until ATC calls it (e.g. 'I'll call your base' → gate='turn_base', granted=false); granting re-enables the automatic transition. The 'land' gate records (but does not enforce) landing authorization — you are responsible for calling go_around if the aircraft reaches short final without a landing clearance at a towered field. Defaults: all gates granted. runway_id is only used when gate='land'. Preconditions: pattern_fly must be active. Completes immediately — the pattern loop reads the new gate state on the next tick.",
-            json!({
-                "gate": {"type": "string", "enum": ["turn_crosswind", "turn_downwind", "turn_base", "turn_final", "land"], "description": "Which clearance gate to set."},
-                "granted": {"type": "boolean", "description": "true to grant (auto-transition enabled); false to revoke (aircraft holds on current leg until execute_pattern_turn is called or clearance is granted)."},
-                "runway_id": {"type": ["string", "null"], "description": "Runway identifier for land clearance (e.g. '16L'). Only meaningful when gate='land' and granted=true. Pass null otherwise."}
-            }),
-            &["gate", "granted", "runway_id"],
-        ),
-        schema(
             "go_around",
-            "Command an immediate go-around. Preconditions: pattern_fly must be active; rejected once landing_rollout has taken over after touchdown. Completes by driving pattern_fly into a climb on runway heading to pattern altitude, after which it turns crosswind and flies the pattern again on its own; state-change heartbeats fire on the phase transitions.",
+            "Command an immediate go-around. Same as go_around() in a plan, without writing code. Preconditions: a plan flying a pattern; rejected once landing_rollout has taken over after touchdown. Completes by putting the pattern into a climb on runway heading to pattern altitude, after which it turns crosswind and flies the pattern again on its own; state-change heartbeats fire on the phase transitions.",
             json!({}),
             &[],
-        ),
-        schema(
-            "execute_touch_and_go",
-            "Arm the upcoming landing as a touch-and-go: on touchdown the phase machine will skip ROLLOUT (braking) and transition directly to TAKEOFF_ROLL (full throttle, flaps retract to 10°, no brakes). The flag auto-clears on TAKEOFF_ROLL→ROTATE, so the next approach defaults to a full-stop landing unless you call this again. Preconditions: pattern_fly must be active; call during BASE or FINAL, before the wheels touch. Completes immediately (flag armed).",
-            json!({}),
-            &[],
-        ),
-        schema(
-            "join_pattern",
-            "Record acknowledgment of an ATC pattern-join instruction. This is a pure acknowledgment — to actually reconfigure the pilot for a new runway, call engage_pattern_fly. Preconditions: pattern_fly must be active. Completes immediately.",
-            json!({"runway_id": {"type": "string", "description": "Runway identifier for the pattern."}}),
-            &["runway_id"],
         ),
         schema(
             "tune_radio",
@@ -3811,7 +3339,7 @@ pub fn tool_schemas(include_mission_complete: bool) -> Vec<ToolDef> {
         ),
         schema(
             "set_flaps",
-            "Set the flap handle position. Valid C172 settings: 0, 10, 20, or 30 degrees. Completes immediately. Preconditions: when pattern_fly is active it manages flaps automatically per flight phase and will override this setting on the next tick — use this tool with single-axis profiles (heading_hold, altitude_hold, speed_hold) or during ground ops.",
+            "Set the flap handle position. Valid C172 settings: 0, 10, 20, or 30 degrees. Completes immediately. Preconditions: while a plan is flying a pattern, the pattern manages flaps per flight phase and will override this setting at its next flap change — use this tool outside the pattern or during ground ops.",
             json!({"degrees": {"type": "integer", "description": "Flap setting in degrees: 0, 10, 20, or 30."}}),
             &["degrees"],
         ),
@@ -3966,7 +3494,7 @@ pub fn tool_schemas(include_mission_complete: bool) -> Vec<ToolDef> {
         ),
         schema(
             "choose_runway_exit",
-            "Record a preferred runway-exit taxiway for the post-landing rollout. The rollout controller slows on centerline, follows the exit's actual apt.dat taxi-network geometry, and stops at the first node beyond the runway active zone before landing_rollout releases. Pass null to clear any prior preference. If the taxiway meets the runway more than once, the first intersection past both the touchdown point and the aircraft is used; the reply gives its stationing. An exit that is entirely behind the touchdown point (or the aircraft) is rejected with the list of exits still ahead. Preconditions: pattern_fly (before touchdown) or landing_rollout (after) must be active; call on final or any time before touchdown, or after stopping on the runway to pick an exit still ahead. Rejected once the aircraft has started turning onto an exit. Completes immediately. If the selected exit is missed, the aircraft remains on centerline and brakes to a stop short of the runway end instead of cutting back toward it.",
+            "Record a preferred runway-exit taxiway for the post-landing rollout. The rollout controller slows on centerline, follows the exit's actual apt.dat taxi-network geometry, and stops at the first node beyond the runway active zone before landing_rollout releases. Pass null to clear any prior preference. If the taxiway meets the runway more than once, the first intersection past both the touchdown point and the aircraft is used; the reply gives its stationing. An exit that is entirely behind the touchdown point (or the aircraft) is rejected with the list of exits still ahead. Preconditions: a plan flying a pattern (before touchdown) or landing_rollout (after); call on final or any time before touchdown, or after stopping on the runway to pick an exit still ahead. Rejected once the aircraft has started turning onto an exit. Completes immediately. If the selected exit is missed, the aircraft remains on centerline and brakes to a stop short of the runway end instead of cutting back toward it.",
             json!({
                 "taxiway_name": {
                     "type": ["string", "null"],
@@ -3977,7 +3505,7 @@ pub fn tool_schemas(include_mission_complete: bool) -> Vec<ToolDef> {
         ),
         schema(
             "plan_arrival",
-            "Plan the whole arrival before touchdown in one call: pick the runway exit and the taxi route from that exit to a parking spot. After touchdown the aircraft rolls out, follows the exit off the runway, and taxis straight to the spot (stopping aligned with its painted heading) with no further tool calls. Use this as the normal way to land and park; list_runway_exits / choose_runway_exit / engage_park remain for exceptions and ATC changes. With exit_taxiway null, the first exit at least post_landing.min_rollout_past_touchdown_ft (default 800 ft) past the touchdown point is chosen; if a named taxiway meets the runway more than once, the first intersection past touchdown is used. If the exit is missed (too fast at the intersection), the aircraft stops on the runway centerline, the arrival plan is put on hold, and a `completed: landing_rollout` heartbeat wakes you to choose an exit ahead or engage_park. Calling choose_runway_exit afterwards re-plans the taxi from the new exit. Preconditions: pattern_fly active and not yet touched down (rejected once landing_rollout has taken over); parking spot must exist in apt.dat. Find spots with sql_query against parking_spots. Completes immediately.",
+            "Plan the whole arrival before touchdown in one call: pick the runway exit and the taxi route from that exit to a parking spot. After touchdown the aircraft rolls out, follows the exit off the runway, and taxis straight to the spot (stopping aligned with its painted heading) with no further tool calls. Use this as the normal way to land and park; list_runway_exits / choose_runway_exit / engage_park remain for exceptions and ATC changes. With exit_taxiway null, the first exit at least post_landing.min_rollout_past_touchdown_ft (default 800 ft) past the touchdown point is chosen; if a named taxiway meets the runway more than once, the first intersection past touchdown is used. If the exit is missed (too fast at the intersection), the aircraft stops on the runway centerline, the arrival plan is put on hold, and a `completed: landing_rollout` heartbeat wakes you to choose an exit ahead or engage_park. Calling choose_runway_exit afterwards re-plans the taxi from the new exit. Preconditions: a plan flying a pattern, not yet touched down (rejected once landing_rollout has taken over); parking spot must exist in apt.dat. Find spots with sql_query against parking_spots. Completes immediately.",
             json!({
                 "parking_name": {
                     "type": "string",
@@ -4263,7 +3791,7 @@ Common queries:
   -- miles_from_centerline < ~0.02 AND feet_from_threshold < length_ft.
   -- Otherwise you're near it but not on it (taxiway/ramp/extended
   -- centerline on approach). active_ident is the end you are pointed at —
-  -- use that as the runway_ident for engage_pattern_fly / engage_takeoff.
+  -- use that as the runway in a plan (apt.runway(ident)) or for engage_takeoff.
 
   -- All active runways at a known airport
   SELECT airport_ident, le_ident, he_ident, length_ft, surface,

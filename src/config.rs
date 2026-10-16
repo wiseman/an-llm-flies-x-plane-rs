@@ -507,7 +507,7 @@ fn load_config_bundle_from(
         touchdown_zone_ft: airport.runway.touchdown_zone_ft,
         // Config YAML doesn't model a displaced threshold — test configs
         // use the simple full-pavement runway. Real-runway displacement
-        // comes in through `lookup_runway_for_pattern` which reads it
+        // comes in through `tools::runway_config` which reads it
         // from apt.dat.
         displaced_threshold_ft: 0.0,
         width_ft: airport.runway.width_ft,

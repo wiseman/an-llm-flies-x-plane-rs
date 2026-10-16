@@ -1,4 +1,4 @@
-//! The plan tool set end to end through the eval harness, with a scripted
+//! Plans end to end through the eval harness, with a scripted
 //! pilot instead of an LLM: scenario YAML -> airborne start -> scripted
 //! ATC -> `fly(code)` tool -> Python -> `PlanProfile` -> checks.
 //!
@@ -21,7 +21,6 @@ use xplane_pilot::llm::backend::{
 };
 use xplane_pilot::llm::brain::PilotBrain;
 use xplane_pilot::llm::conversation::{IncomingMessage, PilotMode};
-use xplane_pilot::llm::tools::ToolSet;
 
 /// Replies to each incoming message from a script keyed on what the
 /// message says; everything else gets `sleep`.
@@ -134,7 +133,6 @@ fn a1_scripted_pilot_extends_and_turns_base_on_the_call() {
         session_stem: "a1".into(),
         verbose: false,
         sim_atc_model: None,
-        tool_set: ToolSet::Plan,
         scenario: Some(scenario),
     };
     let brain = PilotBrain::Api(Arc::new(pilot));

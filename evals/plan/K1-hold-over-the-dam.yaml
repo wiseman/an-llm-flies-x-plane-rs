@@ -3,7 +3,6 @@ id: K1
 items: ["K1"]
 description: "Proceed to the Sepulveda Dam and hold there"
 airport: KVNY
-tool_set: plan
 start: {"airborne": {"runway": "16R", "along_ft": -12152.24, "right_ft": 0, "alt_msl_ft": 2500, "heading_deg": 175.5, "ias_kt": 95}}
 briefing: "You are Cessna 172SP, callsign \"Skyhawk 2SP\", 2 miles north of Van Nuys (KVNY) at 2500 ft, southbound, talking to Van Nuys Tower on 119.3. The autopilot is holding heading, altitude and speed for now. Fly the tower's instructions."
 messages:

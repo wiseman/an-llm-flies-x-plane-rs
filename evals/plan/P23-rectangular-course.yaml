@@ -6,7 +6,6 @@ id: P23
 items: [P23]
 description: Rectangular course around Pierce College
 airport: KVNY
-tool_set: plan
 wind: {from_deg: 270, kt: 10}
 start:
   airborne: {runway: 16R, along_ft: 200, right_ft: 27400, alt_msl_ft: 2500, heading_deg: 180, ias_kt: 95}

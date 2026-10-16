@@ -4,7 +4,6 @@ id: B3
 items: ["B3"]
 description: "Turn base abeam the VA hospital"
 airport: KVNY
-tool_set: plan
 start: {"airborne": {"runway": "16R", "along_ft": 4000, "right_ft": -6000, "alt_msl_ft": 1800, "heading_deg": 355.5, "ias_kt": 80}}
 briefing: "You are Cessna 172SP, callsign \"Skyhawk 2SP\", on a left downwind for runway 16R at Van Nuys (KVNY), at pattern altitude, talking to Van Nuys Tower on 119.3. The autopilot is holding heading, altitude and speed for now. Fly the tower's instructions and land."
 messages:

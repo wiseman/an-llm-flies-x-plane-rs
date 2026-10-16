@@ -239,6 +239,12 @@ pub trait GuidanceProfile: Send + AsAny {
         None
     }
 
+    /// The traffic pattern being flown, for profiles that fly one
+    /// (itself, or a plan's embedded pattern).
+    fn pattern_fly_mut(&mut self) -> Option<&mut PatternFlyProfile> {
+        None
+    }
+
     /// Notable moments since the last call ("report due: 3 miles",
     /// "constraint c1 not met"). `PilotCore` drains these every tick into
     /// its event log, and the heartbeat pump wakes the LLM on new ones.
@@ -326,25 +332,11 @@ pub fn idle_profile_trio(speed_kt: f64) -> Vec<Box<dyn GuidanceProfile>> {
 pub struct HeadingHoldProfile {
     pub heading_deg: f64,
     pub max_bank_deg: f64,
-    pub direction_lock: Option<String>,
 }
 
 impl HeadingHoldProfile {
-    pub fn new(heading_deg: f64, max_bank_deg: f64, turn_direction: Option<&str>) -> Result<Self, String> {
-        let normalized = turn_direction.and_then(|d| {
-            let lower = d.to_ascii_lowercase();
-            if lower.is_empty() { None } else { Some(lower) }
-        });
-        if let Some(d) = &normalized {
-            if d != "left" && d != "right" {
-                return Err(format!("turn_direction must be None, 'left', or 'right'; got {:?}", d));
-            }
-        }
-        Ok(Self {
-            heading_deg: heading_deg.rem_euclid(360.0),
-            max_bank_deg,
-            direction_lock: normalized,
-        })
+    pub fn new(heading_deg: f64, max_bank_deg: f64) -> Self {
+        Self { heading_deg: heading_deg.rem_euclid(360.0), max_bank_deg }
     }
 }
 
@@ -352,17 +344,8 @@ impl GuidanceProfile for HeadingHoldProfile {
     fn name(&self) -> &'static str { "heading_hold" }
     fn owns(&self) -> AxisSet { AxisSet::LATERAL }
     fn contribute(&mut self, state: &AircraftState, _dt: f64) -> ProfileTick {
-        let raw_error = (self.heading_deg - state.track_deg).rem_euclid(360.0);
-        let short_error = if raw_error > 180.0 { raw_error - 360.0 } else { raw_error };
-        if short_error.abs() < 5.0 {
-            self.direction_lock = None;
-        }
-        let effective_error = match self.direction_lock.as_deref() {
-            Some("right") => if raw_error > 0.0 { raw_error } else { 0.0 },
-            Some("left") => if raw_error > 0.0 { raw_error - 360.0 } else { 0.0 },
-            _ => short_error,
-        };
-        let target_bank = clamp(effective_error * 0.35, -self.max_bank_deg, self.max_bank_deg);
+        let error = wrap_degrees_180(self.heading_deg - state.track_deg);
+        let target_bank = clamp(error * 0.35, -self.max_bank_deg, self.max_bank_deg);
         ProfileTick::contribution_only(ProfileContribution {
             lateral_mode: Some(LateralMode::TrackHold),
             target_track_deg: Some(self.heading_deg),
@@ -692,71 +675,6 @@ pub enum PatternLeg {
     Final,
 }
 
-impl PatternLeg {
-    #[allow(clippy::should_implement_trait)]
-    pub fn from_str(s: &str) -> Option<Self> {
-        match s.to_ascii_lowercase().as_str() {
-            "crosswind" => Some(Self::Crosswind),
-            "downwind" => Some(Self::Downwind),
-            "base" => Some(Self::Base),
-            "final" => Some(Self::Final),
-            _ => None,
-        }
-    }
-
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Crosswind => "crosswind",
-            Self::Downwind => "downwind",
-            Self::Base => "base",
-            Self::Final => "final",
-        }
-    }
-}
-
-/// Which gate `set_clearance` controls. "turn_X" gates the auto-transition
-/// into phase X; "land" records (but does not enforce) landing
-/// authorization.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PatternClearanceGate {
-    TurnCrosswind,
-    TurnDownwind,
-    TurnBase,
-    TurnFinal,
-    Land,
-}
-
-impl PatternClearanceGate {
-    #[allow(clippy::should_implement_trait)]
-    pub fn from_str(s: &str) -> Option<Self> {
-        match s.to_ascii_lowercase().as_str() {
-            "turn_crosswind" => Some(Self::TurnCrosswind),
-            "turn_downwind" => Some(Self::TurnDownwind),
-            "turn_base" => Some(Self::TurnBase),
-            "turn_final" => Some(Self::TurnFinal),
-            "land" => Some(Self::Land),
-            _ => None,
-        }
-    }
-
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::TurnCrosswind => "turn_crosswind",
-            Self::TurnDownwind => "turn_downwind",
-            Self::TurnBase => "turn_base",
-            Self::TurnFinal => "turn_final",
-            Self::Land => "land",
-        }
-    }
-}
-
-/// `Add` accumulates onto the existing extension; `Set` replaces it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ExtendMode {
-    Add,
-    Set,
-}
-
 /// Accumulated leg extensions applied to the pattern geometry. Crosswind
 /// widens the effective downwind offset (pushing the whole pattern
 /// further out laterally); downwind pushes the base turn further past
@@ -916,8 +834,6 @@ impl PatternFlyProfile {
         self.go_around_reason_override = Some(LOW_APPROACH_REASON.to_string());
     }
 
-    pub fn execute_touch_and_go(&mut self) { self.touch_and_go_trigger = true; }
-
     /// Fire the one-shot trigger for a given turn. Once set, the next
     /// `ModeManager::update` tick forces the corresponding transition
     /// (bypassing the auto-ready predicate and any revoked clearance). The
@@ -933,58 +849,11 @@ impl PatternFlyProfile {
         }
     }
 
-    /// Grant or revoke an ATC clearance gate. `runway_id` is meaningful
-    /// only for `Land` and is ignored otherwise.
-    pub fn set_clearance(
-        &mut self,
-        gate: PatternClearanceGate,
-        granted: bool,
-        runway_id: Option<String>,
-    ) {
-        match gate {
-            PatternClearanceGate::TurnCrosswind => self.clearances.turn_crosswind = granted,
-            PatternClearanceGate::TurnDownwind => self.clearances.turn_downwind = granted,
-            PatternClearanceGate::TurnBase => self.clearances.turn_base = granted,
-            PatternClearanceGate::TurnFinal => self.clearances.turn_final = granted,
-            PatternClearanceGate::Land => {
-                self.clearances.land = granted;
-                self.clearances.landing_runway = if granted {
-                    runway_id.or_else(|| self.runway_frame.runway.id.clone())
-                } else {
-                    None
-                };
-            }
-        }
-    }
-
-    /// Extend a pattern leg by adding to (or setting) its stored
-    /// extension, then rebuild geometry. Only `Crosswind` and `Downwind`
-    /// have an effect — `Base`/`Final` return `Err` so the tool layer
-    /// can report a clean error. `feet` for `Set` is clamped to >= 0.
-    pub fn extend_leg(
-        &mut self,
-        leg: PatternLeg,
-        feet: f64,
-        mode: ExtendMode,
-    ) -> Result<f64, String> {
-        let slot = match leg {
-            PatternLeg::Crosswind => &mut self.leg_extensions.crosswind_ft,
-            PatternLeg::Downwind => &mut self.leg_extensions.downwind_ft,
-            PatternLeg::Base | PatternLeg::Final => {
-                return Err(format!(
-                    "leg '{}' is not length-extensible (only crosswind and downwind are)",
-                    leg.as_str()
-                ));
-            }
-        };
-        match mode {
-            ExtendMode::Add => *slot += feet,
-            ExtendMode::Set => *slot = feet.max(0.0),
-        }
-        let new_total = slot.max(0.0);
-        *slot = new_total;
+    /// Set the crosswind and downwind extensions (each at least 0) and
+    /// rebuild the geometry.
+    pub fn set_leg_extensions(&mut self, crosswind_ft: f64, downwind_ft: f64) {
+        self.leg_extensions = PatternLegExtensions { crosswind_ft: crosswind_ft.max(0.0), downwind_ft: downwind_ft.max(0.0) };
         self.rebuild_pattern();
-        Ok(new_total)
     }
 
     /// Put the base leg at runway-frame `rx` (where the aircraft turned
@@ -1416,6 +1285,10 @@ impl GuidanceProfile for PatternFlyProfile {
         Some(self)
     }
 
+    fn pattern_fly_mut(&mut self) -> Option<&mut PatternFlyProfile> {
+        Some(self)
+    }
+
     fn name(&self) -> &'static str { "pattern_fly" }
     fn owns(&self) -> AxisSet {
         AxisSet::ALL
@@ -1714,36 +1587,6 @@ impl GuidanceProfile for PatternFlyProfile {
             }),
             _ => None,
         }
-    }
-}
-
-pub struct ApproachRunwayProfile {
-    pub runway_id: String,
-}
-
-impl GuidanceProfile for ApproachRunwayProfile {
-    fn name(&self) -> &'static str { "approach_runway" }
-    fn owns(&self) -> AxisSet {
-        AxisSet::ALL
-    }
-    fn contribute(&mut self, _state: &AircraftState, _dt: f64) -> ProfileTick {
-        // Stub: yield zeros so the control loop keeps running if somebody
-        // accidentally engages us.
-        ProfileTick::contribution_only(ProfileContribution::default())
-    }
-}
-
-pub struct RouteFollowProfile {
-    pub waypoints: Vec<Waypoint>,
-}
-
-impl GuidanceProfile for RouteFollowProfile {
-    fn name(&self) -> &'static str { "route_follow" }
-    fn owns(&self) -> AxisSet {
-        AxisSet::ALL
-    }
-    fn contribute(&mut self, _state: &AircraftState, _dt: f64) -> ProfileTick {
-        ProfileTick::contribution_only(ProfileContribution::default())
     }
 }
 

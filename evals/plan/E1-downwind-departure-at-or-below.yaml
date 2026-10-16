@@ -8,7 +8,6 @@ id: E1
 items: [E1]
 description: Left downwind departure, at or below 1800 until north of the field
 airport: KVNY
-tool_set: plan
 start:
   airborne: {runway: 16R, along_ft: 5500, right_ft: 0, alt_agl_ft: 350, heading_deg: 175.5, ias_kt: 72}
 briefing: >

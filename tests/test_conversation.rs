@@ -245,11 +245,11 @@ fn mode_switch_message_does_not_trigger_api_call() {
 fn single_tool_call_then_text_ends_turn() {
     let ctx = make_ctx();
     let client = StubClient::new(vec![
-        tool_call_response("engage_heading_hold", json!({"heading_deg": 270.0}), "c1"),
-        text_response("heading 270 engaged"),
+        tool_call_response("set_goal", json!({"kind": "land", "target": "KVNY 16R", "notes": null}), "c1"),
+        text_response("goal set"),
     ]);
     let (tx, rx) = unbounded::<IncomingMessage>();
-    tx.send(IncomingMessage::operator("fly heading 270")).unwrap();
+    tx.send(IncomingMessage::operator("land at Van Nuys")).unwrap();
     let stop = Arc::new(AtomicBool::new(false));
 
     std::thread::scope(|s| {
@@ -270,7 +270,7 @@ fn single_tool_call_then_text_ends_turn() {
     });
 
     assert_eq!(client.n_calls(), 2);
-    assert!(ctx.pilot.lock().list_profile_names().contains(&"heading_hold".to_string()));
+    assert!(ctx.pilot.lock().mission_goal.is_some());
 }
 
 #[test]
@@ -422,8 +422,8 @@ fn tool_call_log_lands_on_bus_when_provided() {
     let ctx = make_ctx();
     let bus = SimBus::new(false);
     let client = StubClient::new(vec![
-        tool_call_response("engage_heading_hold", json!({"heading_deg": 90.0}), "c1"),
-        text_response("heading 090 engaged"),
+        tool_call_response("set_goal", json!({"kind": "land", "target": "KVNY 16R", "notes": null}), "c1"),
+        text_response("goal set"),
     ]);
     let (tx, rx) = unbounded::<IncomingMessage>();
     tx.send(IncomingMessage::operator("fly heading 090")).unwrap();
@@ -445,7 +445,7 @@ fn tool_call_log_lands_on_bus_when_provided() {
     });
 
     let (_, logs, _) = bus.snapshot();
-    let tool_log: Vec<&String> = logs.iter().filter(|l| l.contains("engage_heading_hold")).collect();
+    let tool_log: Vec<&String> = logs.iter().filter(|l| l.contains("set_goal")).collect();
     let assistant: Vec<&String> = logs.iter().filter(|l| l.starts_with("[llm]")).collect();
     assert!(!tool_log.is_empty(), "expected tool log lines, got {:?}", logs);
     assert!(!assistant.is_empty(), "expected [llm] text, got {:?}", logs);
@@ -460,8 +460,8 @@ fn token_usage_is_logged_after_each_call_when_usage_present() {
         LlmResponse {
             output: vec![Part::ToolCall {
                 id: "c1".to_string(),
-                name: "engage_heading_hold".to_string(),
-                arguments: json!({"heading_deg": 90.0}).to_string(),
+                name: "set_goal".to_string(),
+                arguments: json!({"kind": "land", "target": "KVNY 16R", "notes": null}).to_string(),
             }],
             usage: LlmUsage {
                 input_tokens: 1234,
@@ -472,7 +472,7 @@ fn token_usage_is_logged_after_each_call_when_usage_present() {
             raw: Value::Null,
             thoughts: Vec::new(),
         },
-        text_response("heading 090 engaged"),
+        text_response("goal set"),
     ]);
     let (tx, rx) = unbounded::<IncomingMessage>();
     tx.send(IncomingMessage::operator("fly heading 090")).unwrap();

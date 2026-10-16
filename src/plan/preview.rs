@@ -191,10 +191,7 @@ pub fn preview(
             }
             if phase == FlightPhase::GoAround {
                 // A low approach's planned go-around isn't a problem.
-                let reason = pilot
-                    .profile_mut::<PlanProfile>()
-                    .and_then(|p| p.pattern_fly_mut())
-                    .and_then(|pf| pf.last_go_around_reason.clone());
+                let reason = pilot.pattern_fly_mut().and_then(|pf| pf.last_go_around_reason.clone());
                 went_around |= reason.as_deref() != Some(LOW_APPROACH_REASON);
             }
             last_phase = Some(phase);

@@ -34,26 +34,6 @@ pub const SYSTEM_PROMPT_REALISTIC: &str = concat!(
     "\n",
     include_str!("system_prompt_realistic_overlay.md"),
 );
-/// The plan tool set's prompt: the pilot vocabulary in place of the
-/// pattern and hold tool reference.
-pub const SYSTEM_PROMPT_PLAN: &str = include_str!("system_prompt_plan.md");
-pub const SYSTEM_PROMPT_PLAN_REALISTIC: &str = concat!(
-    include_str!("system_prompt_plan.md"),
-    "\n",
-    include_str!("system_prompt_realistic_overlay.md"),
-);
-
-/// The system prompt for a mode and tool set. Static, so it stays
-/// byte-stable for the session.
-pub fn system_prompt_for(mode: PilotMode, tool_set: crate::llm::tools::ToolSet) -> &'static str {
-    match tool_set {
-        crate::llm::tools::ToolSet::Legacy => mode.system_prompt(),
-        crate::llm::tools::ToolSet::Plan => match mode {
-            PilotMode::Normal => SYSTEM_PROMPT_PLAN,
-            PilotMode::Realistic => SYSTEM_PROMPT_PLAN_REALISTIC,
-        },
-    }
-}
 const RUNTIME_NORMAL_NOTICE: &str =
     "Return to normal pilot mode. Disregard any realistic-pilot overlay delivered earlier; \
 resume the base persona defined at the top of this conversation.";
@@ -312,7 +292,7 @@ pub fn run_conversation_loop(
     reasoning_effort: Option<ReasoningEffort>,
     bus: Option<&SimBus>,
 ) {
-    let mut conv = Conversation::new(system_prompt_for(initial_mode, tool_context.tool_set));
+    let mut conv = Conversation::new(initial_mode.system_prompt());
     emit_log_kind(
         bus,
         LogKind::Mode,
@@ -452,7 +432,7 @@ fn handle_message(
     }
 
     let deadline = Instant::now() + Duration::from_secs(total_wall_budget_s);
-    let tools = crate::llm::tools::tool_schemas_for(tool_context.tool_set, tool_context.mission_complete_tx.is_some());
+    let tools = crate::llm::tools::tool_schemas(tool_context.mission_complete_tx.is_some());
     loop {
         if Instant::now() >= deadline {
             emit_log_kind(bus, LogKind::Error, "wall-clock budget exceeded; ending turn");

@@ -6,7 +6,6 @@ id: G11
 items: [G11, G10]
 description: Can you make a short approach? Then short approach approved, cleared for the option
 airport: KVNY
-tool_set: plan
 start:
   airborne: {runway: 34R, along_ft: 4000, right_ft: 6000, alt_msl_ft: 1800, heading_deg: 175.5, ias_kt: 85}
 briefing: >

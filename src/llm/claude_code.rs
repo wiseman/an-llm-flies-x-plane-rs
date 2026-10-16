@@ -251,7 +251,7 @@ impl ClaudeSession {
         );
         let system_prompt = format!(
             "{}{}",
-            crate::llm::conversation::system_prompt_for(mode, tool_context.tool_set),
+            mode.system_prompt(),
             CLAUDE_CODE_ADDENDUM
         );
         let mut session = Self::plain(cfg, "[claude-code]", system_prompt, bus)?;

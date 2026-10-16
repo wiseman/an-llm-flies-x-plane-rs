@@ -8,16 +8,19 @@ deterministic flight-control stack flies the airplane.
 
 The model never writes elevator, aileron, rudder, or throttle directly. A 10 Hz
 deterministic control loop owns the actuators at all times. The LLM reads
-operator and ATC messages, reasons about the current situation, and calls tools
-that engage or reconfigure guidance profiles such as heading hold, cruise,
-takeoff, pattern flying, taxi, or line-up-and-wait.
+operator and ATC messages, reasons about the current situation, and in the air
+flies by writing *plans*: a few lines of Python in a pilot and controller
+vocabulary (`fly(code)`), such as "extend downwind, turn base at the 118,
+remain at or below 1800 until north of the field". A deterministic executor
+flies the plan, sequencing its steps and turning when its conditions are met.
+On the ground, tools engage taxi, line-up and parking profiles.
 
-Those profiles own flight-control axes and are merged into a single command set
-every tick. `engage_cruise` installs the three single-axis holds atomically;
-`engage_takeoff` and `engage_pattern_fly` own all three axes for runway and
-traffic-pattern work; `engage_taxi` and `engage_line_up` use the same
-deterministic ground controllers to drive the airplane across the airport
-surface and onto the runway centerline.
+Guidance profiles own flight-control axes and are merged into a single command
+set every tick. The plan profile owns all three axes in the air and flies the
+traffic pattern through the same pattern machinery for takeoffs, go-arounds
+and landings; `engage_taxi` and `engage_line_up` use deterministic ground
+controllers to drive the airplane across the airport surface and onto the
+runway centerline.
 
 The live backend talks to X-Plane through the built-in web API and uses
 X-Plane's own data files as the source of truth. That data is parsed into
@@ -254,10 +257,7 @@ stem (`sim_pilot-YYYYMMDD-HHMMSS`):
 | `get_status`           | Returns a JSON snapshot of aircraft state, phase, active profiles, and live position when available. |
 | `sleep`                | Ends the current LLM turn while the deterministic pilot keeps flying the active profiles.            |
 | `set_goal`             | Declares the pilot's top-level mission goal; surfaces verbatim on the Mission Intent pane.            |
-| `engage_heading_hold`  | Takes ownership of the lateral axis and turns to a target heading, optionally forcing left or right. |
-| `engage_altitude_hold` | Takes ownership of the vertical axis and holds a target altitude with TECS.                          |
-| `engage_speed_hold`    | Takes ownership of the speed axis and holds a target IAS.                                            |
-| `engage_cruise`        | Atomically installs heading, altitude, and speed hold together.                                      |
+| `fly`                  | Flies (or previews) a plan written in the pilot vocabulary: headings, turns, roads and landmarks, the traffic pattern and its turn triggers, altitude limits, reports, traffic to follow. |
 | `disengage_profile`    | Removes a named profile and lets uncovered axes fall back to idle profiles.                          |
 | `list_profiles`        | Lists the currently active profile names.                                                            |
 
@@ -265,15 +265,9 @@ stem (`sim_pilot-YYYYMMDD-HHMMSS`):
 
 | Tool                    | What it does                                                                                                                                      |
 | ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `engage_takeoff`        | Verifies runway alignment and starts the deterministic takeoff roll, rotation, and climb.                                                         |
+| `engage_takeoff`        | Verifies runway alignment and starts the deterministic takeoff roll, rotation, and climb (a plan's `takeoff(rwy)` does the same).                 |
 | `takeoff_checklist`     | Reports takeoff readiness, including parking brake, flaps, and other live-state checks.                                                           |
-| `engage_pattern_fly`    | Anchors the mission pilot to a real runway and flies a full traffic pattern from a chosen phase.                                                  |
-| `extend_pattern_leg`    | Lengthens the downwind or crosswind leg (ATC: "extend your downwind 2 miles").                                                                    |
-| `execute_pattern_turn`  | Forces an immediate turn to crosswind/downwind/base/final, rebuilding the next leg from current position.                                         |
-| `set_pattern_clearance` | Grants or revokes an ATC clearance gate (turn_crosswind/turn_downwind/turn_base/turn_final/land); revoking holds the aircraft on its current leg. |
-| `go_around`             | Commands an immediate go-around during pattern flying.                                                                                            |
-| `execute_touch_and_go`  | Arms the next landing to skip rollout braking and transition straight back to takeoff.                                                            |
-| `join_pattern`          | Acknowledges a pattern-entry instruction while `pattern_fly` is active.                                                                           |
+| `go_around`             | Commands an immediate go-around in the plan's pattern.                                                                                            |
 | `list_runway_exits`     | Lists candidate exit taxiways for a landing runway with their stationing from the threshold.                                                       |
 | `choose_runway_exit`    | Records a preferred runway-exit taxiway; the rollout slows to turnoff speed at that exit and hands off the aircraft stopped clear of the runway.  |
 | `plan_arrival`          | Before touchdown: picks the exit and pre-plans the taxi to a parking spot, so the landing rolls out, exits, and parks with no further calls.      |
