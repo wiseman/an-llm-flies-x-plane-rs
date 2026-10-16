@@ -1398,8 +1398,11 @@ impl GuidanceProfile for PlanProfile {
         self.steps.get(self.idx).map(|s| format!("{}/{} {}", self.idx + 1, self.steps.len(), s.text))
     }
 
-    fn debug_line(&self, _state: &AircraftState) -> Option<String> {
+    fn debug_line(&self, state: &AircraftState) -> Option<String> {
         let mut parts = Vec::new();
+        if let Some(t) = self.pattern.as_ref().and_then(|r| r.pf.takeoff_status(state)) {
+            parts.push(t);
+        }
         if let Some(r) = &self.pattern {
             if let Some((l, t)) = &r.armed {
                 parts.push(format!(

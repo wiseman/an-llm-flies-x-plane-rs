@@ -302,8 +302,7 @@ fn resolve_start(cfg: &EvalConfig) -> Result<ResolvedStart> {
 
     // Pick the first runway at the airport as the initial RunwayFrame
     // anchor. The LLM discovers runways via sql_query and picks its
-    // own when it flies a plan (or calls engage_takeoff) — those
-    // build their own frame from the LLM-chosen runway, so the
+    // own when it flies a plan — that builds its own frame from the LLM-chosen runway, so the
     // initial anchor is just scaffolding for the idle-state pilot.
     #[allow(clippy::type_complexity)]
     let (runway_ident, rw_lat, rw_lon, rw_hdg, rw_len, rw_disp, rw_width): (

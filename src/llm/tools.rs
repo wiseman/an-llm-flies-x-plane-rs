@@ -24,7 +24,7 @@ use crate::core::mission_manager::{
     ActiveClearance, ClearanceSource, MissionGoal, PilotCore, StatusSnapshot,
 };
 use crate::core::landing_rollout::ArrivalPlan;
-use crate::core::profiles::{GuidanceProfile, RunwayExitPlan, TakeoffProfile, TaxiProfile};
+use crate::core::profiles::{GuidanceProfile, RunwayExitPlan, TakeoffRun, TaxiProfile};
 use crate::data::airspace_query::{self, AircraftSnapshot, AirspaceSource};
 use crate::data::parquet::{
     AIRPORTS_FILE, AIRSPACES_FILE, COMMS_FILE, PARKING_SPOTS_FILE, RUNWAYS_FILE, TAXI_EDGES_FILE,
@@ -981,8 +981,18 @@ pub fn tool_fly(ctx: &ToolContext, args: &Map<String, Value>) -> String {
         Err(e) => return format!("error: {e:#}"),
     };
 
+    // go_around() needs a pattern in the air to go around from.
+    if prepared.delta.go_around && ctx.pilot.lock().pattern_fly_mut().is_none() {
+        return if landed(ctx) {
+            "error: already on the ground after landing; a go-around is no longer possible (for a touch-and-go, fly the pattern with land=TOUCH_AND_GO before touchdown)".to_string()
+        } else {
+            NO_PATTERN.to_string()
+        };
+    }
+
     // On the ground a plan can only start with the pattern (a takeoff
     // into closed traffic) from a lined-up position.
+    let mut takeoff_run = None;
     if state.on_ground {
         if let Some(steps) = &prepared.delta.steps {
             match steps.first().map(|s| &s.kind) {
@@ -990,9 +1000,9 @@ pub fn tool_fly(ctx: &ToolContext, args: &Map<String, Value>) -> String {
                     if let Some(msg) = parking_brake_refusal(ctx, "fly") {
                         return msg;
                     }
-                    let rwy = pattern.spec.runway.clone();
-                    if let Err(msg) = validate_takeoff_position(ctx, &pattern.frame, &rwy, false, "fly") {
-                        return msg;
+                    match validate_takeoff_position(ctx, &pattern.frame, &pattern.spec.runway) {
+                        Ok(run) => takeoff_run = Some(run),
+                        Err(msg) => return msg,
                     }
                 }
                 Some(_) => {
@@ -1070,6 +1080,12 @@ pub fn tool_fly(ctx: &ToolContext, args: &Map<String, Value>) -> String {
         }
         (None, None) => unreachable!("the delta is used only when a plan was amended"),
     };
+    // The takeoff roll's status line tracks the runway ahead.
+    if let Some(run) = takeoff_run {
+        if let Some(pf) = ctx.pilot.lock().pattern_fly_mut() {
+            pf.takeoff_run = Some(run);
+        }
+    }
     out.extend(printed);
     out.join("\n")
 }
@@ -1090,25 +1106,15 @@ fn parking_brake_refusal(ctx: &ToolContext, tool_name: &str) -> Option<String> {
     }
 }
 
-/// Shared takeoff-position gate for engage_takeoff and a `fly` plan that
-/// starts on the ground (takeoff or closed traffic), against the runway
-/// about to be engaged.
-///
-/// Returns `(start_along_ft, usable_length_ft)` on success. `tool_name`
-/// is the name of the calling tool, baked into error messages so the
-/// model sees a remediation keyed to the tool it just called.
-///
-/// `override_position = true` bypasses the centerline, along-track, and
-/// heading-alignment checks for off-field / bush / taxiway departures;
-/// the parking-brake, ground-speed, and minimum-usable-length guards
-/// still apply.
+/// Takeoff-position gate for a `fly` plan that starts on the ground (a
+/// takeoff, or closed traffic), against the runway it takes off from:
+/// on the centerline, on the pavement, lined up, stopped, with enough
+/// runway ahead. Returns the run ahead on success.
 fn validate_takeoff_position(
     ctx: &ToolContext,
     runway_frame: &RunwayFrame,
     runway_ident: &str,
-    override_position: bool,
-    tool_name: &str,
-) -> Result<(f64, f64), String> {
+) -> Result<TakeoffRun, String> {
     let pilot = ctx.pilot.lock();
     let Some(snap) = pilot.latest_snapshot.as_ref() else {
         return Err(
@@ -1122,28 +1128,28 @@ fn validate_takeoff_position(
     let course = runway_frame.runway.course_deg;
     let heading_err = crate::types::wrap_degrees_180(course - snap.state.heading_deg).abs();
 
-    if !override_position && cross.abs() > 100.0 {
+    if cross.abs() > 100.0 {
         return Err(format!(
-            "error: aircraft is {:.0} ft off runway {} centerline (max 100 ft). Taxi onto the runway first — call engage_line_up runway={} to move into position, or pass override=true to depart from here anyway.",
+            "error: aircraft is {:.0} ft off runway {} centerline (max 100 ft). Taxi onto the runway first — call engage_line_up runway={} to move into position.",
             cross.abs(), runway_ident, runway_ident
         ));
     }
-    if !override_position && (along < -100.0 || along > length) {
+    if along < -100.0 || along > length {
         return Err(format!(
-            "error: aircraft is at along-track {:.0} ft on runway {} (runway extends 0..{:.0} ft). Position is not on the runway — use engage_taxi or engage_line_up to get here first, or pass override=true to depart from here anyway.",
+            "error: aircraft is at along-track {:.0} ft on runway {} (runway extends 0..{:.0} ft). Position is not on the runway — use engage_taxi or engage_line_up to get here first.",
             along, runway_ident, length
         ));
     }
-    if !override_position && heading_err > 15.0 {
+    if heading_err > 15.0 {
         return Err(format!(
-            "error: aircraft heading {:.0}° is not aligned with runway {} course {:.0}° (Δ={:.0}° > 15°). Call engage_line_up runway={} and wait for it to finish before {}, or pass override=true to depart on the current heading.",
-            snap.state.heading_deg, runway_ident, course, heading_err, runway_ident, tool_name
+            "error: aircraft heading {:.0}° is not aligned with runway {} course {:.0}° (Δ={:.0}° > 15°). Call engage_line_up runway={} and wait for it to finish before taking off.",
+            snap.state.heading_deg, runway_ident, course, heading_err, runway_ident
         ));
     }
     if snap.state.gs_kt > 3.0 {
         return Err(format!(
-            "error: aircraft moving at {:.1} kt — stop before {} (usually means engage_line_up is still in progress)",
-            snap.state.gs_kt, tool_name
+            "error: aircraft moving at {:.1} kt — stop before taking off (usually means engage_line_up is still in progress)",
+            snap.state.gs_kt
         ));
     }
     let start_along = along.max(0.0);
@@ -1160,64 +1166,7 @@ fn validate_takeoff_position(
             usable, runway_ident, MIN_USABLE_LENGTH_FT
         ));
     }
-    Ok((start_along, usable))
-}
-
-pub fn tool_engage_takeoff(ctx: &ToolContext, args: &Map<String, Value>) -> String {
-    if let Some(msg) = parking_brake_refusal(ctx, "engage_takeoff") {
-        return msg;
-    }
-    let airport = match arg_str(args, "airport_ident") {
-        Ok(s) => s.to_string(),
-        Err(e) => return format!("error: {}", e),
-    };
-    let runway_ident = match arg_str(args, "runway_ident") {
-        Ok(s) => s.to_string(),
-        Err(e) => return format!("error: {}", e),
-    };
-    let override_position = args
-        .get("override")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-
-    // Resolve the runway from apt.dat: the correct threshold position,
-    // course, and length, not whatever was grabbed at startup from the
-    // aircraft's boot heading. The rollout centerline controller tracks
-    // that course to keep the aircraft on centerline during the roll.
-    let config = match runway_config(ctx, &airport, &runway_ident, "left") {
-        Ok(cfg) => cfg,
-        Err(e) => return format!("error: {}", e),
-    };
-    let runway_frame = RunwayFrame::new(config.airport.runway.clone());
-
-    let (start_along_ft, usable_length_ft) = match validate_takeoff_position(
-        ctx,
-        &runway_frame,
-        &runway_ident,
-        override_position,
-        "engage_takeoff",
-    ) {
-        Ok(v) => v,
-        Err(msg) => return msg,
-    };
-
-    let profile = Box::new(TakeoffProfile::new_with_usable_length(
-        config.clone(),
-        runway_frame,
-        usable_length_ft,
-        start_along_ft,
-    ));
-    let displaced = match engage_on_runway(ctx, config, profile) {
-        Ok(d) => d,
-        Err(e) => return e,
-    };
-    format!(
-        "engaged takeoff {} runway {} ({:.0} ft usable ahead){}",
-        airport,
-        runway_ident,
-        usable_length_ft,
-        displaced
-    )
+    Ok(TakeoffRun { start_along_ft: start_along, usable_length_ft: usable })
 }
 
 // ---------- dead-stick (engine-out) landing tools ----------
@@ -1536,7 +1485,7 @@ pub fn tool_takeoff_checklist(ctx: &ToolContext, _args: &Map<String, Value>) -> 
     };
     let state = &snap.state;
     let mut lines: Vec<String> =
-        vec!["TAKEOFF CHECKLIST — address every [ACTION] item before engage_takeoff:".to_string()];
+        vec!["TAKEOFF CHECKLIST — address every [ACTION] item before taking off:".to_string()];
     let mut action_needed = false;
 
     match parking_brake_ratio(ctx) {
@@ -1578,7 +1527,7 @@ pub fn tool_takeoff_checklist(ctx: &ToolContext, _args: &Map<String, Value>) -> 
     if state.on_ground {
         lines.push("  [OK]     on ground".to_string());
     } else {
-        lines.push("  [ERROR]  not on ground — you cannot engage_takeoff from the air".to_string());
+        lines.push("  [ERROR]  not on ground — a takeoff starts on the runway".to_string());
         action_needed = true;
     }
 
@@ -1621,7 +1570,7 @@ pub fn tool_takeoff_checklist(ctx: &ToolContext, _args: &Map<String, Value>) -> 
         .active_profiles
         .iter()
         .map(|s| s.as_str())
-        .filter(|p| matches!(*p, "takeoff" | "pattern_fly" | "plan"))
+        .filter(|p| matches!(*p, "pattern_fly" | "plan"))
         .collect();
     if !active.is_empty() {
         lines.push(format!("  [INFO]   already engaged: {}", active.join(", ")));
@@ -1660,15 +1609,6 @@ pub fn tool_disengage_profile(ctx: &ToolContext, args: &Map<String, Value>) -> S
 
 pub fn tool_list_profiles(ctx: &ToolContext, _args: &Map<String, Value>) -> String {
     ctx.pilot.lock().list_profile_names().join(", ")
-}
-
-pub fn tool_go_around(ctx: &ToolContext, _args: &Map<String, Value>) -> String {
-    let triggered = ctx.pilot.lock().pattern_fly_mut().map(|p| p.go_around());
-    match triggered {
-        Some(()) => "go_around triggered".to_string(),
-        None if landed(ctx) => "error: already on the ground after landing; a go-around is no longer possible (for a touch-and-go, fly the pattern with land=TOUCH_AND_GO before touchdown)".to_string(),
-        None => NO_PATTERN.to_string(),
-    }
 }
 
 /// The last flight phase is a post-touchdown ground phase. Used only to
@@ -1914,7 +1854,7 @@ pub fn tool_engage_line_up(ctx: &ToolContext, args: &Map<String, Value>) -> Stri
     let georef = bridge.georef();
     let aircraft_pos_ft = geodetic_offset_ft(start_lat, start_lon, georef);
 
-    // Engage on the resolved runway so later tools (engage_takeoff's
+    // Engage on the resolved runway so later checks (the takeoff
     // alignment guard) compare against the runway we're lining up on,
     // not whatever startup-default runway was in the config.
     let config = match runway_config(ctx, &airport, &runway, "left") {
@@ -3164,13 +3104,11 @@ pub fn dispatch_tool(name: &str, arguments: &str, ctx: &ToolContext) -> ToolResu
         "fly" => tool_fly(ctx, &map),
         "get_status" => tool_get_status(ctx, &map),
         "sleep" => tool_sleep(ctx, &map),
-        "engage_takeoff" => tool_engage_takeoff(ctx, &map),
         "find_dead_stick_candidates" => tool_find_dead_stick_candidates(ctx, &map),
         "engage_dead_stick_landing" => tool_engage_dead_stick_landing(ctx, &map),
         "takeoff_checklist" => tool_takeoff_checklist(ctx, &map),
         "disengage_profile" => tool_disengage_profile(ctx, &map),
         "list_profiles" => tool_list_profiles(ctx, &map),
-        "go_around" => tool_go_around(ctx, &map),
         "tune_radio" => tool_tune_radio(ctx, &map),
         "broadcast_on_radio" => tool_broadcast_on_radio(ctx, &map),
         "set_parking_brake" => tool_set_parking_brake(ctx, &map),
@@ -3256,16 +3194,6 @@ pub fn tool_schemas(include_mission_complete: bool) -> Vec<ToolDef> {
             &["suppress_idle_heartbeat_s"],
         ),
         schema(
-            "engage_takeoff",
-            "Start the takeoff sequence on the named airport + runway: full power, hold centerline via the rollout controller, rotate at Vr, climb at Vy along the runway track. Owns all three axes. DO NOT call this if you are not already lined up on the runway centerline and stopped. The full departure sequence from a parking spot is engage_taxi → wait for `completed: taxi` → engage_line_up → wait for `completed: line_up` → engage_takeoff; if you skip engage_line_up, this tool will refuse because the aircraft is not on the centerline. Refuses with an error naming the failing check if any of these aren't met: parking brake released, on the named runway's centerline within 100 ft, inside the along-track length, heading within 15° of course, ground speed < 3 kt, ≥1000 ft usable runway ahead. override=true bypasses centerline/along-track/heading for off-field, bush, or taxiway departures; brake, ground-speed, and length guards still apply. Does NOT auto-disengage — once safely airborne, fly a plan for what comes next, which displaces takeoff. Usually simpler: fly takeoff(rwy).then(...) instead of this tool. Call takeoff_checklist first to see a human-readable readiness summary.",
-            json!({
-                "airport_ident": {"type": "string", "description": "Airport identifier as stored in apt.dat (e.g. 'KSFO')."},
-                "runway_ident": {"type": "string", "description": "Runway end ident you're departing on (e.g. '12', '28R')."},
-                "override": {"type": ["boolean", "null"], "description": "Pass true to bypass the centerline, along-track, and heading-alignment checks. Use for off-field / bush / taxiway departures where the aircraft isn't lined up on a paved runway. Pass null (or false) for a normal runway departure."}
-            }),
-            &["airport_ident", "runway_ident", "override"],
-        ),
-        schema(
             "find_dead_stick_candidates",
             "Find runways reachable in a still-air glide from the current position. Returns a TSV with one row per runway end (both directions of every paved-or-grass runway ≥1500 ft within glide range), scored by reach margin in NM, with optional headwind alignment if wind is known. Uses the configured aircraft glide_ratio. The top of the list is the best dead-stick choice; bias toward margin_nm > 1 NM and longer / paved surfaces, and prefer the end with the most positive headwind_kt. Call this BEFORE engage_dead_stick_landing so you (and the operator on the radio) know the options. Pass the `side` value from the chosen row straight through to engage_dead_stick_landing — it's picked so the aircraft is already on the inside of the pattern, which avoids the centerline-crossing maneuver that costs altitude in an engine-out. Ignore published traffic-side conventions for dead-stick; glide path beats procedure when there's no engine. Returns '0 reachable runways' when nothing is in glide — at that point the answer is an off-airport landing, not this tool.",
             json!({
@@ -3291,7 +3219,7 @@ pub fn tool_schemas(include_mission_complete: bool) -> Vec<ToolDef> {
         ),
         schema(
             "takeoff_checklist",
-            "Return a takeoff-readiness checklist with each item marked [OK], [ACTION], [ERROR], or [REMINDER]. Reads live state (parking brake, flaps, gear, on-ground, active profiles). Completes immediately. Run before engage_takeoff and address every [ACTION] item — the most common miss is a set parking brake, which also causes engage_takeoff to refuse.",
+            "Return a takeoff-readiness checklist with each item marked [OK], [ACTION], [ERROR], or [REMINDER]. Reads live state (parking brake, flaps, gear, on-ground, active profiles). Completes immediately. Run before taking off and address every [ACTION] item — the most common miss is a set parking brake, which also makes a takeoff plan refuse.",
             json!({}),
             &[],
         ),
@@ -3304,12 +3232,6 @@ pub fn tool_schemas(include_mission_complete: bool) -> Vec<ToolDef> {
         schema(
             "list_profiles",
             "Return a comma-separated list of currently active profile names. Completes immediately.",
-            json!({}),
-            &[],
-        ),
-        schema(
-            "go_around",
-            "Command an immediate go-around. Same as go_around() in a plan, without writing code. Preconditions: a plan flying a pattern; rejected once landing_rollout has taken over after touchdown. Completes by putting the pattern into a climb on runway heading to pattern altitude, after which it turns crosswind and flies the pattern again on its own; state-change heartbeats fire on the phase transitions.",
             json!({}),
             &[],
         ),
@@ -3351,7 +3273,7 @@ pub fn tool_schemas(include_mission_complete: bool) -> Vec<ToolDef> {
         ),
         schema(
             "engage_line_up",
-            "Cross the hold-short onto the runway, turn to runway heading, and stop with the nose aligned for takeoff — the 'line up and wait' clearance in ATC phraseology. Displaces any active three-axis profile. Preconditions: aircraft at or near the hold-short for this runway (errors out if more than ~300 ft from the entry point). Completes when the aircraft is stopped aligned on the centerline — a state-change heartbeat fires 'completed: line_up'. Next: engage_takeoff. If ATC already issued the takeoff clearance ('cleared for takeoff runway X'), call engage_takeoff immediately on the completed heartbeat without waiting for more operator prompts; do not call engage_takeoff while active_profiles still lists line_up.",
+            "Cross the hold-short onto the runway, turn to runway heading, and stop with the nose aligned for takeoff — the 'line up and wait' clearance in ATC phraseology. Displaces any active three-axis profile. Preconditions: aircraft at or near the hold-short for this runway (errors out if more than ~300 ft from the entry point). Completes when the aircraft is stopped aligned on the centerline — a state-change heartbeat fires 'completed: line_up'. Next: fly the takeoff (takeoff(rwy).then(...)). If ATC already issued the takeoff clearance ('cleared for takeoff runway X'), fly it immediately on the completed heartbeat without waiting for more operator prompts; not while active_profiles still lists line_up.",
             json!({
                 "airport_ident": {
                     "type": "string",
@@ -3791,7 +3713,7 @@ Common queries:
   -- miles_from_centerline < ~0.02 AND feet_from_threshold < length_ft.
   -- Otherwise you're near it but not on it (taxiway/ramp/extended
   -- centerline on approach). active_ident is the end you are pointed at —
-  -- use that as the runway in a plan (apt.runway(ident)) or for engage_takeoff.
+  -- use that as the runway in a plan: apt.runway(ident).
 
   -- All active runways at a known airport
   SELECT airport_ident, le_ident, he_ident, length_ft, surface,

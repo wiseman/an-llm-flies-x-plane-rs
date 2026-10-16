@@ -265,9 +265,7 @@ stem (`sim_pilot-YYYYMMDD-HHMMSS`):
 
 | Tool                    | What it does                                                                                                                                      |
 | ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `engage_takeoff`        | Verifies runway alignment and starts the deterministic takeoff roll, rotation, and climb (a plan's `takeoff(rwy)` does the same).                 |
 | `takeoff_checklist`     | Reports takeoff readiness, including parking brake, flaps, and other live-state checks.                                                           |
-| `go_around`             | Commands an immediate go-around in the plan's pattern.                                                                                            |
 | `list_runway_exits`     | Lists candidate exit taxiways for a landing runway with their stationing from the threshold.                                                       |
 | `choose_runway_exit`    | Records a preferred runway-exit taxiway; the rollout slows to turnoff speed at that exit and hands off the aircraft stopped clear of the runway.  |
 | `plan_arrival`          | Before touchdown: picks the exit and pre-plans the taxi to a parking spot, so the landing rolls out, exits, and parks with no further calls.      |

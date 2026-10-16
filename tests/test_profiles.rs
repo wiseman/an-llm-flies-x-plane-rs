@@ -8,7 +8,7 @@ use xplane_pilot::core::mission_manager::PilotCore;
 use xplane_pilot::core::profiles::{
     build_rotate_guidance, build_takeoff_roll_guidance, AltitudeHoldProfile,
     GuidanceProfile, HeadingHoldProfile, PatternFlyProfile,
-    SpeedHoldProfile, TakeoffProfile, TaxiProfile,
+    SpeedHoldProfile, TaxiProfile,
 };
 use xplane_pilot::guidance::pattern_manager::glidepath_target_altitude_ft_default;
 use xplane_pilot::sim::simple_dynamics::SimpleAircraftModel;
@@ -189,9 +189,9 @@ fn rotate_guidance_airborne_banks_toward_runway_course() {
 }
 
 #[test]
-fn takeoff_profile_owns_all_three_axes() {
+fn pattern_takeoff_owns_all_three_axes() {
     let (cfg, pilot) = make_pilot();
-    let profile = TakeoffProfile::new(cfg, pilot.runway_frame.clone());
+    let profile = PatternFlyProfile::new(cfg, pilot.runway_frame.clone());
     use xplane_pilot::core::profiles::{Axis, AxisSet, GuidanceProfile};
     assert_eq!(profile.owns(), AxisSet::ALL);
     assert!(profile.owns().contains(Axis::Lateral));
@@ -203,7 +203,7 @@ fn takeoff_profile_owns_all_three_axes() {
 fn takeoff_starts_in_preflight_and_advances_on_acceleration() {
     let (cfg, mut pilot) = make_pilot();
     let rf = pilot.runway_frame.clone();
-    pilot.engage_profile(Box::new(TakeoffProfile::new(cfg.clone(), rf))).unwrap();
+    pilot.engage_profile(Box::new(PatternFlyProfile::new(cfg.clone(), rf))).unwrap();
     let model = SimpleAircraftModel::new(cfg, Vec2::ZERO);
     let mut raw_state = model.initial_state();
 
@@ -224,14 +224,14 @@ fn takeoff_starts_in_preflight_and_advances_on_acceleration() {
 }
 
 #[test]
-fn takeoff_profile_initial_climb_uses_l1_and_banks_toward_centerline() {
+fn pattern_initial_climb_uses_l1_and_banks_toward_centerline() {
     // Aircraft 3000 ft past the threshold, 400 ft offset to the "right"
     // of the runway centerline (positive y in runway frame), climbing on
     // runway heading. The new L1-follower-backed initial_climb guidance
     // should command a LEFT bank (negative) to recover the centerline.
     let (cfg, pilot) = make_pilot();
     let rf = pilot.runway_frame.clone();
-    let mut profile = TakeoffProfile::new(cfg.clone(), rf.clone());
+    let mut profile = PatternFlyProfile::new(cfg.clone(), rf.clone());
     // Pin the phase — without this the ModeManager would start in
     // Preflight and need us to drive through takeoff_roll/rotate before
     // it settles on InitialClimb.

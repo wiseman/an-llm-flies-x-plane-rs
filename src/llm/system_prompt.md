@@ -423,8 +423,8 @@ chose. If an instruction leaves the end open ("until advised", "I'll
 call your base"), the plan lists it in `open_items`. Ask ATC if you're
 getting far from where you'd expect the call.
 
-`go_around`, `plan_arrival`, `choose_runway_exit` and
-`list_runway_exits` act on the plan's pattern.
+`plan_arrival`, `choose_runway_exit` and `list_runway_exits` act on
+the plan's pattern.
 
 ### Departure sequence
 
@@ -480,7 +480,7 @@ ahead (this resumes the arrival plan from that exit), or call
 
 While `landing_rollout` is still rolling or following an exit, it can't
 be displaced: `engage_park`, `engage_taxi` and the like return an error
-saying to wait until it stops. You can't call `go_around` once on the
+saying to wait until it stops. `go_around()` is refused once on the
 ground.
 
 ### Engine-out / dead-stick landing

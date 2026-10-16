@@ -193,76 +193,73 @@ fn missing_required_arg_returns_error() {
 
 // ---------- profiles ----------
 
-#[test]
-fn engage_takeoff_refuses_when_parking_brake_set() {
-    let bridge = FakeBridge::new(
-        &[("sim/cockpit2/controls/parking_brake_ratio", 1.0)],
-        47.4638,
-        -122.308,
-    );
-    let ctx = make_ctx(Some(bridge as Arc<dyn ToolBridge>), None);
-    let r = dispatch(
-            "engage_takeoff",
-            json!({"airport_ident": "KSEA", "runway_ident": "16L"}),
-        &ctx);
-    assert!(r.starts_with("error:"));
-    assert!(r.contains("parking brake"));
-    assert!(r.contains("set_parking_brake"));
+/// `fly(code)` against `airport`, returning the reply.
+fn fly(ctx: &ToolContext, code: &str, airport: &str) -> String {
+    dispatch("fly", json!({"code": code, "airport": airport, "preview": null}), ctx)
 }
 
-#[test]
-fn engage_takeoff_requires_airport_and_runway_args() {
-    let ctx = make_ctx(None, None);
-    let r = dispatch("engage_takeoff", json!({}), &ctx);
-    assert!(r.starts_with("error:"));
-    // One of the required-arg complaints must surface.
-    assert!(
-        r.contains("airport_ident") || r.contains("missing") || r.contains("required"),
-        "got: {}",
-        r
-    );
-}
-
-#[test]
-fn engage_takeoff_refuses_when_not_on_runway() {
-    use xplane_pilot::types::Vec2;
-
-    let dir = TempDir::new().unwrap();
+/// A context at KSEA (georef at the 16L pavement end, runway due south)
+/// with the parking brake at `brake`.
+fn ksea_ctx(dir: &TempDir, brake: f64) -> ToolContext {
     build_fake_parquet(dir.path(), &[]);
-    // Georef anchored at KSEA 16L threshold. Aircraft spawned well off
-    // the runway — crosstrack check must catch it.
-    let bridge = FakeBridge::new(
-        &[("sim/cockpit2/controls/parking_brake_ratio", 0.0)],
-        47.4638,
-        -122.308,
-    );
-    let ctx = make_ctx(
-        Some(bridge.clone() as Arc<dyn ToolBridge>),
-        Some(dir.path().to_path_buf()),
-    );
+    let bridge = FakeBridge::new(&[("sim/cockpit2/controls/parking_brake_ratio", brake)], 47.4638, -122.308);
+    make_ctx(Some(bridge as Arc<dyn ToolBridge>), Some(dir.path().to_path_buf()))
+}
+
+#[test]
+fn takeoff_refuses_when_parking_brake_set() {
+    let dir = TempDir::new().unwrap();
+    let ctx = ksea_ctx(&dir, 1.0);
+    stage_stopped_snapshot(&ctx, Vec2::ZERO, 180.0);
+    let r = fly(&ctx, "takeoff(apt.runway('16L'))", "KSEA");
+    assert!(r.starts_with("error:"), "{r}");
+    assert!(r.contains("parking brake") && r.contains("set_parking_brake"), "{r}");
+}
+
+#[test]
+fn takeoff_refuses_when_not_on_runway() {
+    let dir = TempDir::new().unwrap();
+    let ctx = ksea_ctx(&dir, 0.0);
+    // 500 ft east of the 16L centerline.
     stage_stopped_snapshot(&ctx, Vec2::new(500.0, 0.0), 180.0);
-    let r = dispatch(
-            "engage_takeoff",
-            json!({"airport_ident": "KSEA", "runway_ident": "16L"}),
-        &ctx);
-    assert!(r.starts_with("error:"), "got: {}", r);
-    // Position check is the one that should fail.
-    assert!(
-        r.contains("centerline") || r.contains("along-track"),
-        "expected a position-check error, got: {}",
-        r
-    );
-    // With override=true the same call should engage.
-    let r = dispatch(
-        "engage_takeoff",
-        json!({"airport_ident": "KSEA", "runway_ident": "16L", "override": true}),
-        &ctx,
-    );
-    assert!(
-        r.starts_with("engaged takeoff"),
-        "override=true should bypass position checks, got: {}",
-        r
-    );
+    let r = fly(&ctx, "takeoff(apt.runway('16L'))", "KSEA");
+    assert!(r.starts_with("error:"), "{r}");
+    assert!(r.contains("centerline"), "expected a position-check error, got: {r}");
+}
+
+#[test]
+fn intersection_takeoff_tracks_the_runway_ahead() {
+    // Lined up 2000 ft down 16L: the roll's status counts from there.
+    let dir = TempDir::new().unwrap();
+    let ctx = ksea_ctx(&dir, 0.0);
+    stage_stopped_snapshot(&ctx, Vec2::new(0.0, -2000.0), 180.0);
+    let r = fly(&ctx, "takeoff(apt.runway('16L'))", "KSEA");
+    assert!(!r.starts_with("error"), "{r}");
+    let mut pilot = ctx.pilot.lock();
+    let length = pilot.runway_frame.runway.length_ft;
+    let run = pilot.pattern_fly_mut().and_then(|p| p.takeoff_run).expect("takeoff run recorded");
+    assert!((run.start_along_ft - 2000.0).abs() < 20.0, "{run:?}");
+    assert!((run.usable_length_ft - (length - run.start_along_ft)).abs() < 1.0, "{run:?}");
+}
+
+#[test]
+fn go_around_without_a_pattern_errors() {
+    let dir = TempDir::new().unwrap();
+    let ctx = ksea_ctx(&dir, 0.0);
+    stage_airborne_snapshot(&ctx, Vec2::new(0.0, 6076.0), 2000.0, 1500.0, 180.0, 80.0);
+    let r = fly(&ctx, "go_around()", "KSEA");
+    assert!(r.starts_with("error:") && r.contains("no pattern"), "{r}");
+}
+
+#[test]
+fn go_around_rejected_after_touchdown() {
+    let dir = TempDir::new().unwrap();
+    let ctx = ksea_ctx(&dir, 0.0);
+    stage_stopped_snapshot(&ctx, Vec2::new(0.0, -3000.0), 180.0);
+    ctx.pilot.lock().engage_profile(Box::new(landing_rollout_stopped_on_runway())).unwrap();
+    let r = fly(&ctx, "go_around()", "KSEA");
+    assert!(r.starts_with("error"), "got: {}", r);
+    assert!(r.contains("ground"), "got: {}", r);
 }
 
 #[test]
@@ -284,13 +281,6 @@ fn list_profiles_returns_comma_separated() {
     assert!(r.contains("idle_lateral"));
     assert!(r.contains("idle_vertical"));
     assert!(r.contains("idle_speed"));
-}
-
-#[test]
-fn go_around_without_pattern_fly_errors() {
-    let ctx = make_ctx(None, None);
-    let r = dispatch("go_around", json!({}), &ctx);
-    assert!(r.starts_with("error:"));
 }
 
 // ---------- runway lookups via sql_query ----------
@@ -1493,15 +1483,6 @@ fn engage_park_takes_over_when_stopped_on_runway_without_exit() {
     let names = ctx.pilot.lock().list_profile_names();
     assert!(names.contains(&"taxi".to_string()), "profiles = {:?}", names);
     assert!(!names.contains(&"landing_rollout".to_string()), "profiles = {:?}", names);
-}
-
-#[test]
-fn go_around_rejected_after_touchdown() {
-    let (ctx, _bridge) = make_ctx_with_parquet(TempDir::new().unwrap().path());
-    ctx.pilot.lock().engage_profile(Box::new(landing_rollout_stopped_on_runway())).unwrap();
-    let r = dispatch("go_around", json!({}), &ctx);
-    assert!(r.starts_with("error"), "got: {}", r);
-    assert!(r.contains("ground"), "got: {}", r);
 }
 
 #[test]

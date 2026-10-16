@@ -245,11 +245,12 @@ fn engage_line_up_rejects_when_aircraft_is_far_from_entry_point() {
     );
 }
 
-// ---------- TakeoffProfile usable length & debug line ----------
+// ---------- takeoff roll: usable length & status line ----------
 
 #[test]
-fn takeoff_profile_debug_line_shows_rolled_and_remaining() {
-    use xplane_pilot::core::profiles::{GuidanceProfile, TakeoffProfile};
+fn takeoff_roll_status_shows_rolled_and_remaining() {
+    use xplane_pilot::core::profiles::{GuidanceProfile, PatternFlyProfile, TakeoffRun};
+    use xplane_pilot::types::FlightPhase;
     use xplane_pilot::guidance::runway_geometry::RunwayFrame;
     use xplane_pilot::types::{AircraftState, Runway, TrafficSide, Vec2};
 
@@ -267,8 +268,9 @@ fn takeoff_profile_debug_line_shows_rolled_and_remaining() {
     let cfg = load_default_config_bundle();
     // Simulate an intersection departure at along-track 1000 ft on a
     // 3995-ft runway: usable = 2995 ft, start_along = 1000 ft.
-    let profile =
-        TakeoffProfile::new_with_usable_length(cfg, runway_frame.clone(), 2995.0, 1000.0);
+    let mut profile = PatternFlyProfile::new(cfg, runway_frame.clone());
+    profile.phase = FlightPhase::TakeoffRoll;
+    profile.takeoff_run = Some(TakeoffRun { start_along_ft: 1000.0, usable_length_ft: 2995.0 });
 
     // Move the aircraft to along-track 2000 ft = 1000 ft rolled from
     // start, 1995 ft remaining. In runway-frame coords the aircraft's
@@ -295,8 +297,9 @@ fn takeoff_profile_debug_line_shows_rolled_and_remaining() {
 }
 
 #[test]
-fn takeoff_profile_abort_advisory_fires_past_70pct_below_vr() {
-    use xplane_pilot::core::profiles::{GuidanceProfile, TakeoffProfile};
+fn takeoff_roll_abort_advisory_fires_past_70pct_below_vr() {
+    use xplane_pilot::core::profiles::{GuidanceProfile, PatternFlyProfile, TakeoffRun};
+    use xplane_pilot::types::FlightPhase;
     use xplane_pilot::guidance::runway_geometry::RunwayFrame;
     use xplane_pilot::types::{AircraftState, Runway, TrafficSide, Vec2};
 
@@ -313,8 +316,9 @@ fn takeoff_profile_abort_advisory_fires_past_70pct_below_vr() {
     let runway_frame = RunwayFrame::new(rwy);
     let cfg = load_default_config_bundle();
     let vr = cfg.performance.vr_kt;
-    let profile =
-        TakeoffProfile::new_with_usable_length(cfg, runway_frame.clone(), 2000.0, 0.0);
+    let mut profile = PatternFlyProfile::new(cfg, runway_frame.clone());
+    profile.phase = FlightPhase::TakeoffRoll;
+    profile.takeoff_run = Some(TakeoffRun { start_along_ft: 0.0, usable_length_ft: 2000.0 });
 
     // At 1600 ft along (80% of the 2000-ft usable length) with IAS
     // at 60% of Vr, the abort heuristic should light up.
