@@ -38,6 +38,9 @@ use crate::types::{
 /// ACS private-pilot altitude tolerance: an at-or-below/above constraint
 /// counts as violated only beyond this.
 pub const ALTITUDE_TOLERANCE_FT: f64 = 100.0;
+/// Lowest a non-pattern step holds above the ground below (14 CFR 91.119
+/// away from congested areas).
+const MIN_HOLD_AGL_FT: f64 = 500.0;
 /// Aim this far inside an altitude limit so normal TECS wander stays legal.
 const ALTITUDE_LIMIT_MARGIN_FT: f64 = 50.0;
 const DIRECT_CAPTURE_FT: f64 = 1000.0;
@@ -132,6 +135,8 @@ pub struct PlanProfile {
     /// altitude the plan started at, and the leg into a pattern entry
     /// descends to pattern altitude by itself.
     alt_explicit: bool,
+    /// The altitude floor (MIN_HOLD_AGL_FT) is holding the aircraft up.
+    at_altitude_floor: bool,
     speed_kt: f64,
     constraints: Vec<RConstraint>,
     reports: Vec<RReport>,
@@ -229,6 +234,7 @@ impl PlanProfile {
             hold_track_deg: state.track_deg,
             alt_target_ft: alt_target,
             alt_explicit: false,
+            at_altitude_floor: false,
             speed_kt: speed,
             constraints: Vec::new(),
             reports: Vec::new(),
@@ -414,6 +420,7 @@ impl PlanProfile {
             hold_track_deg: self.hold_track_deg,
             alt_target_ft: self.alt_target_ft,
             alt_explicit: self.alt_explicit,
+            at_altitude_floor: self.at_altitude_floor,
             speed_kt: self.speed_kt,
             constraints: self.constraints.clone(),
             reports: self.reports.clone(),
@@ -903,7 +910,17 @@ impl PlanProfile {
         if !state.on_ground && state.alt_agl_ft < MIN_TURN_AGL_FT && state.vs_fpm > 100.0 {
             bank = clamp(bank, -5.0, 5.0);
         }
-        let alt = self.clamp_altitude(self.alt_goal());
+        // Never hold lower than MIN_HOLD_AGL_FT above the ground below.
+        let floor = state.alt_msl_ft - state.alt_agl_ft + MIN_HOLD_AGL_FT;
+        let wanted = self.clamp_altitude(self.alt_goal());
+        let at_floor = !state.on_ground && wanted < floor;
+        if at_floor && !self.at_altitude_floor {
+            self.event(format!(
+                "holding {floor:.0} ({MIN_HOLD_AGL_FT:.0} ft above the ground): the plan's altitude {wanted:.0} is too low"
+            ));
+        }
+        self.at_altitude_floor = at_floor;
+        let alt = if at_floor { floor } else { wanted };
         let tecs_phase = if alt > state.alt_msl_ft + 200.0 {
             FlightPhase::EnrouteClimb
         } else if alt < state.alt_msl_ft - 200.0 {
@@ -1348,6 +1365,13 @@ impl GuidanceProfile for PlanProfile {
                 if let Some(a) = c.target_altitude_ft {
                     c.target_altitude_ft = Some(clamp_to_limits(a, limits));
                 }
+            }
+            // The plan's own altitude follows the pattern's, so a step that
+            // takes over from it (a 360, a heading) holds where the pattern
+            // was, not a target left over from before the takeoff.
+            if let (Some(a), false) = (c.target_altitude_ft, state.on_ground) {
+                self.alt_target_ft = a;
+                self.alt_explicit = false;
             }
             if tick.hand_off.is_some() {
                 self.events.push("touchdown; rollout has the aircraft".into());

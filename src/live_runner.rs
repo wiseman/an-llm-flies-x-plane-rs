@@ -110,6 +110,9 @@ struct HeartbeatState {
     /// advanced when a heartbeat actually goes out, so a throttled tick
     /// doesn't drop events.
     last_seen_event_seq: Option<u64>,
+    /// Highest profile-event sequence number already shown in the log
+    /// pane (every tick, unlike the throttled heartbeat).
+    last_logged_event_seq: u64,
     /// While `clock.now_secs_f64() < idle_suppress_until_s`, the idle-cadence
     /// heartbeat is suppressed. Set by the LLM via `sleep(suppress_idle_heartbeat_s=...)`
     /// when it's confident the current state is stable for a while. State-change
@@ -158,6 +161,7 @@ impl HeartbeatPump {
                 last_seen_completed: None,
                 last_seen_has_crashed: None,
                 last_seen_event_seq: None,
+                last_logged_event_seq: 0,
                 idle_suppress_until_s: 0.0,
             }),
         }
@@ -209,6 +213,7 @@ impl HeartbeatPump {
             st.last_seen_completed = Some(current_completed);
             st.last_seen_has_crashed = current_has_crashed;
             st.last_seen_event_seq = Some(latest_event_seq);
+            st.last_logged_event_seq = latest_event_seq;
             return;
         }
         let seen_seq = st.last_seen_event_seq.unwrap_or(0);
@@ -229,6 +234,24 @@ impl HeartbeatPump {
             .cloned()
             .collect();
         let completions_changed = !new_completions.is_empty();
+        // For the operator, as they happen (the heartbeat to the LLM is
+        // throttled): the plan's events, phase changes and completions.
+        if let Some(bus) = &self.bus {
+            let logged = st.last_logged_event_seq;
+            for (_, text) in snapshot.events.iter().filter(|(seq, _)| *seq > logged) {
+                bus.push_log_kind(LogKind::Plan, text.clone());
+            }
+            st.last_logged_event_seq = latest_event_seq;
+            if phase_changed {
+                bus.push_log_kind(
+                    LogKind::Plan,
+                    format!("{} → {}", phase_name(st.last_seen_phase), phase_name(current_phase)),
+                );
+            }
+            for c in &new_completions {
+                bus.push_log_kind(LogKind::System, format!("completed: {c}"));
+            }
+        }
         let crash_edge = matches!(
             (st.last_seen_has_crashed, current_has_crashed),
             (Some(false), Some(true)) | (None, Some(true))
@@ -309,6 +332,10 @@ impl HeartbeatPump {
     }
 }
 
+fn phase_name(p: Option<FlightPhase>) -> &'static str {
+    p.map(FlightPhase::value).unwrap_or("none")
+}
+
 fn describe_change(
     old_phase: Option<FlightPhase>,
     new_phase: Option<FlightPhase>,
@@ -319,8 +346,7 @@ fn describe_change(
 ) -> String {
     let mut parts: Vec<String> = Vec::new();
     if old_phase != new_phase {
-        let old = old_phase.map(|p| p.value().to_string()).unwrap_or_else(|| "none".to_string());
-        let new = new_phase.map(|p| p.value().to_string()).unwrap_or_else(|| "none".to_string());
+        let (old, new) = (phase_name(old_phase), phase_name(new_phase));
         if new_phase == Some(FlightPhase::GoAround) && go_around_reason.is_some() {
             parts.push(format!("phase changed: {} -> {} ({})", old, new, go_around_reason.unwrap()));
         } else {
@@ -814,15 +840,33 @@ fn run_control_loop(
     let mut next_status_s = Instant::now() + Duration::from_secs_f64(runtime.status_interval_s);
     let track_period = Duration::from_secs(1);
     let mut next_track_s = Instant::now();
+    // A failing bridge read repeats every tick; log the first of a run
+    // and a summary when it changes or the bridge recovers, so a dropped
+    // connection doesn't flood the log.
+    let mut read_errors: Option<(String, usize, Instant)> = None;
     while !stop.load(Ordering::Acquire) {
         let loop_start = Instant::now();
         let raw_state = match bridge.read_state() {
-            Ok(s) => s,
+            Ok(s) => {
+                if let Some((e, n, since)) = read_errors.take() {
+                    if n > 1 {
+                        bus.push_log_kind(
+                            LogKind::Error,
+                            format!("[bridge] read error ×{n} over {:.0} s, now recovered: {e}", since.elapsed().as_secs_f64()),
+                        );
+                    }
+                }
+                s
+            }
             Err(e) => {
-                bus.push_log_kind(
-                    LogKind::Error,
-                    format!("[bridge] read error: {}", e),
-                );
+                let e = e.to_string();
+                match &mut read_errors {
+                    Some((last, n, _)) if *last == e => *n += 1,
+                    _ => {
+                        bus.push_log_kind(LogKind::Error, format!("[bridge] read error: {e}"));
+                        read_errors = Some((e, 1, Instant::now()));
+                    }
+                }
                 thread::sleep(target_period);
                 continue;
             }

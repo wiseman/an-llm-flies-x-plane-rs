@@ -963,7 +963,7 @@ pub fn tool_fly(ctx: &ToolContext, args: &Map<String, Value>) -> String {
         },
     };
     if let Some(bus) = &ctx.bus {
-        bus.push_log_kind(crate::bus::LogKind::ToolCall, format!("[fly airport={airport}]\n{}", code.trim_end()));
+        bus.push_log_kind(crate::bus::LogKind::Plan, format!("fly ({airport}):\n{}", code.trim_end()));
     }
     let base = ctx.config.lock().clone();
     let airports = DuckAirports { ctx };
@@ -3132,6 +3132,30 @@ pub fn dispatch_tool(name: &str, arguments: &str, ctx: &ToolContext) -> ToolResu
     ToolResult::from_output(output)
 }
 
+/// Tools that query, acknowledge or wait rather than act: the operator's
+/// compact log leaves them out unless they fail.
+const QUIET_TOOLS: &[&str] = &[
+    "sleep",
+    "get_status",
+    "sql_query",
+    "set_goal",
+    "clear_goal",
+    "record_clearance",
+    "clear_clearance",
+    "list_profiles",
+    "list_runway_exits",
+    "plan_taxi_route",
+    "plan_park_route",
+    "takeoff_checklist",
+    "tune_radio",
+    // The radio pane shows transmissions.
+    "broadcast_on_radio",
+];
+
+pub fn is_quiet_tool(name: &str) -> bool {
+    QUIET_TOOLS.contains(&name)
+}
+
 // ---------- tool schemas ----------
 
 /// How far ahead a `fly(preview=true)` looks.
@@ -3770,3 +3794,14 @@ Common queries:
   ORDER BY dist_nm
   LIMIT 5;
 ";
+
+#[cfg(test)]
+mod quiet_tool_tests {
+    #[test]
+    fn every_quiet_tool_is_a_real_tool() {
+        let names: Vec<String> = super::tool_schemas(true).into_iter().map(|t| t.name).collect();
+        for q in super::QUIET_TOOLS {
+            assert!(names.iter().any(|n| n == q), "{q} isn't a tool");
+        }
+    }
+}

@@ -538,7 +538,11 @@ pub(crate) fn execute_tool_call(
     if let Some(counters) = tool_context.tool_counters.as_ref() {
         counters.record(name, result.ok);
     }
-    emit_log_kind(bus, LogKind::ToolCall, &format!("tool {} -> {}", name, result.output));
+    let entry = crate::bus::LogEntry::tool_call(name, result.ok, &result.output);
+    match bus {
+        Some(b) => b.push_log_entry(entry),
+        None => println!("{}", entry.formatted()),
+    }
     result
 }
 

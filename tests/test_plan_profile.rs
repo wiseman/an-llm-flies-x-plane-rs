@@ -787,6 +787,60 @@ fn rectangular_course_holds_the_track_in_a_crosswind() {
     assert!(alt_spread <= 200.0, "altitude varied {alt_spread:.0} ft");
 }
 
+#[test]
+fn a_360_off_the_downwind_holds_pattern_altitude_and_atc_base_turn_rolls_out_on_base() {
+    // A live session: takeoff into closed traffic, "extend downwind",
+    // "do a 360 for spacing", then "turn base now". The 360 descended
+    // toward the plan's altitude from before the takeoff (the field), and
+    // the base turn, called where the aircraft was, swung ~35° past the
+    // base heading before coming back.
+    let in_downwind = |p: FlightPhase| p == FlightPhase::Downwind;
+    let f = fly_from(
+        "p = pattern(apt.runway('16R'), RIGHT)\njoin(p)",
+        Vec2::new(10.0, 0.0),
+        175.5,
+        800.0,
+        0.0,
+        true,
+        vec![
+            Amend {
+                when: Box::new(move |_, ph, _| in_downwind(ph)),
+                code: "p.extend('downwind', OPEN)\np.turn('base', when=atc('base'))",
+                sent_at: None,
+            },
+            Amend {
+                when: Box::new(move |s, ph, _| in_downwind(ph) && s.position_ft.y > 0.0),
+                code: "orbit(LEFT, 360).then(join(p))",
+                sent_at: None,
+            },
+            Amend {
+                when: Box::new(move |s, ph, _| in_downwind(ph) && s.position_ft.y > 6000.0),
+                code: "release('base')",
+                sent_at: None,
+            },
+        ],
+        1200.0,
+        None,
+    );
+    let pattern_alt = 1800.0;
+    let (orbit_from, base_at) = (f.amend_times[1], f.amend_times[2]);
+    let lowest = f.samples.iter().filter(|s| s.0 > orbit_from && s.0 < base_at).map(|s| s.3).fold(f64::MAX, f64::min);
+    eprintln!("lowest from the 360 to the base call: {lowest:.0}");
+    assert!(lowest > pattern_alt - 150.0, "descended to {lowest:.0} in the 360");
+
+    let base_course = 175.5 - 90.0; // right traffic
+    let worst = f
+        .samples
+        .iter()
+        .zip(&f.extra)
+        .filter(|(s, _)| s.0 > base_at && s.1 == FlightPhase::Base)
+        .map(|(_, e)| xplane_pilot::types::wrap_degrees_180(e.3 - base_course))
+        .fold(0.0, f64::max);
+    eprintln!("turned up to {worst:.0}° past the base heading");
+    assert!(worst < 12.0, "overshot the base heading by {worst:.0}°");
+    assert_landed_16r(&f);
+}
+
 fn frame_16r() -> RunwayFrame {
     RunwayFrame::new(
         prep("p = pattern(apt.runway('16R'), RIGHT)\njoin(p)", &load_default_config_bundle(), None)

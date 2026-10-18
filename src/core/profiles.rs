@@ -518,13 +518,22 @@ const MIN_BASE_X_FT: f64 = 2000.0;
 
 /// Which pattern corners to fly square: a definite turn at a steady bank
 /// that starts a turn radius before the next leg and rolls out on it,
-/// instead of the follower's gradual intercept that rounds the corner off.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+/// instead of the follower's intercept, which rounds the corner off or,
+/// on a base turn called where the aircraft is, swings well past the
+/// base heading. The turn onto base is always square; "square" adds the
+/// turn to final.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SquareCorners {
     /// Downwind to base.
     pub into_base: bool,
     /// Base to final.
     pub into_final: bool,
+}
+
+impl Default for SquareCorners {
+    fn default() -> Self {
+        Self { into_base: true, into_final: false }
+    }
 }
 
 /// Bank for a squared turn onto base (the pattern limit is 30°).

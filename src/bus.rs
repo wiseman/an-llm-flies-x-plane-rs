@@ -42,7 +42,8 @@ pub enum LogKind {
     System,
     /// Error messages. The body may already embed a subsystem tag.
     Error,
-    /// LLM tool dispatch — verbose, hidden in compact mode.
+    /// LLM tool dispatch. The compact view shows only tools that act,
+    /// and errors (`tui::compact_entry`).
     ToolCall,
     /// Per-call token usage — verbose, hidden in compact mode.
     Tokens,
@@ -53,6 +54,10 @@ pub enum LogKind {
     /// Model-emitted reasoning / thought summary. Informational only —
     /// never echoed back to the model.
     Thinking,
+    /// What the plan is doing: the code the pilot flew, and the plan's
+    /// own events (step done, report due, constraint not met) and phase
+    /// changes as they happen. Shown prominently.
+    Plan,
 }
 
 impl LogKind {
@@ -69,11 +74,13 @@ impl LogKind {
             LogKind::Heartbeat => Some("[heartbeat] "),
             LogKind::ToolCall | LogKind::Tokens => Some("[llm-worker] "),
             LogKind::Thinking => Some("[thinking] "),
+            LogKind::Plan => Some("[plan] "),
             LogKind::System | LogKind::Error | LogKind::Voice => None,
         }
     }
 
-    /// True if this kind should be hidden in the default (compact) TUI view.
+    /// Chatter the compact TUI view leaves out (tool calls get a closer
+    /// look there: the ones that act still show).
     pub fn is_verbose(self) -> bool {
         matches!(
             self,
@@ -86,11 +93,35 @@ impl LogKind {
 pub struct LogEntry {
     pub kind: LogKind,
     pub text: String,
+    /// For a tool call: which tool, and whether it succeeded.
+    pub tool: Option<ToolMeta>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ToolMeta {
+    pub name: String,
+    pub ok: bool,
 }
 
 impl LogEntry {
     pub fn new(kind: LogKind, text: impl Into<String>) -> Self {
-        Self { kind, text: text.into() }
+        Self { kind, text: text.into(), tool: None }
+    }
+
+    /// A tool call's `tool NAME -> OUTPUT` line (the format the file log
+    /// and `sim-pilot-transcript` read), with the name and outcome kept.
+    pub fn tool_call(name: &str, ok: bool, output: &str) -> Self {
+        Self {
+            kind: LogKind::ToolCall,
+            text: format!("tool {name} -> {output}"),
+            tool: Some(ToolMeta { name: name.to_string(), ok }),
+        }
+    }
+
+    /// A tool call's output (the text after `tool NAME -> `).
+    pub fn tool_output(&self) -> Option<&str> {
+        let t = self.tool.as_ref()?;
+        self.text.get("tool ".len() + t.name.len() + " -> ".len()..)
     }
 
     /// Legacy-formatted string: bracket-tag (if any) + body.

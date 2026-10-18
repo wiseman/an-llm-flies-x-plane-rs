@@ -219,6 +219,7 @@ pub fn format_snapshot_display(snapshot: Option<&StatusSnapshot>) -> String {
 // Interactive ratatui-based TUI
 // ---------------------------------------------------------------------------
 
+use std::borrow::Cow;
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -305,7 +306,9 @@ pub fn run_tui(
     // Draft saved when the user first presses Up from a fresh line, so
     // Down can restore it once they walk past the end of history.
     let mut pending_draft: String = String::new();
-    let mut log_detail = true;
+    // Compact by default (ctrl-t for everything): the conversation, the
+    // plan, actions and errors, not queries, sleeps and token counts.
+    let mut log_detail = false;
     let mut show_thoughts = true;
     // None = follow live tail (default). Some(offset) = paused at that
     // absolute scroll offset. Absolute rather than relative-to-bottom so
@@ -1476,7 +1479,41 @@ fn style_for_kind(kind: LogKind) -> LogStyle {
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::ITALIC),
         },
+        LogKind::Plan => LogStyle::Bar {
+            bar_style: Style::default().fg(Color::LightGreen),
+            body_style: Style::default().fg(PLAN_TEXT_FG),
+        },
     }
+}
+
+/// Plan code and events: a pale green, apart from the amber speech.
+const PLAN_TEXT_FG: Color = Color::Rgb(190, 235, 190);
+
+/// Longest tool result line shown in the compact log.
+const COMPACT_TOOL_CHARS: usize = 160;
+
+/// How `e` shows in the compact log, if at all: verbose kinds hidden,
+/// except tool calls that act (one line: the tool and the first line of
+/// its result), tool errors, and the plan `fly` produced (in full).
+fn compact_entry(e: &LogEntry) -> Option<Cow<'_, LogEntry>> {
+    let (Some(tool), Some(output)) = (&e.tool, e.tool_output()) else {
+        return (!e.kind.is_verbose()).then_some(Cow::Borrowed(e));
+    };
+    let (kind, text) = if !tool.ok {
+        (LogKind::Error, format!("{}: {output}", tool.name))
+    } else if crate::llm::tools::is_quiet_tool(&tool.name) {
+        return None;
+    } else if tool.name == "fly" {
+        (LogKind::Plan, output.to_string())
+    } else {
+        let first = output.lines().next().unwrap_or("");
+        let line = match first.char_indices().nth(COMPACT_TOOL_CHARS) {
+            Some((cut, _)) => format!("{}…", &first[..cut]),
+            None => first.to_string(),
+        };
+        (LogKind::System, format!("{}: {line}", tool.name))
+    };
+    Some(Cow::Owned(LogEntry::new(kind, text)))
 }
 
 /// Slightly-lighter-than-black tint for operator blocks — reads like a
@@ -1499,26 +1536,42 @@ pub(crate) fn build_log_lines(
 ) -> Vec<Line<'static>> {
     let mut out: Vec<Line<'static>> = Vec::new();
     let mut prev_kind: Option<LogKind> = None;
-    for entry in entries.iter().filter(|e| {
-        if e.kind == LogKind::Thinking {
-            show_thoughts
-        } else {
-            show_verbose || !e.kind.is_verbose()
-        }
-    }) {
+    let mut emit = |entry: &LogEntry| {
         if prev_kind.is_some_and(|p| is_author_turn_boundary(p, entry.kind)) {
             out.push(Line::default());
         }
         let is_operator = entry.kind == LogKind::Operator;
         for line in render_log_entry(entry) {
-            out.push(if is_operator {
-                tint_line_bg(line, OPERATOR_BG, inner_width)
-            } else {
-                line
-            });
+            out.push(if is_operator { tint_line_bg(line, OPERATOR_BG, inner_width) } else { line });
         }
         prev_kind = Some(entry.kind);
+    };
+    // Compact: a run of identical entries shows once, with a count.
+    let flush = |pending: Option<(Cow<'_, LogEntry>, usize)>, emit: &mut dyn FnMut(&LogEntry)| {
+        if let Some((e, n)) = pending {
+            if n > 1 {
+                emit(&LogEntry::new(e.kind, format!("{} (×{n})", e.text)));
+            } else {
+                emit(&e);
+            }
+        }
+    };
+    let mut pending: Option<(Cow<'_, LogEntry>, usize)> = None;
+    for e in entries {
+        let shown = if e.kind == LogKind::Thinking {
+            show_thoughts.then_some(Cow::Borrowed(e))
+        } else if show_verbose {
+            Some(Cow::Borrowed(e))
+        } else {
+            compact_entry(e)
+        };
+        let Some(shown) = shown else { continue };
+        match &mut pending {
+            Some((last, n)) if !show_verbose && last.kind == shown.kind && last.text == shown.text => *n += 1,
+            _ => flush(pending.replace((shown, 1)), &mut emit),
+        }
     }
+    flush(pending, &mut emit);
     out
 }
 
@@ -2621,6 +2674,46 @@ mod tests {
         let entry = LogEntry::new(LogKind::Heartbeat, "completed: taxi");
         let lines = render_log_entry(&entry);
         assert_eq!(lines[0].spans[2].content, "completed: taxi");
+    }
+
+    #[test]
+    fn compact_log_keeps_the_plan_and_actions_and_drops_the_chatter() {
+        let view = |e: LogEntry| compact_entry(&e).map(|e| (e.kind, e.text.clone()));
+        let tool = |name: &str, ok: bool, out: &str| view(LogEntry::tool_call(name, ok, out));
+        // Queries, sleeps, tokens and heartbeats go.
+        assert_eq!(tool("sleep", true, "sleeping"), None);
+        assert_eq!(tool("sql_query", true, "ident\tname\nKWHP\tWhiteman"), None);
+        assert_eq!(view(LogEntry::new(LogKind::Tokens, "tokens in=10 out=5")), None);
+        assert_eq!(view(LogEntry::new(LogKind::Heartbeat, "periodic check-in | status={}")), None);
+        // The code and the plan it made stay, in full.
+        let code = "fly (KWHP):\np = pattern(apt.runway('30'), LEFT)\njoin(p)";
+        assert_eq!(view(LogEntry::new(LogKind::Plan, code)), Some((LogKind::Plan, code.into())));
+        assert_eq!(
+            tool("fly", true, "plan engaged:\n  step 1: join left traffic KWHP 30"),
+            Some((LogKind::Plan, "plan engaged:\n  step 1: join left traffic KWHP 30".into()))
+        );
+        // Actions as one line; any tool's failure shows.
+        assert_eq!(
+            tool("engage_taxi", true, "engaged taxi KWHP\n  leg 1"),
+            Some((LogKind::System, "engage_taxi: engaged taxi KWHP".into()))
+        );
+        assert_eq!(
+            tool("sql_query", false, "error: no such table"),
+            Some((LogKind::Error, "sql_query: error: no such table".into()))
+        );
+    }
+
+    #[test]
+    fn compact_log_collapses_repeated_lines() {
+        let entries: Vec<LogEntry> =
+            (0..3).map(|_| LogEntry::new(LogKind::Error, "[bridge] read error: closed")).collect();
+        let text = |lines: Vec<Line<'static>>| -> Vec<String> {
+            lines.iter().map(|l| l.spans.iter().map(|s| s.content.to_string()).collect()).collect()
+        };
+        let compact = text(build_log_lines(&entries, false, true, 80));
+        assert_eq!(compact.len(), 1);
+        assert!(compact[0].ends_with("(×3)"), "{compact:?}");
+        assert_eq!(build_log_lines(&entries, true, true, 80).len(), 3);
     }
 
     #[test]

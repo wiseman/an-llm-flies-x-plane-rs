@@ -178,7 +178,7 @@ a flexing dialog area in the middle:
 - **NAV** — position, altitude, speed, heading, flap/gear, throttle, control surfaces.
 - **ENERGY · RISK** — energy state and live risk indicators.
 - **RADIO** — radio transmissions only, labeled with the frequency they went out on.
-- **LLM / ACTION LOG** — timestamped transcript of operator messages, ATC, LLM replies, tool calls, and heartbeats. Scrollable. Toggle compact/full with Ctrl-T.
+- **LLM / ACTION LOG** — the conversation (operator, ATC, LLM replies), the plan code the pilot flies and the plan it builds, the plan's events and phase changes, one line per action, and errors. Compact by default; Ctrl-T shows everything (every tool call, queries, sleeps, token counts, heartbeats). Scrollable.
 - **INPUT** — type instructions to the LLM pilot, or act as ATC. emacs/bash-style keybindings; long lines wrap onto additional visual rows.
 - **Footer** — status badges (alerts, etc.).
 
@@ -225,7 +225,7 @@ Keys:
 | Enter             | Send the typed line. Prefix with `[atc]` (or the `atc:` colon form) to inject as ATC; default is operator. |
 | Hold Space        | Push-to-talk as operator. Releasing finalizes the transcription.                                           |
 | Hold Tab          | Push-to-talk as ATC (auto-prefixed `[atc]`).                                                               |
-| Ctrl-T            | Toggle log-pane detail (compact vs full).                                                                  |
+| Ctrl-T            | Toggle log-pane detail (compact, the default, vs full).                                                    |
 | Ctrl-V            | Toggle the spatial TARGETING view (see above). `/view` does the same and can pin a specific view.          |
 | PgUp / PgDn / End | Scroll the log pane. Home view auto-pins to the tail.                                                      |
 

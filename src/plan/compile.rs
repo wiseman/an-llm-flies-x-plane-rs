@@ -78,7 +78,7 @@ impl RPattern {
 
     pub fn square(&self) -> crate::core::profiles::SquareCorners {
         let base = self.spec.square.contains(&Leg::Base);
-        crate::core::profiles::SquareCorners { into_base: base, into_final: base || self.spec.square.contains(&Leg::Final) }
+        crate::core::profiles::SquareCorners { into_base: true, into_final: base || self.spec.square.contains(&Leg::Final) }
     }
 }
 
