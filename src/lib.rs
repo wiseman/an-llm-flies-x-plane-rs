@@ -3,6 +3,7 @@ pub mod config;
 pub mod control;
 pub mod core;
 pub mod data;
+pub mod demo;
 pub mod eval_runner;
 pub mod eval_scenario;
 pub mod guidance;

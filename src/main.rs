@@ -89,6 +89,24 @@ struct Cli {
     #[arg(long)]
     headless: bool,
 
+    /// Run a scripted demo take (`demo/*.yaml`): start the flight, fire
+    /// the scripted ATC cues, speak the radio, drive OBS. F6 rolls the
+    /// take and sends the next cue; F7 holds; F8 skips.
+    #[arg(long)]
+    demo: Option<PathBuf>,
+
+    /// With --demo: fly the flight already loaded instead of starting one.
+    #[arg(long)]
+    demo_no_init: bool,
+
+    /// With --demo: no spoken radio.
+    #[arg(long)]
+    demo_no_audio: bool,
+
+    /// With --demo: leave OBS alone.
+    #[arg(long)]
+    demo_no_obs: bool,
+
     #[arg(long, default_value_t = 10.0)]
     control_hz: f64,
 
@@ -365,6 +383,12 @@ fn main() -> Result<()> {
                     heartbeat_enabled: !args.no_heartbeat,
                     voice_enabled: !args.no_voice,
                     pilot_mode,
+                    demo: args.demo.map(|script| xplane_pilot::live_runner::DemoRunConfig {
+                        script,
+                        init_flight: !args.demo_no_init,
+                        audio: !args.demo_no_audio,
+                        obs: !args.demo_no_obs,
+                    }),
                 },
             )?;
         }

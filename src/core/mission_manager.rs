@@ -29,7 +29,7 @@ use crate::guidance::runway_geometry::RunwayFrame;
 use crate::sim::simple_dynamics::DynamicsState;
 use crate::types::{
     clamp, wrap_degrees_180, ActuatorCommands, AircraftState, FlightPhase, GuidanceTargets,
-    LateralMode, VerticalMode,
+    LateralMode, Vec2, VerticalMode,
 };
 
 /// LLM-declared top-level mission goal — what the pilot is trying to do
@@ -91,6 +91,77 @@ impl ClearanceSource {
             "unicom" | "ctaf" => ClearanceSource::Unicom,
             other => ClearanceSource::Other(other.to_string()),
         }
+    }
+}
+
+/// Radio-altimeter samples over the pavement count below this height...
+const SURFACE_MAX_AGL_FT: f64 = 400.0;
+/// ...and this far beside its edges.
+const SURFACE_SIDE_FT: f64 = 50.0;
+/// A sample this far off the published elevation is terrain, not runway.
+const SURFACE_MAX_OFFSET_FT: f64 = 150.0;
+/// Samples spread over this much runway fit its slope (fewer: their mean).
+const SURFACE_FIT_SPAN_FT: f64 = 300.0;
+/// Steepest runway slope believed.
+const SURFACE_MAX_SLOPE: f64 = 0.02;
+
+/// Radio-altimeter samples of a runway's surface, as a running line fit
+/// of elevation against distance down the runway.
+#[derive(Debug, Clone)]
+struct SurfaceElevation {
+    /// The runway it belongs to (its origin in the world frame).
+    runway: Vec2,
+    published_ft: f64,
+    n: f64,
+    sx: f64,
+    se: f64,
+    sxx: f64,
+    sxe: f64,
+    min_x: f64,
+    max_x: f64,
+    reported: bool,
+}
+
+impl SurfaceElevation {
+    fn new(runway: Vec2, published_ft: f64) -> Self {
+        Self {
+            runway,
+            published_ft,
+            n: 0.0,
+            sx: 0.0,
+            se: 0.0,
+            sxx: 0.0,
+            sxe: 0.0,
+            min_x: f64::INFINITY,
+            max_x: f64::NEG_INFINITY,
+            reported: false,
+        }
+    }
+
+    fn add(&mut self, x: f64, elevation_ft: f64) {
+        self.n += 1.0;
+        self.sx += x;
+        self.se += elevation_ft;
+        self.sxx += x * x;
+        self.sxe += x * elevation_ft;
+        self.min_x = self.min_x.min(x);
+        self.max_x = self.max_x.max(x);
+    }
+
+    fn span_ft(&self) -> f64 {
+        self.max_x - self.min_x
+    }
+
+    /// The surface elevation `x` ft down the runway.
+    fn at(&self, x: f64) -> f64 {
+        let (mx, me) = (self.sx / self.n, self.se / self.n);
+        if self.span_ft() < SURFACE_FIT_SPAN_FT {
+            return me;
+        }
+        let var = self.sxx / self.n - mx * mx;
+        let cov = self.sxe / self.n - mx * me;
+        let slope = if var > 1.0 { (cov / var).clamp(-SURFACE_MAX_SLOPE, SURFACE_MAX_SLOPE) } else { 0.0 };
+        me + slope * (x - mx)
     }
 }
 
@@ -280,6 +351,12 @@ pub struct PilotCore {
     /// Ring of the last `EVENT_LOG_LEN` profile events, with sequence numbers.
     event_log: std::collections::VecDeque<(u64, String)>,
     event_seq: u64,
+    /// The reference runway's surface as the radio altimeter measures
+    /// it, and the published field elevation it replaces. apt.dat has
+    /// one elevation per airport; the sim's pavement can sit tens of
+    /// feet off it (KVNY: published 800, touchdown zone 784), which
+    /// puts the glidepath that far above the real surface.
+    surface: Option<SurfaceElevation>,
     /// Other aircraft, as sensed (scripted in evals). Plans read it
     /// through `PlanProfile::with_traffic`.
     pub traffic: crate::core::traffic::TrafficPicture,
@@ -359,6 +436,7 @@ impl PilotCore {
             flaps: CockpitSetting::default(),
             event_log: std::collections::VecDeque::new(),
             event_seq: 0,
+            surface: None,
             traffic: Default::default(),
             config,
         }
@@ -435,6 +513,53 @@ impl PilotCore {
     pub fn set_reference_config(&mut self, config: ConfigBundle) {
         self.runway_frame = RunwayFrame::new(config.airport.runway.clone());
         self.config = config;
+        // Same runway: keep the measured surface over the published one.
+        match &self.surface {
+            Some(s) if s.runway == self.config.airport.runway.threshold_ft => {
+                self.config.airport.field_elevation_ft = s.at(self.runway_frame.touchdown_runway_x_ft());
+            }
+            _ => self.surface = None,
+        }
+    }
+
+    /// Measure the reference runway's surface: over the pavement below
+    /// `SURFACE_MAX_AGL_FT` (or rolling on it) the radio altimeter gives
+    /// the elevation under the aircraft. A line fitted through those
+    /// samples (runways slope: KVNY 16R drops ~0.5%) gives the elevation
+    /// at the aim point, which then stands in for the published one in
+    /// the glidepath and the height above the field.
+    fn measure_surface(&mut self, raw: &DynamicsState) {
+        let Some(radio_ft) = raw.agl_ft else { return };
+        if radio_ft > SURFACE_MAX_AGL_FT {
+            return;
+        }
+        let p = self.runway_frame.to_runway_frame(raw.position_ft);
+        let rw = &self.runway_frame.runway;
+        if p.x < 0.0 || p.x > rw.length_ft || p.y.abs() > self.runway_frame.half_width_plus_ft(SURFACE_SIDE_FT) {
+            return;
+        }
+        let published = self.surface.as_ref().map(|s| s.published_ft).unwrap_or(self.config.airport.field_elevation_ft);
+        let elevation = raw.altitude_ft - radio_ft;
+        if (elevation - published).abs() > SURFACE_MAX_OFFSET_FT {
+            return;
+        }
+        let surface = self
+            .surface
+            .get_or_insert_with(|| SurfaceElevation::new(rw.threshold_ft, published));
+        surface.add(p.x, elevation);
+        let at_aim = surface.at(self.runway_frame.touchdown_runway_x_ft());
+        if !surface.reported && surface.span_ft() >= SURFACE_FIT_SPAN_FT {
+            surface.reported = true;
+            self.event_seq += 1;
+            self.event_log.push_back((
+                self.event_seq,
+                format!("runway surface at the touchdown zone measured at {at_aim:.0} ft (published field elevation {published:.0} ft)"),
+            ));
+            if self.event_log.len() > EVENT_LOG_LEN {
+                self.event_log.pop_front();
+            }
+        }
+        self.config.airport.field_elevation_ft = at_aim;
     }
 
     /// Ask every active profile matching `affected` whether it may be
@@ -574,6 +699,7 @@ impl PilotCore {
     }
 
     pub fn update(&mut self, raw_state: &DynamicsState, dt: f64) -> (AircraftState, ActuatorCommands) {
+        self.measure_surface(raw_state);
         let state = estimate_aircraft_state(raw_state, &self.config, &self.runway_frame, dt);
         let (guidance, metadata) = self.compose_guidance(&state, dt);
         let commands = self.commands_from_guidance(&state, &guidance);
@@ -832,9 +958,17 @@ impl PilotCore {
             }
             let (target_altitude_ft, throttle_limit) = match guidance.glidepath {
                 Some(gp) if guidance.vertical_mode == VerticalMode::GlidepathTrack => {
+                    // On the path (its target not clamped for a capture)
+                    // and not slipping down to it: trim out any standing
+                    // offset.
+                    self.tecs.tracking_path = slip.abs() <= 0.1
+                        && (state.alt_msl_ft - self.glidepath_alt_ft(state, gp)).abs() < MAX_GLIDEPATH_CAPTURE_ERROR_FT;
                     self.glidepath_targets_slipping(state, gp, throttle_limit, slip.abs() > 0.1)
                 }
-                _ => (guidance.target_altitude_ft.unwrap_or(state.alt_msl_ft), throttle_limit),
+                _ => {
+                    self.tecs.tracking_path = false;
+                    (guidance.target_altitude_ft.unwrap_or(state.alt_msl_ft), throttle_limit)
+                }
             };
             self.tecs.update(
                 tecs_phase,
@@ -1047,10 +1181,74 @@ mod tests {
     use super::*;
     use crate::config::load_default_config_bundle;
 
+    fn raw_at(pilot: &PilotCore, x: f64, y: f64, alt_msl_ft: f64, radio_ft: Option<f64>, t: f64) -> DynamicsState {
+        DynamicsState {
+            position_ft: pilot.runway_frame.to_world_frame(Vec2::new(x, y)),
+            altitude_ft: alt_msl_ft,
+            agl_ft: radio_ft,
+            heading_deg: pilot.runway_frame.runway.course_deg,
+            roll_deg: 0.0,
+            pitch_deg: 0.0,
+            ias_kt: 62.0,
+            throttle_pos: 0.2,
+            on_ground: false,
+            time_s: t,
+            p_rad_s: 0.0,
+            q_rad_s: 0.0,
+            r_rad_s: 0.0,
+            ground_velocity_ft_s: Vec2::ZERO,
+            vertical_speed_ft_s: -5.0,
+            flap_index: 30,
+            gear_down: true,
+            sideslip_deg: 0.0,
+            parking_brake: 0.0,
+        }
+    }
+
+    #[test]
+    fn the_radio_altimeter_over_the_runway_sets_the_surface_elevation() {
+        let mut cfg = load_default_config_bundle();
+        cfg.airport.field_elevation_ft = 800.0;
+        let mut pilot = PilotCore::new(cfg.clone());
+        // Downwind, over terrain: not the runway.
+        pilot.update(&raw_at(&pilot, 3000.0, 5500.0, 1800.0, Some(1023.0), 0.0), 0.2);
+        assert_eq!(pilot.config.airport.field_elevation_ft, 800.0);
+        // Short final over higher ground short of the runway (ignored),
+        // then over pavement that slopes down 0.5% from 795 ft.
+        let surface = |x: f64| 795.0 - 0.005 * x;
+        let mut t = 1.0;
+        for x in [-800.0, -400.0] {
+            pilot.update(&raw_at(&pilot, x, 10.0, 807.0 + 150.0, Some(150.0), t), 0.2);
+            t += 0.2;
+        }
+        assert_eq!(pilot.config.airport.field_elevation_ft, 800.0, "terrain short of the runway");
+        let mut x = 0.0;
+        while x <= 1500.0 {
+            pilot.update(&raw_at(&pilot, x, 10.0, surface(x) + 60.0, Some(60.0), t), 0.2);
+            t += 0.2;
+            x += 50.0;
+        }
+        let aim = pilot.runway_frame.touchdown_runway_x_ft();
+        let elev = pilot.config.airport.field_elevation_ft;
+        assert!((elev - surface(aim)).abs() < 0.5, "{elev} vs {} at the aim point", surface(aim));
+        let (state, _) = pilot.update(&raw_at(&pilot, 1550.0, 0.0, elev + 20.0, Some(20.0), t), 0.2);
+        assert!((state.alt_agl_ft - 20.0).abs() < 0.6, "{}", state.alt_agl_ft);
+        let reported = format!("measured at {:.0}", surface(aim));
+        assert!(pilot.event_log.iter().any(|(_, e)| e.contains(&reported)), "{:?}", pilot.event_log);
+        // The same runway re-engaged (a new plan) keeps the measurement; a
+        // different runway drops it.
+        pilot.set_reference_config(cfg.clone());
+        assert!((pilot.config.airport.field_elevation_ft - surface(aim)).abs() < 0.5);
+        let mut other = cfg;
+        other.airport.runway.threshold_ft = Vec2::new(5000.0, 5000.0);
+        pilot.set_reference_config(other);
+        assert_eq!(pilot.config.airport.field_elevation_ft, 800.0);
+    }
+
     #[test]
     fn spatial_snapshot_reflects_active_profile() {
         use crate::core::profiles::TaxiProfile;
-        use crate::types::{StraightLeg, TaxiPose, Vec2};
+        use crate::types::{StraightLeg, TaxiPose};
         let mut pilot = PilotCore::new(load_default_config_bundle());
         let idle = pilot.spatial_snapshot();
         assert_eq!(idle.runway, pilot.runway_frame.runway);

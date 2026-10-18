@@ -165,6 +165,29 @@ impl RCond {
         }
     }
 
+    /// The places this condition refers to (the road a turn waits for).
+    pub fn features<'a>(&'a self, out: &mut Vec<&'a Feature>) {
+        match self {
+            RCond::At { feature, .. }
+            | RCond::Abeam { feature, .. }
+            | RCond::Crossing { feature, .. }
+            | RCond::Past { feature, .. }
+            | RCond::SideOf { feature, .. }
+            | RCond::Within { feature, .. }
+            | RCond::Inside { feature }
+            | RCond::Outside { feature }
+            | RCond::Over { feature, .. }
+            | RCond::AngleBehindWing { feature, .. } => {
+                if !out.iter().any(|f| f.label == feature.label) {
+                    out.push(feature);
+                }
+            }
+            RCond::All(cs) | RCond::Any(cs) => cs.iter().for_each(|c| c.features(out)),
+            RCond::Not(c) => c.features(out),
+            _ => {}
+        }
+    }
+
     /// `eval`, with altitude limits (here or inside All/Any) allowed
     /// `tol_ft` of slack: "at or below 1800" holds up to 1800 + tol.
     pub fn holds_with_alt_tolerance(&mut self, c: &EvalCtx, tol_ft: f64) -> bool {

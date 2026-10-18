@@ -245,6 +245,8 @@ use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use ratatui::Terminal;
 
 use crate::bus::{LogEntry, LogKind, SimBus};
+use crate::demo::director::{DemoCommand, DemoUi};
+use crate::demo::script::TuiView;
 use crate::core::mission_manager::{
     ActiveClearance, MissionGoal, PilotCore, StatusSnapshot,
 };
@@ -261,6 +263,14 @@ use crate::tui_spatial::{
 /// until the user exits (Ctrl-C / Ctrl-D / Esc); on return, `stop_event`
 /// is set so background threads can shut down gracefully.
 #[allow(clippy::too_many_arguments)]
+/// The TUI's side of a demo take: view changes in, and the unmarked
+/// override keys out (F6 next cue, F7 hold, F8 skip). The screen looks
+/// as it does in any other session.
+pub struct DemoTuiLink {
+    pub control_tx: Sender<DemoCommand>,
+    pub ui_rx: crossbeam_channel::Receiver<DemoUi>,
+}
+
 pub fn run_tui(
     bus: SimBus,
     input_queue: Sender<IncomingMessage>,
@@ -271,6 +281,7 @@ pub fn run_tui(
     ptt: Option<Arc<PttController>>,
     aircraft_label: String,
     model_label: String,
+    demo: Option<DemoTuiLink>,
 ) -> Result<()> {
     // Set up terminal.
     enable_raw_mode()?;
@@ -464,6 +475,20 @@ pub fn run_tui(
                 if k.kind == KeyEventKind::Release {
                     continue;
                 }
+                // A demo take: F6 sends the next cue, F7 holds the cues,
+                // F8 skips one.
+                if let Some(d) = &demo {
+                    let cmd = match k.code {
+                        KeyCode::F(6) => Some(DemoCommand::Next),
+                        KeyCode::F(7) => Some(DemoCommand::Hold),
+                        KeyCode::F(8) => Some(DemoCommand::Skip),
+                        _ => None,
+                    };
+                    if let Some(c) = cmd {
+                        let _ = d.control_tx.send(c);
+                        continue;
+                    }
+                }
                 // F-keys: canned operator-message directability buttons.
                 // The supervisor never bypasses the LLM (it's still PIC) —
                 // these are *requests* visible to both human and LLM.
@@ -652,6 +677,11 @@ pub fn run_tui(
             });
             // Built on demand from the active profiles, only while the
             // view is visible.
+            if let Some(d) = &demo {
+                for DemoUi::View(v) in d.ui_rx.try_iter() {
+                    spatial_on = v == TuiView::Spatial;
+                }
+            }
             let spatial = spatial_on.then(|| p.spatial_snapshot());
             (snap, risk, spatial)
         };
@@ -1467,7 +1497,7 @@ fn style_for_kind(kind: LogKind) -> LogStyle {
             bar_style: Style::default().fg(Color::Gray),
             body_style: Style::default().fg(Color::Gray),
         },
-        LogKind::ToolCall | LogKind::Tokens | LogKind::Heartbeat | LogKind::Voice => {
+        LogKind::ToolCall | LogKind::Tokens | LogKind::Heartbeat | LogKind::Voice | LogKind::Demo => {
             LogStyle::Bar {
                 bar_style: Style::default().fg(Color::DarkGray),
                 body_style: Style::default().fg(Color::DarkGray),

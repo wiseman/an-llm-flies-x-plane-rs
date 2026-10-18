@@ -52,6 +52,7 @@ ratatui = { version = "0.29", features = ["unstable-rendered-line-info"] }
 crossterm = "0.28"
 ctrlc = { version = "3", features = ["termination"] }
 base64 = "0.22"
+sha2 = "0.10"
 tiny_http = "0.12"
 
 [dev-dependencies]

@@ -21,7 +21,7 @@ use crate::core::profiles::{
 use crate::core::spatial::SpatialOverlay;
 use crate::guidance::lateral::leg_projection;
 use crate::guidance::runway_geometry::RunwayFrame;
-use crate::types::{
+use crate::types::{KT_TO_FPS, 
     AircraftState, FlightPhase, GuidanceTargets, LateralMode, StraightLeg, Vec2, VerticalMode,
 };
 
@@ -91,6 +91,16 @@ pub struct ArrivalPlan {
     pub summary: String,
 }
 
+/// A backup exit beyond the chosen one, with its own taxi to parking,
+/// taken if the chosen exit is missed.
+/// Within this of an exit leg's course, the aircraft is lined up on it.
+const EXIT_ALIGNED_DEG: f64 = 15.0;
+
+pub struct ExitOption {
+    pub exit: RunwayExitPlan,
+    pub arrival: Option<ArrivalPlan>,
+}
+
 /// Progress along the selected exit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ExitProgress {
@@ -136,6 +146,9 @@ pub trait LandingPlanHolder {
         exit: Option<RunwayExitPlan>,
         arrival: Option<ArrivalPlan>,
     ) -> Result<(), String>;
+    /// Exits to fall back on, in runway order, if the chosen one is
+    /// missed. Clearing the exit clears these too.
+    fn set_fallback_exits(&mut self, fallbacks: Vec<ExitOption>);
 }
 
 pub struct LandingRolloutProfile {
@@ -149,6 +162,10 @@ pub struct LandingRolloutProfile {
     last_gs_kt: f64,
     last_on_ground: bool,
     arrival: Option<ArrivalPlan>,
+    fallbacks: std::collections::VecDeque<ExitOption>,
+    /// A missed exit with no fallback left has been reported.
+    miss_reported: bool,
+    events: Vec<String>,
 }
 
 impl LandingRolloutProfile {
@@ -163,7 +180,42 @@ impl LandingRolloutProfile {
             last_gs_kt: f64::INFINITY,
             last_on_ground: true,
             arrival: None,
+            fallbacks: Default::default(),
+            miss_reported: false,
+            events: Vec::new(),
         }
+    }
+
+    /// Exits to take, in order, if the selected one is missed.
+    pub fn with_fallback_exits(mut self, fallbacks: Vec<ExitOption>) -> Self {
+        self.fallbacks = fallbacks.into();
+        self
+    }
+
+    /// The selected exit was missed: take the first fallback still far
+    /// enough ahead to slow for, and tell the pilot either way.
+    fn on_missed_exit(&mut self, state: &AircraftState) {
+        let Some(missed) = self.exit.as_ref().map(|e| e.plan.taxiway_name.clone()) else { return };
+        let x = state.runway_x_ft.unwrap_or(f64::INFINITY);
+        let lead = self.config.post_landing.slowdown_lead_ft;
+        while let Some(next) = self.fallbacks.pop_front() {
+            if next.exit.stationing_ft < x + lead {
+                continue;
+            }
+            self.events.push(format!(
+                "missed exit {missed}; taking {} at {:.0} ft instead{}",
+                next.exit.taxiway_name,
+                next.exit.stationing_ft,
+                if next.arrival.is_some() { ", taxi re-planned from there" } else { "" }
+            ));
+            self.exit = Some(SelectedExit::new(next.exit));
+            self.arrival = next.arrival;
+            return;
+        }
+        self.miss_reported = true;
+        self.events.push(format!(
+            "missed exit {missed} and no planned exit ahead; slowing on the centerline (choose_runway_exit for one ahead)"
+        ));
     }
 
     /// Continue into a pre-planned taxi to parking after the exit.
@@ -199,7 +251,11 @@ impl LandingRolloutProfile {
                 current.plan.taxiway_name
             ));
         }
+        if exit.is_none() {
+            self.fallbacks.clear();
+        }
         self.exit = exit.map(SelectedExit::new);
+        self.miss_reported = false;
         Ok(())
     }
 
@@ -306,6 +362,11 @@ impl LandingRolloutProfile {
         };
 
         if let Some((leg_idx, done)) = following {
+            // The turn off the runway at turn speed; lined up on the exit,
+            // taxi.
+            let aligned = self.exit_leg(exit, leg_idx).is_some_and(|leg| {
+                crate::types::wrap_degrees_180(leg.course_deg() - state.heading_deg).abs() <= EXIT_ALIGNED_DEG
+            });
             let target_speed = if done {
                 0.0
             } else if leg_idx >= last_idx {
@@ -318,8 +379,10 @@ impl LandingRolloutProfile {
                     .last()
                     .map(|p| state.position_ft.distance_to(self.runway_frame.to_world_frame(*p)))
                     .unwrap_or(0.0);
-                (distance / pl.final_stop_ramp_ft * pl.exit_speed_kt)
-                    .clamp(pl.exit_creep_speed_kt, pl.exit_speed_kt)
+                let cruise = if aligned { pl.exit_taxi_speed_kt } else { pl.exit_speed_kt };
+                (distance / pl.final_stop_ramp_ft * cruise).clamp(pl.exit_creep_speed_kt, cruise)
+            } else if aligned {
+                pl.exit_taxi_speed_kt
             } else {
                 pl.exit_speed_kt
             };
@@ -337,10 +400,12 @@ impl LandingRolloutProfile {
         let target_speed = if *progress == ExitProgress::Missed {
             let distance_to_end = self.runway_frame.runway.length_ft - runway_x;
             if distance_to_end <= pl.slowdown_lead_ft { 0.0 } else { pl.turnoff_speed_kt }
-        } else if exit.stationing_ft - runway_x <= pl.slowdown_lead_ft {
-            pl.exit_speed_kt
         } else {
-            pl.turnoff_speed_kt
+            // Brake to arrive at the turn at turn speed: v² = v_turn² + 2ad.
+            let d = (exit.stationing_ft - runway_x).max(0.0);
+            let v_turn = pl.exit_speed_kt * KT_TO_FPS;
+            let v = (v_turn * v_turn + 2.0 * pl.exit_slowdown_fps2 * d).sqrt() / KT_TO_FPS;
+            v.min(pl.turnoff_speed_kt)
         };
         GuidanceTargets {
             lateral_mode: LateralMode::RolloutCenterline,
@@ -390,6 +455,10 @@ impl LandingPlanHolder for LandingRolloutProfile {
         self.arrival = arrival;
         Ok(())
     }
+
+    fn set_fallback_exits(&mut self, fallbacks: Vec<ExitOption>) {
+        self.fallbacks = fallbacks.into();
+    }
 }
 
 impl GuidanceProfile for LandingRolloutProfile {
@@ -406,6 +475,9 @@ impl GuidanceProfile for LandingRolloutProfile {
         self.last_on_ground = state.on_ground;
         if matches!(self.phase, FlightPhase::Rollout | FlightPhase::RunwayExit) {
             self.update_exit_progress(state);
+            if !self.miss_reported && self.exit.as_ref().is_some_and(|e| e.progress == ExitProgress::Missed) {
+                self.on_missed_exit(state);
+            }
         }
         let previous_phase = self.phase;
         self.phase = self.next_phase(state);
@@ -442,6 +514,10 @@ impl GuidanceProfile for LandingRolloutProfile {
     /// reported as a completion, which wakes it with a heartbeat.
     fn is_complete(&self) -> bool {
         self.holding_on_runway()
+    }
+
+    fn take_events(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.events)
     }
 
     fn preemption(&self) -> Result<(), String> {

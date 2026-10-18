@@ -37,6 +37,7 @@ pub const COMMS_FILE: &str = "comms.parquet";
 pub const TAXI_NODES_FILE: &str = "taxi_nodes.parquet";
 pub const TAXI_EDGES_FILE: &str = "taxi_edges.parquet";
 pub const PARKING_SPOTS_FILE: &str = "parking_spots.parquet";
+pub const HOLD_LINES_FILE: &str = "hold_lines.parquet";
 pub const AIRSPACES_FILE: &str = "airspaces.parquet";
 
 pub struct AptDatCache {
@@ -62,10 +63,13 @@ impl AptDatCache {
     pub fn parking_spots(&self) -> PathBuf {
         self.dir.join(PARKING_SPOTS_FILE)
     }
+    pub fn hold_lines(&self) -> PathBuf {
+        self.dir.join(HOLD_LINES_FILE)
+    }
     pub fn airspaces(&self) -> PathBuf {
         self.dir.join(AIRSPACES_FILE)
     }
-    pub fn apt_dat_files(&self) -> [PathBuf; 6] {
+    pub fn apt_dat_files(&self) -> [PathBuf; 7] {
         [
             self.airports(),
             self.runways(),
@@ -73,6 +77,7 @@ impl AptDatCache {
             self.taxi_nodes(),
             self.taxi_edges(),
             self.parking_spots(),
+            self.hold_lines(),
         ]
     }
     pub fn apt_dat_files_exist(&self) -> bool {
@@ -110,7 +115,7 @@ pub fn resolve(apt_dat: &Path, airspace_txt: Option<&Path>) -> Result<AptDatCach
 /// added or removed files) in an incompatible way. Folded into the cache
 /// directory hash, so old caches are transparently ignored and rebuilt
 /// rather than producing SQL errors against stale columns.
-const SCHEMA_VERSION: u64 = 3;
+const SCHEMA_VERSION: u64 = 4;
 
 fn cache_for(apt_dat: &Path) -> Result<AptDatCache> {
     let home = std::env::var_os("HOME")
@@ -202,12 +207,14 @@ fn write_parquets(
     create_taxi_node_table(&conn, &parsed.taxi_nodes)?;
     create_taxi_edge_table(&conn, &parsed.taxi_edges)?;
     create_parking_spot_table(&conn, &parsed.parking_spots)?;
+    create_hold_line_table(&conn, &parsed.hold_lines)?;
     copy_to_parquet(&conn, "airports", &cache.airports())?;
     copy_to_parquet(&conn, "runways", &cache.runways())?;
     copy_to_parquet(&conn, "comms", &cache.comms())?;
     copy_to_parquet(&conn, "taxi_nodes", &cache.taxi_nodes())?;
     copy_to_parquet(&conn, "taxi_edges", &cache.taxi_edges())?;
     copy_to_parquet(&conn, "parking_spots", &cache.parking_spots())?;
+    copy_to_parquet(&conn, "hold_lines", &cache.hold_lines())?;
     if write_airspaces {
         create_airspace_table(&conn, airspaces)?;
         copy_to_parquet(&conn, "airspaces", &cache.airspaces())?;
@@ -403,6 +410,25 @@ fn create_taxi_edge_table(conn: &Connection, edges: &[apt_dat::ParsedTaxiEdge]) 
             e.name,
             zones,
         ])?;
+    }
+    app.flush()?;
+    Ok(())
+}
+
+fn create_hold_line_table(conn: &Connection, lines: &[apt_dat::ParsedHoldLine]) -> Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE hold_lines (
+            airport_ident VARCHAR,
+            lat1_deg DOUBLE,
+            lon1_deg DOUBLE,
+            lat2_deg DOUBLE,
+            lon2_deg DOUBLE,
+            line_type INTEGER
+        );",
+    )?;
+    let mut app = conn.appender("hold_lines")?;
+    for l in lines {
+        app.append_row(params![l.airport_ident, l.lat1_deg, l.lon1_deg, l.lat2_deg, l.lon2_deg, l.line_type])?;
     }
     app.flush()?;
     Ok(())

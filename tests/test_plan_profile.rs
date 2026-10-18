@@ -841,6 +841,57 @@ fn a_360_off_the_downwind_holds_pattern_altitude_and_atc_base_turn_rolls_out_on_
     assert_landed_16r(&f);
 }
 
+#[test]
+fn the_spatial_view_gets_the_plans_trigger_orbit_and_constraint() {
+    use xplane_pilot::core::profiles::GuidanceProfile;
+    use xplane_pilot::core::spatial::{ShapeGeom, ShapeRole};
+    let base = load_default_config_bundle();
+    let frame = frame_16r();
+    let mut pilot = PilotCore::new(base.clone());
+    let raw = DynamicsState {
+        position_ft: frame.to_world_frame(Vec2::new(DOWNWIND_START.0, DOWNWIND_START.1)),
+        altitude_ft: 1800.0,
+        agl_ft: None,
+        heading_deg: 355.5,
+        roll_deg: 0.0,
+        pitch_deg: 2.0,
+        ias_kt: 80.0,
+        throttle_pos: 0.5,
+        on_ground: false,
+        time_s: 0.0,
+        p_rad_s: 0.0,
+        q_rad_s: 0.0,
+        r_rad_s: 0.0,
+        ground_velocity_ft_s: heading_to_vector(355.5, 80.0 * KT_TO_FPS),
+        vertical_speed_ft_s: 0.0,
+        flap_index: 0,
+        gear_down: true,
+        sideslip_deg: 0.0,
+        parking_brake: 0.0,
+    };
+    let (est, _) = pilot.update(&raw, DT);
+    let shapes = |code: &str| {
+        let mut p = PlanProfile::new(base.clone(), &est);
+        p.apply(prep(code, &base, None).delta, &est);
+        let _ = p.contribute(&est, DT);
+        p.spatial_overlay().expect("a plan always draws")
+    };
+    let ov = shapes("p = pattern(apt.runway('16R'), RIGHT)\np.extend('downwind', OPEN)\np.turn('base', when=crossing(road('the 118')))\njoin(p)");
+    let trig = ov.plan.iter().find(|s| s.role == ShapeRole::Trigger).expect("the base trigger");
+    assert_eq!(trig.label, "BASE @ CA-118");
+    assert!(matches!(trig.geom, ShapeGeom::Polyline(_)));
+
+    let ov = shapes("p = pattern(apt.runway('16R'), RIGHT)\np.turn('base', when=atc('base'))\njoin(p)");
+    assert!(ov.plan_waiting.iter().any(|w| w.contains("waiting for ATC: base")), "{:?}", ov.plan_waiting);
+
+    let ov = shapes("orbit(RIGHT, 360)\nremain(south_of(road('the 101')))");
+    let orbit = ov.plan.iter().find(|s| s.role == ShapeRole::Active).expect("the orbit");
+    let ShapeGeom::Circle { center, radius_ft } = orbit.geom else { panic!("{:?}", orbit.geom) };
+    // A right orbit heading north circles to the east.
+    assert!(center.x > est.position_ft.x + 0.8 * radius_ft, "{center:?} vs {:?}", est.position_ft);
+    assert!(ov.plan.iter().any(|s| matches!(s.role, ShapeRole::Constraint | ShapeRole::Violating)));
+}
+
 fn frame_16r() -> RunwayFrame {
     RunwayFrame::new(
         prep("p = pattern(apt.runway('16R'), RIGHT)\njoin(p)", &load_default_config_bundle(), None)
@@ -896,4 +947,38 @@ fn square_base_turns_definitely_and_rolls_out_on_each_leg() {
     let plain = fly("p = pattern(apt.runway('16R'), RIGHT)\njoin(p)", start, 355.5, 1800.0, 80.0, vec![], 900.0);
     let (_, _, out, _) = square_metrics(&plain);
     assert!(out > 20.0, "the default turn to final is a gradual intercept ({out:.0} s)");
+}
+
+#[test]
+fn a_360_before_rejoining_keeps_the_landing_plan() {
+    // Live: plan_arrival on downwind, then "make a 360" flown as
+    // orbit(...).then(join(p)). The pattern restarted after the 360
+    // without its exit, so the rollout stopped on the runway.
+    use xplane_pilot::core::profiles::GuidanceProfile;
+    use xplane_pilot::core::landing_rollout::{ExitOption, RunwayExitPlan};
+    let exit = |name: &str, x: f64| RunwayExitPlan {
+        taxiway_name: name.to_string(),
+        stationing_ft: x,
+        path_runway_ft: vec![Vec2::new(x, 0.0), Vec2::new(x, 300.0)],
+    };
+    let base = load_default_config_bundle();
+    let frame = frame_16r();
+    let mut state = AircraftState::synthetic_default();
+    state.position_ft = frame.to_world_frame(Vec2::new(DOWNWIND_START.0, DOWNWIND_START.1));
+    state.alt_msl_ft = 1800.0;
+    let mut plan = PlanProfile::new(base.clone(), &state);
+    plan.apply(prep("p = pattern(apt.runway('16R'), RIGHT)\njoin(p)", &base, None).delta, &state);
+    let holder = plan.landing_plan_mut().expect("a pattern");
+    holder.set_landing_plan(Some(exit("G", 3192.0)), None).unwrap();
+    holder.set_fallback_exits(vec![ExitOption { exit: exit("K", 4487.0), arrival: None }]);
+
+    let p = "p = pattern(apt.runway('16R'), RIGHT)\n";
+    plan.apply(prep(&format!("{p}orbit(RIGHT, 360).then(join(p))"), &base, None).delta, &state);
+    let name = |plan: &mut PlanProfile| plan.landing_plan_mut().and_then(|h| h.preferred_exit().map(|e| e.taxiway_name.clone()));
+    assert_eq!(name(&mut plan).as_deref(), Some("G"), "held through the 360");
+    // plan_arrival works during the 360 too: it changes the held plan.
+    plan.landing_plan_mut().unwrap().set_landing_plan(Some(exit("H", 3700.0)), None).unwrap();
+    // Rejoining the pattern hands it over.
+    plan.apply(prep(&format!("{p}join(p)"), &base, None).delta, &state);
+    assert_eq!(name(&mut plan).as_deref(), Some("H"), "the new pattern has it");
 }

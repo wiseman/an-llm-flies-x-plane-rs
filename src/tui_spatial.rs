@@ -40,7 +40,7 @@ use ratatui::widgets::canvas::{Canvas, Context, Line as CanvasLine};
 use ratatui::widgets::{Block, Borders, Paragraph, Widget};
 
 use crate::core::mission_manager::StatusSnapshot;
-use crate::core::spatial::{LabeledLeg, SpatialSnapshot};
+use crate::core::spatial::{LabeledLeg, PlanShape, ShapeGeom, ShapeRole, SpatialOverlay, SpatialSnapshot};
 use crate::guidance::pattern_manager::glidepath_target_altitude_ft;
 use crate::guidance::runway_geometry::RunwayFrame;
 use crate::types::{
@@ -239,6 +239,8 @@ pub struct Palette {
     pub lock_dim: Color,
     pub caution: Color,
     pub warn: Color,
+    /// Plan constraints (stay south of the 101).
+    pub constraint: Color,
     pub text: Color,
     pub text_dim: Color,
     /// Radar beam afterglow, brightest first.
@@ -264,6 +266,7 @@ impl Palette {
             lock_dim: Color::Rgb(135, 30, 105),
             caution: Color::Rgb(255, 176, 0),
             warn: Color::Rgb(255, 55, 55),
+            constraint: Color::Rgb(190, 120, 255),
             text: Color::Rgb(205, 228, 248),
             text_dim: Color::Rgb(95, 130, 165),
             sweep: [
@@ -292,6 +295,7 @@ impl Palette {
             lock_dim: r,
             caution: r,
             warn: r,
+            constraint: r,
             text: r,
             text_dim: r,
             sweep: [r; 4],
@@ -303,6 +307,14 @@ impl Palette {
         match std::env::var_os("NO_COLOR") {
             Some(v) if !v.is_empty() => Self::mono(),
             _ => Self::color(),
+        }
+    }
+
+    /// The dim half of a blinking warning.
+    fn warn_dim(&self) -> Color {
+        match self.warn {
+            Color::Rgb(r, g, b) => Color::Rgb(r / 2, g / 2, b / 2),
+            c => c,
         }
     }
 
@@ -1463,6 +1475,17 @@ fn draw_runway(buf: &mut Buffer, area: Rect, v: &ViewCtx) -> (Line<'static>, Opt
 // Heading-up scope: pattern, taxi, enroute
 // ---------------------------------------------------------------------------
 
+/// How far the view must reach to show the plan's active, target and
+/// trigger shapes (up to 10 nm).
+fn plan_reach_ft(ov: &SpatialOverlay, pos: Vec2) -> f64 {
+    ov.plan
+        .iter()
+        .filter(|sh| matches!(sh.role, ShapeRole::Active | ShapeRole::Target | ShapeRole::Trigger))
+        .map(|sh| plan_shape_reach_ft(sh, pos))
+        .fold(0.0, f64::max)
+        .min(10.0 * FT_PER_NM)
+}
+
 /// Scope radius in feet for the view.
 pub fn scope_range_ft(kind: ViewKind, snap: &StatusSnapshot, sp: &SpatialSnapshot) -> f64 {
     let pos = snap.state.position_ft;
@@ -1490,6 +1513,7 @@ pub fn scope_range_ft(kind: ViewKind, snap: &StatusSnapshot, sp: &SpatialSnapsho
                 }
                 req = req.max(pos.distance_to(l.leg.start_ft)).max(pos.distance_to(l.leg.end_ft));
             }
+            req = req.max(plan_reach_ft(ov, pos));
             pick_range((req * 1.1 / FT_PER_NM).min(10.0), &SCOPE_RANGES_NM) * FT_PER_NM
         }
         _ => {
@@ -1502,6 +1526,7 @@ pub fn scope_range_ft(kind: ViewKind, snap: &StatusSnapshot, sp: &SpatialSnapsho
             if let Some(w) = snap.last_guidance.as_ref().and_then(|g| g.target_waypoint.as_ref()) {
                 req = req.max(pos.distance_to(w.position_ft) / FT_PER_NM * 1.15);
             }
+            req = req.max(plan_reach_ft(ov, pos) / FT_PER_NM * 1.15);
             pick_range(req, &SCOPE_RANGES_NM) * FT_PER_NM
         }
     }
@@ -1518,6 +1543,77 @@ fn fmt_scope_range(r_ft: f64, kind: ViewKind) -> String {
 
 fn leg_proj(mf: &MapFrame, l: &LabeledLeg) -> (P, P) {
     (mf.project(l.leg.start_ft), mf.project(l.leg.end_ft))
+}
+
+/// How far from `pos` the view must reach to show `sh`: all of a circle
+/// or closed course, the nearest part of a road, the point.
+fn plan_shape_reach_ft(sh: &PlanShape, pos: Vec2) -> f64 {
+    match &sh.geom {
+        ShapeGeom::Circle { center, radius_ft } => pos.distance_to(*center) + radius_ft,
+        ShapeGeom::Ring(pts) => pts.iter().map(|p| pos.distance_to(*p)).fold(0.0, f64::max),
+        g => pos.distance_to(g.nearest_point(pos)),
+    }
+}
+
+/// The plan's geometry: the step being flown (guide), what it flies to
+/// (lock, with a leader), what a turn waits for (caution, marching),
+/// and constraints (violet, dashed; red and blinking when broken).
+/// Labels sit at the shape's nearest point, or on the scope edge toward
+/// it when it's out of range.
+#[allow(clippy::too_many_arguments)]
+fn draw_plan(pen: &mut Pen, mf: &MapFrame, ov: &SpatialOverlay, pal: &Palette, fr: u64, r: f64, pos: Vec2) {
+    let d = pen.dot();
+    let march = (fr as f64) * 0.6 * d;
+    for sh in &ov.plan {
+        let color = match sh.role {
+            ShapeRole::Active => pal.guide,
+            ShapeRole::Target => pal.lock,
+            ShapeRole::Trigger => pal.caution,
+            ShapeRole::Constraint => pal.constraint,
+            ShapeRole::Violating => {
+                if pulse(fr, 6) > 0.5 { pal.warn } else { pal.warn_dim() }
+            }
+        };
+        let seg = |pen: &mut Pen, a: P, b: P| match sh.role {
+            ShapeRole::Active | ShapeRole::Target => pen.line(a, b, color),
+            ShapeRole::Trigger => pen.dashed(a, b, color, 2.5 * d, 1.5 * d, -march),
+            ShapeRole::Constraint | ShapeRole::Violating => pen.dashed(a, b, color, 1.5 * d, 1.5 * d, 0.0),
+        };
+        let pts: Vec<P> = match &sh.geom {
+            ShapeGeom::Point(p) => {
+                let c = mf.project(*p);
+                let k = 2.0 * d;
+                let diamond = [(c.0, c.1 + k), (c.0 + k, c.1), (c.0, c.1 - k), (c.0 - k, c.1)];
+                for i in 0..4 {
+                    pen.line(diamond[i], diamond[(i + 1) % 4], color);
+                }
+                Vec::new()
+            }
+            ShapeGeom::Polyline(v) => v.iter().map(|p| mf.project(*p)).collect(),
+            ShapeGeom::Ring(v) => v.iter().chain(v.first()).map(|p| mf.project(*p)).collect(),
+            ShapeGeom::Circle { center, radius_ft } => (0..=48)
+                .map(|i| mf.project(*center + heading_to_vector(i as f64 * 7.5, *radius_ft)))
+                .collect(),
+        };
+        for w in pts.windows(2) {
+            seg(pen, w[0], w[1]);
+        }
+        let near = mf.project(sh.geom.nearest_point(pos));
+        if sh.role == ShapeRole::Target {
+            pen.dashed((0.0, 0.0), near, pal.lock_dim, 1.0 * d, 2.0 * d, 0.0);
+        }
+        if sh.label.is_empty() {
+            continue;
+        }
+        let dist = (near.0 * near.0 + near.1 * near.1).sqrt();
+        let at = if dist < r * 0.9 {
+            (near.0, near.1 + 2.0 * pen.dot_y())
+        } else {
+            let k = r * 0.8 / dist.max(1.0);
+            (near.0 * k, near.1 * k)
+        };
+        pen.text_low(at.0, at.1, &sh.label, bold(color));
+    }
 }
 
 fn draw_scope(
@@ -1661,8 +1757,13 @@ fn draw_scope(
                 }
             }
         }
+        draw_plan(pen, &mf, ov, &pal, fr, r, s.position_ft);
         pen.trail(&trail, &pal);
         pen.clip_r = None;
+        if let Some(w) = ov.plan_waiting.first() {
+            let (x, y) = (pen.b.x[0], pen.b.y[1]);
+            pen.text(x, y, &w.to_uppercase(), bold(pal.caution));
+        }
         pen.layer();
 
         // Layer 3: targets, bugs, own ship.
@@ -1794,6 +1895,7 @@ fn draw_scope(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::spatial::{PlanShape, ShapeGeom, ShapeRole};
     use crate::core::spatial::SpatialOverlay;
     use crate::guidance::pattern_manager::build_pattern_geometry;
     use crate::types::{Glidepath, GuidanceTargets, StraightLeg, TaxiPose, TrafficSide};
@@ -2249,6 +2351,35 @@ mod tests {
             assert!(text.contains("TAXI") && text.contains("HOLD SHORT"), "{text}");
         }
         dump(&render(widget(&s, &sp, &t, 4), 60, 22));
+    }
+
+    #[test]
+    fn renders_the_plan_trigger_constraint_and_what_it_waits_for() {
+        let f = RunwayFrame::new(runway());
+        let mut s = snap_at(Some(FlightPhase::Downwind), -2000.0, 4000.0, 1000.0, false);
+        s.state.heading_deg = 130.0;
+        s.state.track_deg = 130.0;
+        let road = vec![f.to_world_frame(Vec2::new(-7000.0, 9000.0)), f.to_world_frame(Vec2::new(-7000.0, -9000.0))];
+        let fence = vec![f.to_world_frame(Vec2::new(3000.0, 9000.0)), f.to_world_frame(Vec2::new(3000.0, -9000.0))];
+        let mut ov = pattern_overlay(Some(1));
+        ov.plan = vec![
+            PlanShape { label: "BASE @ NORDHOFF".into(), role: ShapeRole::Trigger, geom: ShapeGeom::Polyline(road) },
+            PlanShape { label: "SOUTH OF US-101".into(), role: ShapeRole::Constraint, geom: ShapeGeom::Polyline(fence) },
+            PlanShape {
+                label: "360".into(),
+                role: ShapeRole::Active,
+                geom: ShapeGeom::Circle { center: f.to_world_frame(Vec2::new(-2000.0, 5000.0)), radius_ft: 1000.0 },
+            },
+        ];
+        ov.plan_waiting = vec!["waiting for ATC: base".into()];
+        let sp = spatial(ov);
+        let t = Trail::default();
+        for frame in [0, 7] {
+            let text = buffer_text(&render(widget(&s, &sp, &t, frame), 80, 30));
+            assert!(text.contains("BASE @ NORDHOFF"), "{text}");
+            assert!(text.contains("WAITING FOR ATC: BASE"), "{text}");
+        }
+        dump(&render(widget(&s, &sp, &t, 3), 80, 30));
     }
 
     #[test]

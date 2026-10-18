@@ -23,6 +23,11 @@ cargo run --release -- --pilot-llm-provider claude-code --pilot-llm-model claude
 cargo run --release --bin eval -- --scenario evals/plan/B1-turn-base-at-the-118.yaml --pilot-llm-provider claude-code --pilot-llm-model claude-sonnet-5-5 -v
 uv run scripts/eval/run_plan_scenarios.py          # all of evals/plan, pass/fail table
 
+# Scripted demo take (demo/README.md): starts the flight, scripted ATC
+# cues spoken over a radio voice, OBS scenes; F6 rolls / next cue.
+scripts/demo/take.sh demo/kvny-16r.yaml
+cargo run --release --bin demo -- check demo/kvny-16r.yaml   # also: audition, discover, broll, mixdown
+
 # Offline deterministic simulation (no X-Plane, no OpenAI key).
 cargo run --release -- --backend simple
 cargo run --release -- --backend simple --crosswind-kt 10 --log-csv output/flight.csv --plots-dir output/plots

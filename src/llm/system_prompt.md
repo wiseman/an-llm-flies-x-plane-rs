@@ -469,9 +469,12 @@ different exit (`choose_runway_exit`, which re-plans the taxi from the
 new exit), or a different parking spot or route (`engage_park` once
 stopped clear). `list_runway_exits` shows what's available.
 
-With no exit chosen, or if the chosen exit is missed (too fast at the
-intersection), the aircraft brakes to a stop on the centerline short of
-the runway end, still in `rollout`, and any arrival plan is put on hold.
+If the chosen exit is missed (a float, or too fast at the intersection),
+the aircraft takes the next exit `plan_arrival` planned behind it, and
+taxis to parking from there; an event names the exit it took. With no
+exit chosen, or no backup left, it brakes to a stop on the centerline
+short of the runway end, still in `rollout`, and any arrival plan is put
+on hold.
 A `completed: landing_rollout` heartbeat tells you it has stopped there.
 `landing_rollout` keeps the brakes on there rather than releasing on the
 runway. Get off promptly: either `choose_runway_exit` for an exit still

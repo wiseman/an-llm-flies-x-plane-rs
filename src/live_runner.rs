@@ -419,6 +419,9 @@ use crossbeam_channel::unbounded;
 use parking_lot::Mutex as PLMutex;
 
 use crate::bus::FileLog;
+use crate::demo::director::{DemoCommand, DemoDirector, DemoUi, Stage};
+use crate::demo::obs::ObsHandle;
+use crate::demo::xplane::XpCommander;
 use crate::core::dead_stick_profile::DeadStickLandingProfile;
 use crate::core::profiles::PatternFlyProfile;
 use crate::llm::backend::{LlmProvider, ReasoningEffort};
@@ -462,9 +465,39 @@ pub struct LiveRunConfig {
     /// Initial pilot persona. Can be swapped at runtime via the `/mode`
     /// TUI command.
     pub pilot_mode: PilotMode,
+    /// A scripted demo take (`--demo`).
+    pub demo: Option<DemoRunConfig>,
+}
+
+#[derive(Debug, Clone)]
+pub struct DemoRunConfig {
+    pub script: PathBuf,
+    /// Start the flight from the script (else fly the loaded one).
+    pub init_flight: bool,
+    pub audio: bool,
+    pub obs: bool,
 }
 
 pub fn run_live_xplane(base_config: ConfigBundle, runtime: LiveRunConfig) -> Result<()> {
+    // A demo take starts its own flight first.
+    let demo_script = match &runtime.demo {
+        Some(d) => Some(crate::demo::script::DemoScript::load(&d.script)?),
+        None => None,
+    };
+    if let (Some(d), Some(script)) = (&runtime.demo, &demo_script) {
+        if d.init_flight {
+            let dir = runtime
+                .apt_dat_cache_dir
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("a demo needs the apt.dat cache to place the start"))?;
+            let fix = crate::demo::xplane::start_fix(script, dir)?;
+            eprintln!(
+                "demo: starting the flight at {:.5},{:.5} {:.0} ft, heading {:.0}...",
+                fix.lat_deg, fix.lon_deg, fix.alt_msl_ft, fix.heading_deg
+            );
+            crate::demo::xplane::init_flight(&runtime.xplane_host, runtime.xplane_port, script, &fix)?;
+        }
+    }
     let sample = probe_bootstrap_sample(
         &runtime.xplane_host,
         runtime.xplane_port,
@@ -489,6 +522,26 @@ pub fn run_live_xplane(base_config: ConfigBundle, runtime: LiveRunConfig) -> Res
 
     let pilot_arc = Arc::new(PLMutex::new(PilotCore::new(live_config.clone())));
     engage_startup_profile(&pilot_arc, &live_config, &runtime.engage_profile)?;
+    // A demo hands over in the air with the autopilot holding heading,
+    // altitude and speed, as an airborne eval does.
+    if let Some(script) = &demo_script {
+        use crate::core::profiles::{AltitudeHoldProfile, HeadingHoldProfile, SpeedHoldProfile};
+        let ias = match &script.start {
+            crate::eval_scenario::Start::Airborne { airborne } => airborne.ias_kt,
+            _ => live_config.performance.downwind_speed_kt,
+        };
+        let _ = pilot_arc.lock().engage_profiles(vec![
+            Box::new(HeadingHoldProfile::new(sample.posi.heading_deg, live_config.limits.max_bank_pattern_deg)),
+            Box::new(AltitudeHoldProfile::new(sample.posi.altitude_msl_m * crate::types::M_TO_FT)),
+            Box::new(SpeedHoldProfile::new(ias)),
+        ]);
+        if !script.xplane.datarefs.is_empty() {
+            let w: Vec<(String, f64)> = script.xplane.datarefs.iter().map(|(k, v)| (k.clone(), *v)).collect();
+            if let Err(e) = bridge.write_dataref_values(&w) {
+                eprintln!("demo: writing datarefs: {e}");
+            }
+        }
+    }
 
     let file_log = runtime
         .log_file_path
@@ -629,6 +682,16 @@ pub fn run_live_xplane(base_config: ConfigBundle, runtime: LiveRunConfig) -> Res
         None
     };
 
+    // A demo's radio and the channel the pilot's tools tell it things on.
+    let (demo_events_tx, demo_events_rx) = unbounded::<crate::demo::director::DemoEvent>();
+    let demo_radio = match (&runtime.demo, &demo_script) {
+        (Some(d), Some(script)) if d.audio => Some(crate::demo::radio_voice::RadioHandle::spawn(script.audio.clone(), bus.clone())),
+        _ => None,
+    };
+    let demo_hooks = demo_script.as_ref().map(|_| {
+        Arc::new(crate::demo::director::DemoHooks { radio: demo_radio.clone(), events: demo_events_tx.clone() })
+    });
+
     let tool_ctx = Arc::new(ToolContext {
         pilot: pilot_arc.clone(),
         bridge: Some(tool_bridge),
@@ -644,7 +707,60 @@ pub fn run_live_xplane(base_config: ConfigBundle, runtime: LiveRunConfig) -> Res
         tool_counters: None,
         taxi_graphs: Default::default(),
         sim_atc: None,
+        demo: demo_hooks.clone(),
     });
+
+    // The demo director: the script's runway as the pilot's reference,
+    // its cues resolved, and the stage (X-Plane, radio, OBS, the TUI).
+    let (demo_control_tx, demo_control_rx) = unbounded::<DemoCommand>();
+    let (demo_ui_tx, demo_ui_rx) = unbounded::<DemoUi>();
+    let mut demo_director: Option<DemoDirector> = None;
+    if let (Some(d), Some(script)) = (&runtime.demo, demo_script.clone()) {
+        if let crate::eval_scenario::Start::Airborne { airborne } = &script.start {
+            let side = if airborne.right_ft >= 0.0 { "right" } else { "left" };
+            match crate::llm::tools::runway_config(&tool_ctx, &script.airport, &airborne.runway, side) {
+                Ok(cfg) => {
+                    pilot_arc.lock().set_reference_config(cfg.clone());
+                    *tool_ctx.config.lock() = cfg;
+                }
+                Err(e) => bus.push_log_kind(LogKind::Error, format!("[demo] reference runway: {e:#}")),
+            }
+        }
+        let schedule = {
+            let airports = crate::llm::tools::DuckAirports { ctx: &tool_ctx };
+            let mut r = crate::plan::resolve::Resolver::new(bridge.georef, &crate::plan::gazetteer::GAZETTEER, &airports);
+            crate::eval_scenario::MessageSchedule::with_order(&script.messages(), &mut r, script.sequential)
+                .context("resolving the demo's cues")?
+        };
+        let stage = Stage {
+            xp: Some(XpCommander::spawn(runtime.xplane_host.clone(), runtime.xplane_port, bus.clone())),
+            bridge: tool_ctx.bridge.clone(),
+            radio: demo_radio.clone(),
+            obs: d.obs.then(|| ObsHandle::spawn(bus.clone())),
+            ui: runtime.interactive.then(|| demo_ui_tx.clone()),
+        };
+        let timeline = runtime
+            .log_file_path
+            .as_ref()
+            .and_then(|p| p.parent().map(|p| p.to_path_buf()))
+            .unwrap_or_else(|| PathBuf::from("output"))
+            .join(format!("{}.demo.jsonl", runtime.session_stem));
+        let mut director = DemoDirector::new(
+            script,
+            schedule,
+            input_tx.clone(),
+            bus.clone(),
+            tool_ctx.radio_log.clone(),
+            demo_control_rx,
+            demo_events_rx,
+            stage,
+            Some(&timeline),
+        );
+        director.prepare();
+        bus.push_log_kind(LogKind::Demo, format!("timeline={}", timeline.display()));
+        demo_director = Some(director);
+    }
+    let demo_link = demo_director.is_some();
 
     let llm_stop = Arc::new(AtomicBool::new(false));
     let llm_thread = brain.spawn_worker(WorkerArgs {
@@ -716,6 +832,7 @@ pub fn run_live_xplane(base_config: ConfigBundle, runtime: LiveRunConfig) -> Res
         let stop_for_loop = control_stop.clone();
         let pump_for_loop = heartbeat_pump.clone();
         let track_for_loop = track_recorder.clone();
+        let demo_for_loop = demo_director.take();
         let control_thread = thread::Builder::new().name("control-loop".into()).spawn(move || {
             run_control_loop(
                 bridge_for_loop,
@@ -725,6 +842,7 @@ pub fn run_live_xplane(base_config: ConfigBundle, runtime: LiveRunConfig) -> Res
                 stop_for_loop,
                 pump_for_loop,
                 track_for_loop,
+                demo_for_loop,
             );
         })?;
         let ptt = if runtime.voice_enabled {
@@ -772,6 +890,7 @@ pub fn run_live_xplane(base_config: ConfigBundle, runtime: LiveRunConfig) -> Res
             ptt,
             aircraft_label,
             runtime.llm_model.clone(),
+            demo_link.then(|| crate::tui::DemoTuiLink { control_tx: demo_control_tx.clone(), ui_rx: demo_ui_rx }),
         );
         control_stop.store(true, Ordering::Release);
         llm_stop.store(true, Ordering::Release);
@@ -782,6 +901,22 @@ pub fn run_live_xplane(base_config: ConfigBundle, runtime: LiveRunConfig) -> Res
         bus.close();
         tui_result?;
     } else {
+        // Headless demo: `next`, `hold` and `skip` on stdin drive the cues.
+        if demo_director.is_some() {
+            let tx = demo_control_tx.clone();
+            thread::spawn(move || {
+                use std::io::BufRead;
+                for line in std::io::stdin().lock().lines().map_while(Result::ok) {
+                    let cmd = match line.trim() {
+                        "next" | "n" => DemoCommand::Next,
+                        "hold" | "h" => DemoCommand::Hold,
+                        "skip" | "s" => DemoCommand::Skip,
+                        _ => continue,
+                    };
+                    let _ = tx.send(cmd);
+                }
+            });
+        }
         run_control_loop(
             bridge.clone(),
             pilot_arc.clone(),
@@ -790,6 +925,7 @@ pub fn run_live_xplane(base_config: ConfigBundle, runtime: LiveRunConfig) -> Res
             control_stop.clone(),
             heartbeat_pump.clone(),
             track_recorder.clone(),
+            demo_director.take(),
         );
         llm_stop.store(true, Ordering::Release);
         let _ = llm_thread.join();
@@ -826,6 +962,7 @@ fn finalize_track(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_control_loop(
     bridge: Arc<XPlaneWebBridge>,
     pilot: Arc<PLMutex<PilotCore>>,
@@ -834,6 +971,7 @@ fn run_control_loop(
     stop: Arc<AtomicBool>,
     heartbeat_pump: Option<Arc<HeartbeatPump>>,
     track_recorder: Option<Arc<PLMutex<crate::track::TrackRecorder>>>,
+    mut demo: Option<DemoDirector>,
 ) {
     let mut last_state_time_s: Option<f64> = None;
     let target_period = Duration::from_secs_f64(1.0 / runtime.control_hz.max(1.0));
@@ -872,18 +1010,45 @@ fn run_control_loop(
             }
         };
         let dt = resolve_dt(raw_state.time_s, last_state_time_s, target_period.as_secs_f64());
+        // In a demo's paused standby (or with X-Plane paused), leave the
+        // controls alone: updating on a frozen state winds the
+        // controllers up.
+        let frozen = demo.as_ref().is_some_and(|d| {
+            d.is_standby() || last_state_time_s.is_some_and(|t| raw_state.time_s <= t)
+        });
         last_state_time_s = Some(raw_state.time_s);
-        let commands = {
-            let mut p = pilot.lock();
-            let result = std::panic::AssertUnwindSafe(|| p.update(&raw_state, dt));
-            let (_, commands) = result();
-            commands
-        };
-        if let Err(e) = bridge.write_commands(&commands) {
-            bus.push_log_kind(
-                LogKind::Error,
-                format!("[bridge] write error: {}", e),
-            );
+        if !frozen {
+            let commands = {
+                let mut p = pilot.lock();
+                let result = std::panic::AssertUnwindSafe(|| p.update(&raw_state, dt));
+                let (_, commands) = result();
+                commands
+            };
+            if let Err(e) = bridge.write_commands(&commands) {
+                bus.push_log_kind(
+                    LogKind::Error,
+                    format!("[bridge] write error: {}", e),
+                );
+            }
+        }
+        if let Some(d) = demo.as_mut() {
+            let snap = pilot.lock().latest_snapshot.clone();
+            if let Some(snap) = snap {
+                let st = &snap.state;
+                let sample = crate::eval_scenario::Sample {
+                    t: raw_state.time_s,
+                    pos: st.position_ft,
+                    alt_msl_ft: st.alt_msl_ft,
+                    alt_agl_ft: st.alt_agl_ft,
+                    track_deg: st.track_deg,
+                    phase: snap.phase,
+                    on_ground: st.on_ground,
+                    crashed: false,
+                    bank_deg: st.roll_deg,
+                    vs_fpm: st.vs_fpm,
+                };
+                d.tick(&sample, if frozen { 0.0 } else { dt });
+            }
         }
         if let Some(pump) = heartbeat_pump.as_ref() {
             pump.check_and_emit();

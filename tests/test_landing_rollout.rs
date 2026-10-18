@@ -5,7 +5,7 @@ mod common;
 use approx::assert_abs_diff_eq;
 use common::exit;
 use xplane_pilot::config::{load_default_config_bundle, ConfigBundle};
-use xplane_pilot::core::landing_rollout::{LandingPlanHolder, LandingRolloutProfile};
+use xplane_pilot::core::landing_rollout::{ExitOption, LandingPlanHolder, LandingRolloutProfile};
 use xplane_pilot::core::mission_manager::PilotCore;
 use xplane_pilot::core::profiles::{GuidanceProfile, PatternFlyProfile, TaxiProfile};
 use xplane_pilot::guidance::runway_geometry::RunwayFrame;
@@ -38,8 +38,12 @@ fn selected_runway_exit_slows_without_leaving_centerline_early() {
     );
     let tick = p.contribute(&on_ground(&frame, 2800.0, 0.0, 15.0), 0.2);
     assert_eq!(tick.contribution.lateral_mode, Some(LateralMode::RolloutCenterline));
-    assert_eq!(tick.contribution.target_speed_kt, Some(5.0));
     assert!(tick.contribution.target_path.is_none());
+    // Braking for the turn only as it comes up: still at turnoff speed
+    // 200 ft out, close to turn speed at the turn.
+    assert_eq!(tick.contribution.target_speed_kt, Some(15.0));
+    let near = p.contribute(&on_ground(&frame, 2975.0, 0.0, 8.0), 0.2).contribution.target_speed_kt.unwrap();
+    assert!((5.0..7.5).contains(&near), "{near}");
 }
 
 #[test]
@@ -81,6 +85,36 @@ fn missed_runway_exit_never_commands_a_cutback() {
     let tick = p.contribute(&on_ground(&frame, runway_length - 100.0, 0.0, 15.0), 0.2);
     assert_eq!(tick.contribution.lateral_mode, Some(LateralMode::RolloutCenterline));
     assert_eq!(tick.contribution.target_speed_kt, Some(0.0));
+}
+
+#[test]
+fn a_missed_exit_falls_back_to_the_next_one_it_can_make() {
+    let (cfg, frame) = setup();
+    let fallbacks = vec![
+        // Too close to slow for once B is missed at 3070 ft.
+        ExitOption { exit: exit("C", &[(3200.0, 0.0), (3150.0, 100.0)]), arrival: None },
+        ExitOption { exit: exit("D", &[(4500.0, 0.0), (4450.0, 100.0)]), arrival: None },
+    ];
+    let mut p = LandingRolloutProfile::new(cfg, frame.clone(), Some(exit("B", &[(3000.0, 0.0), (2950.0, 100.0)])))
+        .with_fallback_exits(fallbacks);
+    p.contribute(&on_ground(&frame, 3070.0, 0.0, 30.0), 0.2);
+    assert_eq!(p.preferred_exit().map(|e| e.taxiway_name.as_str()), Some("D"));
+    let events = p.take_events();
+    assert_eq!(events.len(), 1, "{events:?}");
+    assert!(events[0].contains("missed exit B") && events[0].contains("taking D"), "{events:?}");
+
+    // D is flown like any chosen exit.
+    let tick = p.contribute(&on_ground(&frame, 4495.0, 0.0, 5.0), 0.2);
+    assert_eq!(p.phase, FlightPhase::RunwayExit);
+    assert_eq!(tick.contribution.lateral_mode, Some(LateralMode::TaxiFollow));
+
+    // Missing the last one says so, once.
+    let mut p = LandingRolloutProfile::new(load_default_config_bundle(), frame.clone(), Some(exit("B", &[(3000.0, 0.0), (2950.0, 100.0)])));
+    p.contribute(&on_ground(&frame, 3070.0, 0.0, 30.0), 0.2);
+    p.contribute(&on_ground(&frame, 3100.0, 0.0, 28.0), 0.2);
+    let events = p.take_events();
+    assert_eq!(events.len(), 1, "{events:?}");
+    assert!(events[0].contains("no planned exit ahead"), "{events:?}");
 }
 
 #[test]

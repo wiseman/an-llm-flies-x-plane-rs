@@ -273,7 +273,6 @@ pub fn post_air_start(
     heading_true_deg: f64,
     speed_mps: f64,
 ) -> Result<()> {
-    let url = format!("http://{host}:{port}/api/v3/flight");
     let body = serde_json::json!({
         "data": {
             "aircraft": {
@@ -290,10 +289,20 @@ pub fn post_air_start(
             "engine_status": {"all_engines": {"running": true}}
         }
     });
-    let resp = ureq::post(&url)
-        .set("Content-Type", "application/json")
-        .send_string(&body.to_string())
-        .map_err(|e| anyhow!("X-Plane flight POST failed: {e}"))?;
+    post_flight_init(host, port, &body)
+}
+
+/// POST `/api/v3/flight` with a full flight-init body (`{"data": {...}}`:
+/// aircraft, a start, engine status, local time, weather).
+pub fn post_flight_init(host: &str, port: u16, body: &serde_json::Value) -> Result<()> {
+    let url = format!("http://{host}:{port}/api/v3/flight");
+    let resp = match ureq::post(&url).set("Content-Type", "application/json").send_string(&body.to_string()) {
+        Ok(r) => r,
+        Err(ureq::Error::Status(code, r)) => {
+            bail!("X-Plane returned {code} on flight init: {}", r.into_string().unwrap_or_default())
+        }
+        Err(e) => bail!("X-Plane flight POST failed: {e}"),
+    };
     if resp.status() / 100 != 2 {
         bail!(
             "X-Plane returned {} on flight init: {}",
@@ -306,6 +315,12 @@ pub fn post_air_start(
 
 /// Resolve a named X-Plane command and fire it once.
 pub fn activate_command(host: &str, port: u16, name: &str) -> Result<()> {
+    activate_command_for(host, port, name, 0.0)
+}
+
+/// Resolve a named X-Plane command and hold it `duration_s` (0 = one
+/// press).
+pub fn activate_command_for(host: &str, port: u16, name: &str, duration_s: f64) -> Result<()> {
     let lookup = format!("http://{host}:{port}/api/v3/commands");
     let resp = ureq::get(&lookup)
         .query("filter[name]", name)
@@ -318,7 +333,7 @@ pub fn activate_command(host: &str, port: u16, name: &str) -> Result<()> {
     let url = format!("http://{host}:{port}/api/v3/command/{id}/activate");
     ureq::post(&url)
         .set("Content-Type", "application/json")
-        .send_string(r#"{"duration":0}"#)
+        .send_string(&serde_json::json!({"duration": duration_s}).to_string())
         .map_err(|e| anyhow!("command activate for {name:?} failed: {e}"))?;
     Ok(())
 }

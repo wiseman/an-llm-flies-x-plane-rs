@@ -7,7 +7,7 @@ use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
 use anyhow::{anyhow, bail, Context, Result};
 use duckdb::Connection;
 
-use crate::types::{haversine_m, initial_bearing_deg, wrap_degrees_180, M_TO_FT};
+use crate::types::{haversine_m, initial_bearing_deg, wrap_degrees_180, Vec2, M_TO_FT};
 
 #[derive(Debug, Clone)]
 pub struct TaxiNode {
@@ -484,6 +484,113 @@ pub fn runway_exit_paths(
                 .unwrap_or_default()
         })
         .collect()
+}
+
+/// Past a painted hold-short line by this much (a C172 is ~27 ft long).
+pub const CLEAR_OF_HOLD_LINE_FT: f64 = 40.0;
+/// How far past the active zone an exit may be extended to clear a line.
+const MAX_HOLD_EXTENSION_FT: f64 = 600.0;
+
+/// Extend an exit beyond its first clear node until the aircraft is
+/// `CLEAR_OF_HOLD_LINE_FT` past a painted hold-short line (`holds`, as
+/// segments in the same feet frame `to_ft` projects into). The taxi
+/// network's active zone can end short of the paint, so a stop there
+/// leaves the tail over the line. The walk takes the straightest edge on
+/// and stops partway along it once clear; with no line crossed within
+/// reach (or no paint at the airport) the path is left as it was.
+pub fn extend_past_hold_lines(
+    graph: &TaxiGraph,
+    path: &mut RunwayExitPath,
+    holds: &[(Vec2, Vec2)],
+    to_ft: &dyn Fn(f64, f64) -> Vec2,
+) {
+    if holds.is_empty() || path.nodes.len() < 2 {
+        return;
+    }
+    // Arc length along `nodes` where it first crosses a line, and its
+    // total length.
+    let crossing = |nodes: &[TaxiNode]| -> (Option<f64>, f64) {
+        let pts: Vec<Vec2> = nodes.iter().map(|n| to_ft(n.latitude_deg, n.longitude_deg)).collect();
+        let mut s = 0.0;
+        let mut first = None;
+        for w in pts.windows(2) {
+            let seg = (w[1] - w[0]).length();
+            if first.is_none() {
+                let hit = holds.iter().filter_map(|(a, b)| segment_intersection_t(w[0], w[1], *a, *b)).fold(f64::INFINITY, f64::min);
+                if hit.is_finite() {
+                    first = Some(s + hit * seg);
+                }
+            }
+            s += seg;
+        }
+        (first, s)
+    };
+    let original = path.nodes.len();
+    let mut nodes = path.nodes.clone();
+    let mut added = 0.0;
+    loop {
+        if let (Some(at), total) = crossing(&nodes) {
+            let goal = at + CLEAR_OF_HOLD_LINE_FT;
+            if total >= goal {
+                // An added edge can run far past the line (to the next
+                // junction); stop partway along it instead.
+                if nodes.len() > original {
+                    let [.., a, b] = nodes.as_slice() else { return };
+                    let seg = (to_ft(b.latitude_deg, b.longitude_deg) - to_ft(a.latitude_deg, a.longitude_deg)).length();
+                    let into = seg - (total - goal);
+                    if into > 0.0 && into < seg {
+                        let f = into / seg;
+                        let cut = TaxiNode {
+                            node_id: b.node_id,
+                            latitude_deg: a.latitude_deg + (b.latitude_deg - a.latitude_deg) * f,
+                            longitude_deg: a.longitude_deg + (b.longitude_deg - a.longitude_deg) * f,
+                            usage: b.usage.clone(),
+                        };
+                        *nodes.last_mut().unwrap() = cut;
+                    }
+                }
+                path.nodes = nodes;
+                return;
+            }
+        }
+        if added > MAX_HOLD_EXTENSION_FT {
+            return;
+        }
+        let [.., prev, last] = nodes.as_slice() else { return };
+        let heading = initial_bearing_deg(prev.latitude_deg, prev.longitude_deg, last.latitude_deg, last.longitude_deg);
+        let next = graph
+            .adj
+            .get(&last.node_id)
+            .into_iter()
+            .flatten()
+            .filter(|(id, _)| !nodes.iter().any(|n| n.node_id == *id))
+            .filter_map(|(id, _)| graph.nodes.get(id))
+            .min_by(|a, b| {
+                let turn = |n: &TaxiNode| {
+                    wrap_degrees_180(initial_bearing_deg(last.latitude_deg, last.longitude_deg, n.latitude_deg, n.longitude_deg) - heading).abs()
+                };
+                turn(a).total_cmp(&turn(b))
+            })
+            .cloned();
+        let Some(next) = next else { return };
+        added += haversine_m(last.latitude_deg, last.longitude_deg, next.latitude_deg, next.longitude_deg) * M_TO_FT;
+        nodes.push(next);
+    }
+}
+
+/// Where segment `p0→p1` crosses segment `q0→q1`, as a fraction along
+/// `p0→p1`.
+fn segment_intersection_t(p0: Vec2, p1: Vec2, q0: Vec2, q1: Vec2) -> Option<f64> {
+    let r = p1 - p0;
+    let s = q1 - q0;
+    let denom = r.x * s.y - r.y * s.x;
+    if denom.abs() < 1e-9 {
+        return None;
+    }
+    let d = q0 - p0;
+    let t = (d.x * s.y - d.y * s.x) / denom;
+    let u = (d.x * r.y - d.y * r.x) / denom;
+    ((0.0..=1.0).contains(&t) && (0.0..=1.0).contains(&u)).then_some(t)
 }
 
 /// Resolve the actual apt.dat centerline paths for one named runway exit.
@@ -1470,6 +1577,37 @@ mod tests {
             mk_taxiway_edge(4, 3, "D", ""),
         ];
         TaxiGraph::new("KTEST", nodes, edges)
+    }
+
+    #[test]
+    fn an_exit_ends_past_the_painted_hold_line() {
+        // Exit K runs north off an east-west runway: the active zone ends
+        // at node 2 (250 ft), the paint is at 256 ft, and the next node
+        // (the parallel taxiway, 1000 ft on) is far past it.
+        let ft = 1.0 / 364_000.0;
+        let mk = |id, north_ft: f64| TaxiNode {
+            node_id: id,
+            latitude_deg: 34.0 + north_ft * ft,
+            longitude_deg: -118.0,
+            usage: "both".to_string(),
+        };
+        let nodes: HashMap<i64, TaxiNode> = [(1, mk(1, 0.0)), (2, mk(2, 250.0)), (3, mk(3, 1250.0))].into();
+        let graph = TaxiGraph::new("KTEST", nodes.clone(), vec![mk_taxiway_edge(1, 2, "K", "ils:09"), mk_taxiway_edge(2, 3, "K", "")]);
+        let to_ft = |lat: f64, lon: f64| Vec2::new((lon + 118.0) / ft, (lat - 34.0) / ft);
+        let hold = (Vec2::new(-50.0, 256.0), Vec2::new(50.0, 256.0));
+        let mut path = RunwayExitPath { taxiway_name: "K".into(), nodes: vec![nodes[&1].clone(), nodes[&2].clone()] };
+        extend_past_hold_lines(&graph, &mut path, &[hold], &to_ft);
+        let end = path.nodes.last().unwrap();
+        let north = to_ft(end.latitude_deg, end.longitude_deg).y;
+        assert!((north - (256.0 + CLEAR_OF_HOLD_LINE_FT)).abs() < 1.0, "ends {north:.0} ft out");
+
+        // No paint, or paint already well behind the end: unchanged.
+        let mut bare = RunwayExitPath { taxiway_name: "K".into(), nodes: vec![nodes[&1].clone(), nodes[&2].clone()] };
+        extend_past_hold_lines(&graph, &mut bare, &[], &to_ft);
+        assert_eq!(bare.nodes.len(), 2);
+        let early = (Vec2::new(-50.0, 150.0), Vec2::new(50.0, 150.0));
+        extend_past_hold_lines(&graph, &mut bare, &[early], &to_ft);
+        assert_eq!(bare.nodes.len(), 2);
     }
 
     #[test]

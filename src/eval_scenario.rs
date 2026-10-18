@@ -45,6 +45,9 @@ pub struct Scenario {
     /// Other aircraft flying scripted paths.
     #[serde(default)]
     pub traffic: Vec<ScenarioTraffic>,
+    /// Messages without `after` follow the one before them.
+    #[serde(default)]
+    pub sequential: bool,
     /// Steady wind for the whole run.
     #[serde(default)]
     pub wind: Option<ScenarioWind>,
@@ -247,20 +250,51 @@ pub struct AirborneStart {
     pub ias_kt: f64,
 }
 
-/// One scripted transmission. Fires at `at_s` sim seconds, or when
-/// `when` first holds (then after `delay_s`).
-#[derive(Debug, Clone, Deserialize)]
+/// One scripted transmission (a cue). It is *armed* from the start, or
+/// once the cue named by `after` has been sent; then it triggers when
+/// every condition it gives holds (`at_s` sim seconds, `when`, a pilot
+/// transmission since arming, `turned_deg` of turn since arming), and
+/// goes out `delay_s` later. `when` and `elapsed` count from arming.
+#[derive(Debug, Clone, Default, Deserialize)]
 pub struct ScenarioMessage {
+    /// Name for `after` and the demo timeline.
+    #[serde(default)]
+    pub id: Option<String>,
+    /// Arm once this cue has been sent: `prev` or a cue id.
+    #[serde(default)]
+    pub after: Option<String>,
     #[serde(default)]
     pub at_s: Option<f64>,
     #[serde(default)]
     pub when: Option<Cond>,
+    /// Trigger on the pilot's first radio transmission after arming (a
+    /// readback), or `readback_timeout_s` after arming without one.
+    #[serde(default)]
+    pub after_readback: bool,
+    #[serde(default)]
+    pub readback_timeout_s: Option<f64>,
+    /// Trigger once the aircraft has turned this far (either way, net)
+    /// since arming: the end of a 360.
+    #[serde(default)]
+    pub turned_deg: Option<f64>,
+    /// Only a "next cue" command sends it. Rehearsals (no one at the
+    /// keys) send it `rehearse_after_s` (default 20) after arming.
+    #[serde(default)]
+    pub manual: bool,
+    #[serde(default)]
+    pub rehearse_after_s: Option<f64>,
     #[serde(default)]
     pub delay_s: f64,
     #[serde(default)]
     pub atc: Option<String>,
     #[serde(default)]
     pub operator: Option<String>,
+}
+
+impl ScenarioMessage {
+    fn has_trigger(&self) -> bool {
+        self.at_s.is_some() || self.when.is_some() || self.after_readback || self.turned_deg.is_some() || self.manual
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -431,9 +465,15 @@ fn default_low_turn_bank() -> f64 {
     10.0
 }
 
+/// A scenario, or a demo script (`demo/*.yaml`, with `cues:`) as the
+/// scenario that rehearses it.
 pub fn load(path: &Path) -> Result<Scenario> {
     let text = std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-    serde_yaml_ng::from_str(&text).with_context(|| format!("parsing {}", path.display()))
+    let value: serde_yaml_ng::Value = serde_yaml_ng::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
+    if value.get("cues").is_some() {
+        return Ok(crate::demo::script::DemoScript::load(path)?.to_scenario());
+    }
+    serde_yaml_ng::from_value(value).with_context(|| format!("parsing {}", path.display()))
 }
 
 /// One recorded tick.
@@ -460,51 +500,146 @@ pub struct CheckResult {
 
 /// Scripted messages waiting to fire, with their conditions resolved.
 pub struct MessageSchedule {
-    pending: Vec<(usize, ScenarioMessage, Option<RCond>, Option<f64>)>,
+    pending: Vec<PendingMsg>,
     pub sent_at: Vec<Option<f64>>,
     prev_pos: Option<Vec2>,
 }
 
+struct PendingMsg {
+    msg: ScenarioMessage,
+    cond: Option<RCond>,
+    /// The cue this one waits for (index), if any.
+    after: Option<usize>,
+    armed_at: Option<f64>,
+    triggered_at: Option<f64>,
+    turned_deg: f64,
+    prev_track: Option<f64>,
+}
+
+/// What a schedule needs to know besides the aircraft's state.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct ScheduleInputs<'a> {
+    /// Sim times of the pilot's radio transmissions so far.
+    pub pilot_tx_times: &'a [f64],
+    /// Send the next unsent cue now, whatever its triggers.
+    pub force_next: bool,
+    /// Nobody at the keys (a rehearsal): manual cues send themselves.
+    pub rehearse_manual: bool,
+}
+
+/// Where the next unsent cue stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CueState {
+    /// Waiting for the cue it follows.
+    Waiting,
+    Armed,
+    /// Triggered; out after its delay.
+    Triggered,
+}
+
 impl MessageSchedule {
     pub fn new(messages: &[ScenarioMessage], resolver: &mut Resolver) -> Result<Self> {
+        Self::with_order(messages, resolver, false)
+    }
+
+    /// `sequential`: a cue without `after` follows the one before it.
+    pub fn with_order(messages: &[ScenarioMessage], resolver: &mut Resolver, sequential: bool) -> Result<Self> {
         let mut pending = Vec::new();
         for (i, m) in messages.iter().enumerate() {
             let cond = m.when.as_ref().map(|c| RCond::resolve(c, resolver)).transpose()?;
-            if m.at_s.is_none() && cond.is_none() {
-                return Err(anyhow!("message {i} needs at_s or when"));
+            let after = match m.after.as_deref() {
+                Some("prev") => i.checked_sub(1),
+                Some(id) => Some(
+                    messages
+                        .iter()
+                        .position(|o| o.id.as_deref() == Some(id))
+                        .filter(|&k| k != i)
+                        .ok_or_else(|| anyhow!("message {i}: no cue {id:?} to come after"))?,
+                ),
+                None if sequential => i.checked_sub(1),
+                None => None,
+            };
+            if !m.has_trigger() && after.is_none() {
+                return Err(anyhow!("message {i} needs at_s, when, after_readback, turned_deg, manual or after"));
             }
-            pending.push((i, m.clone(), cond, None));
+            pending.push(PendingMsg {
+                msg: m.clone(),
+                cond,
+                after,
+                armed_at: None,
+                triggered_at: None,
+                turned_deg: 0.0,
+                prev_track: None,
+            });
         }
         Ok(Self { sent_at: vec![None; messages.len()], pending, prev_pos: None })
     }
 
     /// Messages due this tick, in order.
     pub fn due(&mut self, s: &Sample, dt: f64) -> Vec<(usize, ScenarioMessage)> {
+        self.due_with(s, dt, &ScheduleInputs::default())
+    }
+
+    pub fn due_with(&mut self, s: &Sample, dt: f64, inp: &ScheduleInputs) -> Vec<(usize, ScenarioMessage)> {
         let prev = self.prev_pos.unwrap_or(s.pos);
         self.prev_pos = Some(s.pos);
         let no_gates = HashSet::new();
         let ctx = s.ctx(prev, dt, &no_gates);
+        let forced = if inp.force_next { self.sent_at.iter().position(|t| t.is_none()) } else { None };
         let mut out = Vec::new();
-        for (i, m, cond, fired_at) in self.pending.iter_mut() {
-            if fired_at.is_none() {
-                let hit = match (m.at_s, cond.as_mut()) {
-                    (Some(at), None) => s.t >= at,
-                    (None, Some(c)) => c.eval(&ctx),
-                    (Some(at), Some(c)) => s.t >= at && c.eval(&ctx),
-                    (None, None) => false,
-                };
-                if hit {
-                    *fired_at = Some(s.t);
+        for i in 0..self.pending.len() {
+            if self.sent_at[i].is_some() {
+                continue;
+            }
+            let after_sent = self.pending[i].after.map(|k| self.sent_at[k].is_some()).unwrap_or(true);
+            let p = &mut self.pending[i];
+            if p.armed_at.is_none() && after_sent {
+                p.armed_at = Some(s.t);
+            }
+            if Some(i) == forced {
+                self.sent_at[i] = Some(s.t);
+                out.push((i, p.msg.clone()));
+                continue;
+            }
+            let Some(armed) = p.armed_at else { continue };
+            if let Some(prev) = p.prev_track.replace(s.track_deg) {
+                p.turned_deg += crate::types::wrap_degrees_180(s.track_deg - prev);
+            }
+            if p.triggered_at.is_none() {
+                let m = &p.msg;
+                let at_ok = m.at_s.is_none_or(|at| s.t >= at);
+                // Evaluated every tick once armed, so latches and elapsed
+                // timers stay current.
+                let when_ok = p.cond.as_mut().is_none_or(|c| c.eval(&ctx));
+                let readback_ok = !m.after_readback
+                    || inp.pilot_tx_times.iter().any(|&tx| tx > armed)
+                    || m.readback_timeout_s.is_some_and(|to| s.t >= armed + to);
+                let turned_ok = m.turned_deg.is_none_or(|deg| p.turned_deg.abs() >= deg);
+                let manual_ok = !m.manual || (inp.rehearse_manual && s.t >= armed + m.rehearse_after_s.unwrap_or(20.0));
+                if at_ok && when_ok && readback_ok && turned_ok && manual_ok {
+                    p.triggered_at = Some(s.t);
                 }
             }
-            if let Some(f) = fired_at {
-                if s.t >= *f + m.delay_s && self.sent_at[*i].is_none() {
-                    self.sent_at[*i] = Some(s.t);
-                    out.push((*i, m.clone()));
+            if let Some(f) = p.triggered_at {
+                if s.t >= f + p.msg.delay_s {
+                    self.sent_at[i] = Some(s.t);
+                    out.push((i, p.msg.clone()));
                 }
             }
         }
         out
+    }
+
+    /// The next unsent cue and where it stands.
+    pub fn next_pending(&self) -> Option<(usize, &ScenarioMessage, CueState)> {
+        let i = self.sent_at.iter().position(|t| t.is_none())?;
+        let p = &self.pending[i];
+        let state = match (p.armed_at, p.triggered_at) {
+            (_, Some(_)) => CueState::Triggered,
+            (Some(_), None) => CueState::Armed,
+            (None, None) => CueState::Waiting,
+        };
+        Some((i, &p.msg, state))
     }
 }
 
@@ -1182,4 +1317,104 @@ pub fn write_ground_svg(
 
 fn xml(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+}
+
+#[cfg(test)]
+mod schedule_tests {
+    use super::*;
+    use crate::plan::fixtures::{kvny_georef, KvnyFixture};
+    use crate::plan::gazetteer::GAZETTEER;
+
+    fn schedule(yaml: &str, sequential: bool) -> MessageSchedule {
+        let msgs: Vec<ScenarioMessage> = serde_yaml_ng::from_str(yaml).unwrap();
+        let mut r = Resolver::new(kvny_georef(), &GAZETTEER, &KvnyFixture);
+        MessageSchedule::with_order(&msgs, &mut r, sequential).unwrap()
+    }
+
+    fn sample(t: f64, track_deg: f64) -> Sample {
+        Sample {
+            t,
+            pos: Vec2::ZERO,
+            alt_msl_ft: 1800.0,
+            alt_agl_ft: 1000.0,
+            track_deg,
+            phase: Some(FlightPhase::Downwind),
+            on_ground: false,
+            crashed: false,
+            bank_deg: 0.0,
+            vs_fpm: 0.0,
+        }
+    }
+
+    fn sent(s: &mut MessageSchedule, t: f64, track: f64, inp: &ScheduleInputs) -> Vec<usize> {
+        s.due_with(&sample(t, track), 1.0, inp).into_iter().map(|(i, _)| i).collect()
+    }
+
+    #[test]
+    fn sequential_cues_wait_for_the_readback_and_the_turn() {
+        let mut s = schedule(
+            r#"
+- {id: extend, at_s: 2, atc: "extend downwind"}
+- {after_readback: true, delay_s: 3, atc: "make a 360"}
+- {turned_deg: 300, atc: "turn base"}
+"#,
+            true,
+        );
+        let none = ScheduleInputs::default();
+        assert!(sent(&mut s, 1.0, 0.0, &none).is_empty());
+        assert_eq!(sent(&mut s, 2.0, 0.0, &none), vec![0]);
+        // Armed at 2 s; a transmission from before then doesn't count.
+        let early = ScheduleInputs { pilot_tx_times: &[1.5], ..Default::default() };
+        assert!(sent(&mut s, 5.0, 0.0, &early).is_empty());
+        let readback = ScheduleInputs { pilot_tx_times: &[1.5, 6.0], ..Default::default() };
+        assert!(sent(&mut s, 7.0, 0.0, &readback).is_empty(), "delay_s holds it");
+        assert_eq!(sent(&mut s, 10.0, 0.0, &readback), vec![1]);
+        // The third waits for 300° of turn after the second went out.
+        let mut t = 11.0;
+        let mut track = 0.0;
+        let mut fired = None;
+        while t < 60.0 {
+            track = (track + 10.0) % 360.0;
+            if !sent(&mut s, t, track, &readback).is_empty() {
+                fired = Some(t);
+                break;
+            }
+            t += 1.0;
+        }
+        let fired = fired.expect("fired after the turn");
+        assert!((40.0..=42.0).contains(&fired), "fired at {fired}");
+    }
+
+    #[test]
+    fn readback_timeout_manual_cues_and_forcing_the_next_one() {
+        let mut s = schedule(
+            r#"
+- {id: go, manual: true}
+- {after: go, after_readback: true, readback_timeout_s: 10, atc: "a"}
+- {after: prev, manual: true, rehearse_after_s: 5, atc: "b"}
+"#,
+            false,
+        );
+        let live = ScheduleInputs::default();
+        assert!(sent(&mut s, 30.0, 0.0, &live).is_empty(), "manual waits for the key");
+        assert_eq!(s.next_pending().map(|p| p.0), Some(0));
+        let key = ScheduleInputs { force_next: true, ..Default::default() };
+        assert_eq!(sent(&mut s, 31.0, 0.0, &key), vec![0]);
+        // No readback: the timeout sends it.
+        assert!(sent(&mut s, 35.0, 0.0, &live).is_empty());
+        assert_eq!(sent(&mut s, 41.0, 0.0, &live), vec![1]);
+        // A rehearsal sends a manual cue on its own.
+        let rehearse = ScheduleInputs { rehearse_manual: true, ..Default::default() };
+        assert!(sent(&mut s, 44.0, 0.0, &rehearse).is_empty());
+        assert_eq!(sent(&mut s, 46.0, 0.0, &rehearse), vec![2]);
+        assert!(s.next_pending().is_none());
+    }
+
+    #[test]
+    fn a_cue_needs_a_trigger_or_a_cue_to_follow() {
+        let msgs: Vec<ScenarioMessage> = serde_yaml_ng::from_str("- {atc: hello}").unwrap();
+        let mut r = Resolver::new(kvny_georef(), &GAZETTEER, &KvnyFixture);
+        assert!(MessageSchedule::with_order(&msgs, &mut r, false).is_err());
+        assert!(MessageSchedule::with_order(&msgs, &mut r, true).is_err(), "the first has nothing before it");
+    }
 }

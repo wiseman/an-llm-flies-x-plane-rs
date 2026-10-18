@@ -5,10 +5,22 @@
 use crate::config::TECSGains;
 use crate::types::{clamp, FlightPhase};
 
+/// Pitch integral while tracking a glidepath (deg per ft·s), and its
+/// limit (deg). Pitch is proportional otherwise, and on a glidepath a
+/// proportional loop holds whatever offset makes up the pitch the
+/// descent needs beyond the trim: in X-Plane's 172 that was a steady
+/// 21 ft above the path all the way down. The integral trims it out.
+const PATH_PITCH_KI: f64 = 0.01;
+const PATH_PITCH_I_MAX_DEG: f64 = 4.0;
+
 #[derive(Debug, Clone)]
 pub struct TECSLite {
     pub gains: TECSGains,
     pub integrator: f64,
+    /// Set by the caller while the target is a glidepath the aircraft is
+    /// on (not capturing from far off it): the pitch integral runs.
+    pub tracking_path: bool,
+    pitch_integrator_deg: f64,
 }
 
 impl TECSLite {
@@ -16,11 +28,14 @@ impl TECSLite {
         Self {
             gains,
             integrator: 0.0,
+            tracking_path: false,
+            pitch_integrator_deg: 0.0,
         }
     }
 
     pub fn reset(&mut self) {
         self.integrator = 0.0;
+        self.pitch_integrator_deg = 0.0;
     }
 
     /// Returns (pitch_cmd_deg, throttle_cmd).
@@ -72,8 +87,16 @@ impl TECSLite {
             FlightPhase::Final => 0.0,
             _ => self.gains.kd_balance,
         };
+        if self.tracking_path {
+            self.pitch_integrator_deg = clamp(
+                self.pitch_integrator_deg + PATH_PITCH_KI * altitude_error_ft * dt,
+                -PATH_PITCH_I_MAX_DEG,
+                PATH_PITCH_I_MAX_DEG,
+            );
+        }
         let pitch_cmd = pitch_trim + self.gains.kp_balance * energy_balance
-            + kd_effective * (-vs_fpm);
+            + kd_effective * (-vs_fpm)
+            + self.pitch_integrator_deg;
 
         (clamp(pitch_cmd, min_pitch, max_pitch), throttle_cmd)
     }
@@ -126,6 +149,32 @@ mod tests {
             kp_balance: 0.012,
             kd_balance: 0.01,
         }
+    }
+
+    #[test]
+    fn a_glidepath_is_tracked_without_a_standing_offset() {
+        // The flight path follows pitch, so a 3° descent needs -3° of
+        // pitch against final's -0.5° trim. Proportional alone settles
+        // ~21 ft above the path (as in X-Plane); tracking the path trims
+        // the offset out.
+        let gains = crate::config::load_default_config_bundle().controllers.tecs;
+        let fly = |tracking: bool| {
+            let mut tecs = TECSLite::new(gains.clone());
+            let (v_fps, dt) = (62.0 * 1.6878, 0.2);
+            let (mut alt, mut path) = (1300.0_f64, 1300.0_f64);
+            for _ in 0..(120.0 / dt) as usize {
+                tecs.tracking_path = tracking;
+                path -= v_fps * 3.0_f64.to_radians().tan() * dt;
+                let vs_fpm = 0.0;
+                let (pitch, _) = tecs.update(FlightPhase::Final, path, 62.0, alt, vs_fpm, 62.0, dt, (0.0, 1.0));
+                alt += v_fps * pitch.to_radians().sin() * dt;
+            }
+            alt - path
+        };
+        let offset = fly(false);
+        assert!(offset > 10.0, "the model shows the standing offset: {offset:.1} ft");
+        let tracked = fly(true);
+        assert!(tracked.abs() < 3.0, "{tracked:.1} ft off the path");
     }
 
     #[test]

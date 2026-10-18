@@ -473,6 +473,8 @@ struct ControlLoopCtx {
     /// run ends once the aircraft has landed and stopped (or at a set
     /// time).
     schedule: Option<crate::eval_scenario::MessageSchedule>,
+    /// The pilot's transmissions, for readback-triggered messages.
+    radio_log: Arc<PLMutex<Vec<(f64, String)>>>,
     /// When each scripted message went out, for scoring.
     sent_at: Arc<PLMutex<Vec<Option<f64>>>>,
     input_tx: Sender<IncomingMessage>,
@@ -690,7 +692,13 @@ fn run_control_loop(mut ctx: ControlLoopCtx) -> (MissionOutcome, f64, f64) {
             };
             ctx.samples.lock().push(sample);
             if let Some(schedule) = ctx.schedule.as_mut() {
-                let due = schedule.due(&sample, ctx.dt);
+                let tx_times: Vec<f64> = ctx.radio_log.lock().iter().map(|(t, _)| *t).collect();
+                let inputs = crate::eval_scenario::ScheduleInputs {
+                    pilot_tx_times: &tx_times,
+                    force_next: false,
+                    rehearse_manual: true,
+                };
+                let due = schedule.due_with(&sample, ctx.dt, &inputs);
                 if !due.is_empty() {
                     *ctx.sent_at.lock() = schedule.sent_at.clone();
                 }
@@ -995,6 +1003,7 @@ pub fn run_eval_with_brain(
         tool_counters: Some(tool_counters.clone()),
         taxi_graphs: Default::default(),
         sim_atc: sim_atc.clone(),
+        demo: None,
     });
 
     // Prime `latest_snapshot` so the LLM's first `get_status` returns
@@ -1031,7 +1040,7 @@ pub fn run_eval_with_brain(
                 &crate::plan::gazetteer::GAZETTEER,
                 &scenario_resolver_parts.1,
             );
-            Some(crate::eval_scenario::MessageSchedule::new(&s.messages, &mut r).context("scenario messages")?)
+            Some(crate::eval_scenario::MessageSchedule::with_order(&s.messages, &mut r, s.sequential).context("scenario messages")?)
         }
         None => None,
     };
@@ -1133,6 +1142,7 @@ pub fn run_eval_with_brain(
         track_wall_start,
         sim_atc: sim_atc.clone(),
         schedule,
+        radio_log: tool_ctx.radio_log.clone(),
         sent_at: sent_at.clone(),
         input_tx: input_tx.clone(),
         input_rx: input_rx.clone(),

@@ -1,0 +1,101 @@
+# Demo take: right traffic runway 16R at Van Nuys, about 4 minutes.
+#
+# Starts airborne on the downwind, paused in standby. F6 rolls the take
+# (unpause, start recording); then Van Nuys Tower:
+#   extend downwind, I'll call your base -> a 360 for spacing ->
+#   turn base at Nordhoff, keep it square, cleared to land ->
+#   exit and contact ground.
+#
+# Live:      scripts/demo/take.sh demo/kvny-16r.yaml
+# Rehearse:  cargo run --release --bin eval -- --scenario demo/kvny-16r.yaml \
+#              --pilot-llm-provider claude-code --pilot-llm-model claude-sonnet-5-5 --pilot-mode realistic
+id: demo-kvny-16r
+description: Van Nuys 16R right traffic — extend, 360, base at Nordhoff, land
+airport: KVNY
+start:
+  airborne: {runway: 16R, along_ft: 3000, right_ft: 5500, alt_msl_ft: 1800, heading_deg: 355.5, ias_kt: 80}
+briefing: >
+  You are Cessna 172SP, callsign "Skyhawk 2SP", on a right downwind for
+  runway 16R at Van Nuys (KVNY), at pattern altitude, talking to Van Nuys
+  Tower on 119.3, inbound for a full stop. The autopilot is holding
+  heading, altitude and speed for now. Fly the tower's instructions and
+  land.
+sequential: true
+max_sim_s: 900
+
+xplane:
+  time_in_24_hours: 16.5
+  datarefs:
+    sim/cockpit2/radios/actuators/com1_frequency_hz_833: 119300
+  settle_s: 8
+  # auto: the take rolls by itself once the flight has settled. manual:
+  # pause after settling until F6.
+  roll: auto
+  initial_camera: sim/view/3d_cockpit_cmnd_look
+
+obs:
+  scenes: {main: "Main", code: "Code", xplane: "X-Plane", term: "Terminal"}
+  caption_input: "Radio Caption"
+
+audio:
+  # backend: elevenlabs (voice: an ElevenLabs voice id, ELEVENLABS_API_KEY
+  # in .env), kokoro (local), or say.
+  atc: {backend: kokoro, voice: am_eric, speed: 1.1, preset: atc}
+  pilot: {backend: kokoro, voice: am_adam, speed: 1.05, preset: pilot}
+  min_gap_s: 1.0
+
+hooks:
+  # When the pilot flies a plan, show the code it wrote for a while.
+  on_fly: {tui: log, scene: code, hold_s: 12}
+  on_touchdown: {camera: sim/view/tower}
+
+cues:
+  - id: action
+    when: {cond: elapsed, s: 8}
+    record: start
+    scene: main
+    tui: spatial
+
+  - id: extend
+    when: {cond: elapsed, s: 4}
+    atc: "Skyhawk 2SP, Van Nuys Tower, extend downwind, I'll call your base."
+
+  - id: three-sixty
+    after_readback: true
+    readback_timeout_s: 25
+    when: {cond: past, target: {ref: runway, airport: KVNY, runway: 16R, part: threshold}}
+    delay_s: 5
+    atc: "Skyhawk 2SP, make a right 360 for spacing, then continue downwind."
+
+  - id: base
+    turned_deg: 330
+    atc: "Skyhawk 2SP, turn base at Nordhoff, keep your base square, runway 16R cleared to land."
+    say: "Skyhawk Two Sierra Papa, turn base at Nordhoff, keep your base square, runway one six right, cleared to land."
+
+  - id: exit
+    when: {cond: agl_below, ft: 3}
+    delay_s: 8
+    atc: "Skyhawk 2SP, exit right when able, contact Ground point seven."
+    say: "Skyhawk Two Sierra Papa, exit right when able, contact ground point seven."
+
+  - id: cut
+    after_readback: true
+    readback_timeout_s: 20
+    delay_s: 10
+    record: stop
+
+checks:
+  - {check: orbit, dir: right}
+  - {check: square_base, runway: 16R}
+  - {check: landed, runway: 16R}
+  - {check: no_crash}
+
+broll:
+  - name: chase
+    shots: [{at: start, camera: sim/view/chase}]
+  - name: cut
+    shots:
+      - {at: start, camera: sim/view/chase}
+      - {at: "cue:three-sixty", offset_s: 4, camera: sim/view/circle}
+      - {at: "cue:base", offset_s: 2, camera: sim/view/chase}
+      - {at: "event:touchdown", offset_s: -20, camera: sim/view/tower}

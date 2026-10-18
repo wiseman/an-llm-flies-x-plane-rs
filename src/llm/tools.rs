@@ -23,11 +23,11 @@ use crate::llm::backend::ToolDef;
 use crate::core::mission_manager::{
     ActiveClearance, ClearanceSource, MissionGoal, PilotCore, StatusSnapshot,
 };
-use crate::core::landing_rollout::ArrivalPlan;
+use crate::core::landing_rollout::{ArrivalPlan, ExitOption};
 use crate::core::profiles::{GuidanceProfile, RunwayExitPlan, TakeoffRun, TaxiProfile};
 use crate::data::airspace_query::{self, AircraftSnapshot, AirspaceSource};
 use crate::data::parquet::{
-    AIRPORTS_FILE, AIRSPACES_FILE, COMMS_FILE, PARKING_SPOTS_FILE, RUNWAYS_FILE, TAXI_EDGES_FILE,
+    AIRPORTS_FILE, AIRSPACES_FILE, COMMS_FILE, HOLD_LINES_FILE, PARKING_SPOTS_FILE, RUNWAYS_FILE, TAXI_EDGES_FILE,
     TAXI_NODES_FILE,
 };
 use crate::guidance::runway_geometry::RunwayFrame;
@@ -175,6 +175,8 @@ pub struct ToolContext {
     /// Eval harness: a simulated controller that hears `broadcast_on_radio`
     /// calls and answers them. `None` everywhere else.
     pub sim_atc: Option<Arc<crate::llm::sim_atc::SimAtc>>,
+    /// A demo take: speaks the pilot's transmissions and hears its plans.
+    pub demo: Option<Arc<crate::demo::director::DemoHooks>>,
 }
 
 impl ToolContext {
@@ -197,6 +199,7 @@ impl ToolContext {
             tool_counters: None,
             taxi_graphs: Default::default(),
             sim_atc: None,
+            demo: None,
         }
     }
 }
@@ -700,6 +703,14 @@ pub fn open_apt_dat_parquet(
         taxi_edges = dir_join(airports, TAXI_EDGES_FILE).display(),
         parking_spots = dir_join(airports, PARKING_SPOTS_FILE).display(),
     ))?;
+    // Painted hold-short lines (absent from caches built before them).
+    let hold_lines = dir_join(airports, HOLD_LINES_FILE);
+    if hold_lines.exists() {
+        conn.execute_batch(&format!(
+            "CREATE VIEW hold_lines AS SELECT * FROM read_parquet('{}');",
+            hold_lines.display()
+        ))?;
+    }
     // The airspaces parquet is opt-in (built only when airspace.txt was
     // located). The view is registered only when the file is present so
     // that cache directories built before airspace support still work.
@@ -724,7 +735,7 @@ fn dir_join(sibling: &std::path::Path, name: &str) -> PathBuf {
 
 /// The pilot's config with `airport_ident`'s runway `runway_ident` (from
 /// apt.dat) as its reference runway, flown with `side` traffic.
-fn runway_config(ctx: &ToolContext, airport_ident: &str, runway_ident: &str, side: &str) -> Result<ConfigBundle> {
+pub fn runway_config(ctx: &ToolContext, airport_ident: &str, runway_ident: &str, side: &str) -> Result<ConfigBundle> {
     let bridge = ctx
         .bridge
         .as_ref()
@@ -1064,7 +1075,12 @@ pub fn tool_fly(ctx: &ToolContext, args: &Map<String, Value>) -> String {
         notes
     };
     let mut out = match (amended, delta) {
-        (Some(notes), _) => reply("plan amended:".to_string(), notes),
+        (Some(notes), _) => {
+            if let Some(d) = &ctx.demo {
+                d.flew_a_plan();
+            }
+            reply("plan amended:".to_string(), notes)
+        }
         (None, Some(delta)) => {
             let traffic = ctx.pilot.lock().traffic.clone();
             let mut profile = PlanProfile::new(base.clone(), &state).with_traffic(traffic);
@@ -1074,7 +1090,12 @@ pub fn tool_fly(ctx: &ToolContext, args: &Map<String, Value>) -> String {
                 None => engage(ctx, Box::new(profile)),
             };
             match engaged {
-                Ok(displaced) => reply(format!("plan engaged{displaced}:"), notes),
+                Ok(displaced) => {
+                    if let Some(d) = &ctx.demo {
+                        d.flew_a_plan();
+                    }
+                    reply(format!("plan engaged{displaced}:"), notes)
+                }
                 Err(e) => return e,
             }
         }
@@ -1719,6 +1740,9 @@ pub fn tool_broadcast_on_radio(ctx: &ToolContext, args: &Map<String, Value>) -> 
     {
         let t_sim = ctx.bridge.as_ref().and_then(|b| b.get_dataref_value(crate::sim::datarefs::SIM_TIME_S.name));
         ctx.radio_log.lock().push((t_sim.unwrap_or(0.0), message.to_string()));
+        if let Some(d) = &ctx.demo {
+            d.pilot_transmitted(&message);
+        }
         let mut br = ctx.recent_broadcasts.lock();
         br.push(line.clone());
         if br.len() > 16 {
@@ -2503,20 +2527,49 @@ pub fn tool_plan_arrival(ctx: &ToolContext, args: &Map<String, Value>) -> String
         Ok(a) => a,
         Err(e) => return format!("error: {e}"),
     };
+    // Backups if the exit is missed (a long float, too fast at the
+    // intersection): the next few exits, each with its own taxi.
+    let mut fallbacks: Vec<ExitOption> = detail
+        .exits
+        .iter()
+        .filter(|e| e.stationing_ft > exit.stationing_ft)
+        .take(MAX_FALLBACK_EXITS)
+        .map(|e| ExitOption {
+            exit: e.plan(),
+            arrival: arrival_from_exit(ctx, &airport, e, &parking_name, &via_taxiways).ok(),
+        })
+        .collect();
+    fallbacks.sort_by(|a, b| a.exit.stationing_ft.total_cmp(&b.exit.stationing_ft));
+    let backups = if fallbacks.is_empty() {
+        "if the exit is missed it stops on the runway and you're woken (completed: landing_rollout) to choose an exit ahead or engage_park".to_string()
+    } else {
+        let names: Vec<&str> = fallbacks.iter().map(|f| f.exit.taxiway_name.as_str()).collect();
+        format!(
+            "if the exit is missed it takes the next one it can make ({}) and re-plans the taxi from there, and you're told which",
+            names.join(", ")
+        )
+    };
     let reply = format!(
-        "arrival planned: exit {} (intersection at {:.0} ft{}), then taxi to {}. After touchdown the aircraft rolls out, takes the exit, and taxis to parking on its own; if the exit is missed it stops on the runway and you're woken (completed: landing_rollout) to choose an exit ahead or engage_park.",
+        "arrival planned: exit {} (intersection at {:.0} ft{}), then taxi to {}. After touchdown the aircraft rolls out, takes the exit, and taxis to parking on its own; {backups}.",
         exit.name,
         exit.stationing_ft,
         if exit_name.is_none() { ", auto-selected" } else { "" },
         arrival.summary,
     );
     let plan = exit.plan();
-    match ctx.pilot.lock().landing_plan_mut().map(|h| h.set_landing_plan(Some(plan), Some(arrival))) {
-        Some(Ok(())) => reply,
-        Some(Err(e)) => format!("error: {e}"),
-        None => NO_PATTERN.to_string(),
+    let mut pilot = ctx.pilot.lock();
+    let Some(holder) = pilot.landing_plan_mut() else { return NO_PATTERN.to_string() };
+    match holder.set_landing_plan(Some(plan), Some(arrival)) {
+        Ok(()) => {
+            holder.set_fallback_exits(fallbacks);
+            reply
+        }
+        Err(e) => format!("error: {e}"),
     }
 }
+
+/// Backup exits `plan_arrival` plans beyond the chosen one.
+const MAX_FALLBACK_EXITS: usize = 4;
 
 /// The airport and runway the active pattern is anchored to.
 fn active_runway(ctx: &ToolContext) -> std::result::Result<(String, String), String> {
@@ -2689,8 +2742,22 @@ fn runway_exits_detail(
         Ok(g) => g,
         Err(e) => return Err(e.to_string()),
     };
+    // Painted hold-short lines: an exit ends past them, not just past the
+    // network's active zone. (None in a cache built before they were.)
+    let holds: Vec<(Vec2, Vec2)> = conn
+        .prepare("SELECT lat1_deg, lon1_deg, lat2_deg, lon2_deg FROM hold_lines WHERE airport_ident = ?")
+        .and_then(|mut st| {
+            st.query_map([airport], |r| Ok((r.get::<_, f64>(0)?, r.get::<_, f64>(1)?, r.get::<_, f64>(2)?, r.get::<_, f64>(3)?)))
+                .map(|rows| rows.filter_map(|r| r.ok()).collect::<Vec<_>>())
+        })
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(a, b, c, d)| (geodetic_offset_ft(a, b, georef), geodetic_offset_ft(c, d, georef)))
+        .collect();
+    let to_ft = |lat: f64, lon: f64| geodetic_offset_ft(lat, lon, georef);
     let mut exits = Vec::new();
-    for path in taxi_route::runway_exit_paths(&graph, runway, (le_lat, le_lon), (he_lat, he_lon)) {
+    for mut path in taxi_route::runway_exit_paths(&graph, runway, (le_lat, le_lon), (he_lat, he_lon)) {
+        taxi_route::extend_past_hold_lines(&graph, &mut path, &holds, &to_ft);
         let path_runway_ft: Vec<Vec2> = path
             .nodes
             .iter()
@@ -3451,7 +3518,7 @@ pub fn tool_schemas(include_mission_complete: bool) -> Vec<ToolDef> {
         ),
         schema(
             "plan_arrival",
-            "Plan the whole arrival before touchdown in one call: pick the runway exit and the taxi route from that exit to a parking spot. After touchdown the aircraft rolls out, follows the exit off the runway, and taxis straight to the spot (stopping aligned with its painted heading) with no further tool calls. Use this as the normal way to land and park; list_runway_exits / choose_runway_exit / engage_park remain for exceptions and ATC changes. With exit_taxiway null, the first exit at least post_landing.min_rollout_past_touchdown_ft (default 800 ft) past the touchdown point is chosen; if a named taxiway meets the runway more than once, the first intersection past touchdown is used. If the exit is missed (too fast at the intersection), the aircraft stops on the runway centerline, the arrival plan is put on hold, and a `completed: landing_rollout` heartbeat wakes you to choose an exit ahead or engage_park. Calling choose_runway_exit afterwards re-plans the taxi from the new exit. Preconditions: a plan flying a pattern, not yet touched down (rejected once landing_rollout has taken over); parking spot must exist in apt.dat. Find spots with sql_query against parking_spots. Completes immediately.",
+            "Plan the whole arrival before touchdown in one call: pick the runway exit and the taxi route from that exit to a parking spot. After touchdown the aircraft rolls out, follows the exit off the runway, and taxis straight to the spot (stopping aligned with its painted heading) with no further tool calls. Use this as the normal way to land and park; list_runway_exits / choose_runway_exit / engage_park remain for exceptions and ATC changes. With exit_taxiway null, the first exit at least post_landing.min_rollout_past_touchdown_ft (default 800 ft) past the touchdown point is chosen; if a named taxiway meets the runway more than once, the first intersection past touchdown is used. It also plans the next few exits beyond it, each with its own taxi: if the exit is missed (a float, or too fast at the intersection), the aircraft takes the next one it can still make and taxis to parking from there, and an event tells you which. With no backup left, it stops on the runway centerline and a `completed: landing_rollout` heartbeat wakes you to choose an exit ahead or engage_park. Calling choose_runway_exit afterwards re-plans the taxi from the new exit. Preconditions: a plan flying a pattern, not yet touched down (rejected once landing_rollout has taken over); parking spot must exist in apt.dat. Find spots with sql_query against parking_spots. Completes immediately.",
             json!({
                 "parking_name": {
                     "type": "string",
@@ -3805,3 +3872,4 @@ mod quiet_tool_tests {
         }
     }
 }
+

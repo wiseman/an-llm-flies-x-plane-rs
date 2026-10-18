@@ -25,7 +25,11 @@ impl FlareController {
             1.0,
         );
         let sink_bias = clamp(((-sink_rate_fpm) - 200.0) / 250.0, 0.0, 2.0);
-        let speed_bias = clamp(-ias_error_kt * 0.12, -1.5, 1.0);
+        // Fast: raise the nose a little more to bleed it off. Slow: never
+        // lower it this close to the ground; that only drives the
+        // aircraft onto the runway (a live X-Plane landing arrived at
+        // the flare 10 kt slow and sank in at -430 fpm).
+        let speed_bias = clamp(-ias_error_kt * 0.12, 0.0, 1.0);
         let pitch = 1.0 + ratio * 3.5 + sink_bias + speed_bias;
         clamp(pitch, 0.5, self.config.max_flare_pitch_deg)
     }

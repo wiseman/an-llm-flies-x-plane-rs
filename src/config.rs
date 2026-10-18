@@ -64,9 +64,14 @@ pub struct PostLandingConfig {
     /// selected. The pilot decelerates to this speed and holds it until
     /// the slowdown for the exit.
     pub turnoff_speed_kt: f64,
-    /// Speed for the last stretch before the exit and along the exit
-    /// connector.
+    /// Speed for the turn off the runway onto the exit.
     pub exit_speed_kt: f64,
+    /// Speed along the exit once lined up on it.
+    pub exit_taxi_speed_kt: f64,
+    /// Braking (ft/s²) from turnoff speed down to the exit's turn speed,
+    /// timed so the aircraft arrives at the turn at that speed rather
+    /// than creeping the last stretch.
+    pub exit_slowdown_fps2: f64,
     /// Floor on the exit's final-node speed ramp, so the aircraft keeps
     /// creeping until the node is captured.
     pub exit_creep_speed_kt: f64,
@@ -106,6 +111,8 @@ impl Default for PostLandingConfig {
         Self {
             turnoff_speed_kt: 15.0,
             exit_speed_kt: 5.0,
+            exit_taxi_speed_kt: 10.0,
+            exit_slowdown_fps2: 1.5,
             exit_creep_speed_kt: 2.0,
             slowdown_lead_ft: 300.0,
             final_stop_ramp_ft: 60.0,

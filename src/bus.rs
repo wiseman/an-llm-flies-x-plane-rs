@@ -58,6 +58,9 @@ pub enum LogKind {
     /// own events (step done, report due, constraint not met) and phase
     /// changes as they happen. Shown prominently.
     Plan,
+    /// A demo take's bookkeeping (cues, standby, OBS): verbose, so it
+    /// stays out of the compact log on camera.
+    Demo,
 }
 
 impl LogKind {
@@ -75,6 +78,7 @@ impl LogKind {
             LogKind::ToolCall | LogKind::Tokens => Some("[llm-worker] "),
             LogKind::Thinking => Some("[thinking] "),
             LogKind::Plan => Some("[plan] "),
+            LogKind::Demo => Some("[demo] "),
             LogKind::System | LogKind::Error | LogKind::Voice => None,
         }
     }
@@ -84,7 +88,7 @@ impl LogKind {
     pub fn is_verbose(self) -> bool {
         matches!(
             self,
-            LogKind::ToolCall | LogKind::Tokens | LogKind::Heartbeat | LogKind::Voice
+            LogKind::ToolCall | LogKind::Tokens | LogKind::Heartbeat | LogKind::Voice | LogKind::Demo
         )
     }
 }

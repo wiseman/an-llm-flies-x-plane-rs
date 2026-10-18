@@ -157,6 +157,25 @@ pub struct ParsedParkingSpot {
     pub airlines: Option<String>,
 }
 
+/// One straight piece of painted runway hold-short line (apt.dat line
+/// types 4/54 runway hold, 6/56 ILS hold), from the node rows (111-116)
+/// of a linear feature (120) or a pavement edge (110). Bezier curvature
+/// is dropped: hold lines are straight.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ParsedHoldLine {
+    pub airport_ident: String,
+    pub lat1_deg: f64,
+    pub lon1_deg: f64,
+    pub lat2_deg: f64,
+    pub lon2_deg: f64,
+    pub line_type: i32,
+}
+
+/// Line types that paint a runway hold position.
+fn is_hold_line_type(t: i32) -> bool {
+    matches!(t, 4 | 54 | 6 | 56)
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct ParsedAptDat {
     pub airports: Vec<ParsedAirport>,
@@ -165,6 +184,7 @@ pub struct ParsedAptDat {
     pub taxi_nodes: Vec<ParsedTaxiNode>,
     pub taxi_edges: Vec<ParsedTaxiEdge>,
     pub parking_spots: Vec<ParsedParkingSpot>,
+    pub hold_lines: Vec<ParsedHoldLine>,
 }
 
 pub fn parse<R: BufRead>(reader: R) -> Result<ParsedAptDat> {
@@ -175,6 +195,11 @@ pub fn parse<R: BufRead>(reader: R) -> Result<ParsedAptDat> {
     let mut last_edge_idx: Option<usize> = None;
     // Index of the last 1300 parking spot pushed, for 1301 attachment.
     let mut last_parking_idx: Option<usize> = None;
+    // The previous node of the current line or pavement chain, with the
+    // line type painted from it to the next node, and the chain's first
+    // node (a closing node, 113/114, paints back to it).
+    let mut chain_prev: Option<(f64, f64, i32)> = None;
+    let mut chain_first: Option<(f64, f64)> = None;
 
     for (i, line) in reader.lines().enumerate() {
         let line = line.with_context(|| format!("reading line {}", i + 1))?;
@@ -239,6 +264,52 @@ pub fn parse<R: BufRead>(reader: R) -> Result<ParsedAptDat> {
                     if let Some(zone) = parse_active_zone(rest) {
                         out.taxi_edges[idx].active_zones.push(zone);
                     }
+                }
+            }
+            "110" | "120" | "130" => {
+                chain_prev = None;
+                chain_first = None;
+            }
+            "111" | "112" | "113" | "114" | "115" | "116" => {
+                let f: Vec<&str> = rest.split_whitespace().collect();
+                let (Some(lat), Some(lon)) = (f.first().and_then(|v| v.parse::<f64>().ok()), f.get(1).and_then(|v| v.parse::<f64>().ok())) else {
+                    continue;
+                };
+                let type_at = if matches!(code, "112" | "114" | "116") { 4 } else { 2 };
+                let line_type = f.get(type_at).and_then(|v| v.parse::<i32>().ok()).unwrap_or(0);
+                if let (Some(a), Some((plat, plon, ptype))) = (cur.as_ref(), chain_prev) {
+                    if is_hold_line_type(ptype) {
+                        out.hold_lines.push(ParsedHoldLine {
+                            airport_ident: a.ident.clone(),
+                            lat1_deg: plat,
+                            lon1_deg: plon,
+                            lat2_deg: lat,
+                            lon2_deg: lon,
+                            line_type: ptype,
+                        });
+                    }
+                }
+                if chain_first.is_none() {
+                    chain_first = Some((lat, lon));
+                }
+                chain_prev = Some((lat, lon, line_type));
+                if matches!(code, "113" | "114") {
+                    if let (Some(a), Some((flat, flon))) = (cur.as_ref(), chain_first) {
+                        if is_hold_line_type(line_type) {
+                            out.hold_lines.push(ParsedHoldLine {
+                                airport_ident: a.ident.clone(),
+                                lat1_deg: lat,
+                                lon1_deg: lon,
+                                lat2_deg: flat,
+                                lon2_deg: flon,
+                                line_type,
+                            });
+                        }
+                    }
+                }
+                if matches!(code, "113" | "114" | "115" | "116") {
+                    chain_prev = None;
+                    chain_first = None;
                 }
             }
             "1300" => {
@@ -584,6 +655,27 @@ A
 1300 37.616120 -122.370450 115.1 tie_down props|helos GA Tie-Down 1
 99
 ";
+
+    #[test]
+    fn painted_hold_lines_are_read_from_line_and_pavement_nodes() {
+        let text = "1 800 0 0 KTST Test\n\
+120 hold K\n\
+111 34.0 -118.0 4\n\
+115 34.0 -117.999\n\
+120 centerline\n\
+111 34.1 -118.0 1\n\
+115 34.1 -117.999\n\
+110 1 0.25 0 pavement\n\
+111 34.2 -118.0 6\n\
+112 34.2 -117.999 34.2 -117.9995 54\n\
+113 34.201 -117.999 1\n\
+99\n";
+        let p = parse(std::io::Cursor::new(text)).unwrap();
+        let types: Vec<i32> = p.hold_lines.iter().map(|h| h.line_type).collect();
+        assert_eq!(types, vec![4, 6, 54], "{:?}", p.hold_lines);
+        assert_eq!(p.hold_lines[0].airport_ident, "KTST");
+        assert_eq!((p.hold_lines[0].lat2_deg, p.hold_lines[0].lon2_deg), (34.0, -117.999));
+    }
 
     fn parse_fixture() -> ParsedAptDat {
         parse(FIXTURE.as_bytes()).unwrap()

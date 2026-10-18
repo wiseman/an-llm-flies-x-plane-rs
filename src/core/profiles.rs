@@ -17,7 +17,7 @@ use crate::config::ConfigBundle;
 use crate::core::landing_rollout::{
     touchdown_debounce, touchdown_handoff, LandingPlanHolder, LandingRolloutProfile,
 };
-pub use crate::core::landing_rollout::{ArrivalPlan, RunwayExitPlan};
+pub use crate::core::landing_rollout::{ArrivalPlan, ExitOption, RunwayExitPlan};
 use crate::core::mode_manager::{
     ModeManager, ModeManagerUpdate, PatternClearances, PatternTriggers, BASE_TO_FINAL_FRACTION,
 };
@@ -580,6 +580,8 @@ pub struct PatternFlyProfile {
     pub preferred_exit: Option<RunwayExitPlan>,
     /// Taxi-to-parking plan to run after the exit (from `plan_arrival`).
     pub arrival: Option<ArrivalPlan>,
+    /// Exits beyond the preferred one, if it's missed.
+    pub fallback_exits: Vec<ExitOption>,
     /// Continuous ground contact since touchdown (debounces the hand-off).
     ground_contact_s: f64,
     /// Corners to fly square ("square your base").
@@ -626,6 +628,7 @@ impl PatternFlyProfile {
             runway_frame,
             preferred_exit: None,
             arrival: None,
+            fallback_exits: Vec::new(),
             ground_contact_s: 0.0,
             square: SquareCorners::default(),
             corner: None,
@@ -654,6 +657,7 @@ impl PatternFlyProfile {
             route_manager: self.route_manager.clone(),
             preferred_exit: self.preferred_exit.clone(),
             arrival: None,
+            fallback_exits: Vec::new(),
             ground_contact_s: self.ground_contact_s,
             square: self.square,
             corner: self.corner,
@@ -1133,9 +1137,16 @@ impl LandingPlanHolder for PatternFlyProfile {
         exit: Option<RunwayExitPlan>,
         arrival: Option<ArrivalPlan>,
     ) -> Result<(), String> {
+        if exit.is_none() {
+            self.fallback_exits.clear();
+        }
         self.preferred_exit = exit;
         self.arrival = arrival;
         Ok(())
+    }
+
+    fn set_fallback_exits(&mut self, fallbacks: Vec<ExitOption>) {
+        self.fallback_exits = fallbacks;
     }
 }
 
@@ -1228,7 +1239,8 @@ impl GuidanceProfile for PatternFlyProfile {
                 self.preferred_exit.take(),
             )
             .with_go_around_reason(self.last_go_around_reason.clone())
-            .with_arrival(self.arrival.take());
+            .with_arrival(self.arrival.take())
+            .with_fallback_exits(std::mem::take(&mut self.fallback_exits));
             return touchdown_handoff(rollout, state, dt);
         }
         // Consume one-shot triggers when their corresponding transition
