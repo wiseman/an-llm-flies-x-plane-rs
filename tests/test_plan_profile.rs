@@ -11,6 +11,7 @@ use xplane_pilot::guidance::runway_geometry::RunwayFrame;
 use xplane_pilot::plan::fixtures::{kvny_georef, KvnyFixture};
 use xplane_pilot::plan::gazetteer::GAZETTEER;
 use xplane_pilot::plan::ir::Ref;
+use xplane_pilot::types::wrap_degrees_180;
 use xplane_pilot::plan::resolve::{AirportSource, Geom, Resolver};
 use xplane_pilot::eval_scenario::{ScenarioTraffic, ScriptedTraffic};
 use xplane_pilot::plan::session::prepare;
@@ -40,6 +41,8 @@ struct Flight {
     events: Vec<String>,
     touchdown_rf: Option<Vec2>,
     amend_times: Vec<f64>,
+    /// (agl, ias) on final
+    final_speeds: Vec<(f64, f64)>,
 }
 
 impl Flight {
@@ -160,6 +163,9 @@ fn fly_from(
         }
         f.samples.push((raw.time_s, phase, state.position_ft, state.alt_msl_ft));
         f.extra.push((raw.time_s, state.alt_agl_ft, state.roll_deg, state.track_deg, raw.on_ground));
+        if phase == FlightPhase::Final {
+            f.final_speeds.push((state.alt_agl_ft, state.ias_kt));
+        }
         if let Some(snap) = &pilot.latest_snapshot {
             for (seq, text) in &snap.events {
                 if *seq > seen_events {
@@ -172,10 +178,15 @@ fn fly_from(
             if (a.when)(&state, phase, raw.time_s) {
                 let status = pilot.latest_snapshot.as_ref().and_then(|s| s.plan_status.clone());
                 let d = prep(a.code, &base, status.as_ref());
+                // As the fly tool does: a new runway becomes the reference.
+                let reference = d.delta.reference_pattern().map(|p| p.config.clone());
                 pilot
                     .profile_mut::<PlanProfile>()
                     .expect("plan profile active")
                     .apply(d.delta, &state);
+                if let Some(cfg) = reference.filter(|c| c.airport.runway.id != pilot.config.airport.runway.id) {
+                    pilot.set_reference_config(cfg);
+                }
                 a.sent_at = Some(raw.time_s);
                 f.amend_times.push(raw.time_s);
             }
@@ -481,6 +492,101 @@ fn go_around_then_back_around() {
 }
 
 #[test]
+fn left_traffic_after_a_go_around_turns_left() {
+    // Going around from right traffic 16R: "enter left traffic 16R".
+    let go = Amend {
+        when: Box::new(|s: &AircraftState, ph, _| ph == FlightPhase::Final && s.alt_agl_ft < 400.0),
+        code: "go_around()",
+        sent_at: None,
+    };
+    let left = Amend {
+        when: Box::new(|_: &AircraftState, ph, _| ph == FlightPhase::GoAround),
+        code: "plan.replace(); p = pattern(apt.runway('16R'), LEFT); join(p)",
+        sent_at: None,
+    };
+    let f = fly(
+        "p = pattern(apt.runway('16R'), RIGHT)\njoin(p)",
+        Vec2::new(DOWNWIND_START.0, DOWNWIND_START.1),
+        355.5,
+        1800.0,
+        80.0,
+        vec![go, left],
+        1500.0,
+    );
+    let ga = f.amend_times[1];
+    // The first turn after the climb-out: track (from 16R's 175) going
+    // left, toward the east side.
+    let turned = f
+        .extra
+        .iter()
+        .filter(|e| e.0 > ga && !e.4)
+        .map(|e| wrap_degrees_180(e.3 - 175.5))
+        .find(|d| d.abs() > 45.0)
+        .expect("turned out of the climb-out");
+    assert!(turned < 0.0, "turned right ({turned:.0}°) after 'enter left traffic'");
+    assert_landed_16r(&f);
+}
+
+#[test]
+fn change_to_16l_on_base_continues_the_base() {
+    // "Change to runway 16L, continue your base."
+    let amend = Amend {
+        // Established on base (heading about 085 for right traffic 16R).
+        when: Box::new(|s: &AircraftState, ph, _| ph == FlightPhase::Base && (70.0..100.0).contains(&s.track_deg)),
+        code: "plan.change_runway(apt.runway('16L'))",
+        sent_at: None,
+    };
+    let f = fly(
+        "p = pattern(apt.runway('16R'), RIGHT)\njoin(p)",
+        Vec2::new(DOWNWIND_START.0, DOWNWIND_START.1),
+        355.5,
+        1800.0,
+        80.0,
+        vec![amend],
+        900.0,
+    );
+    let at = f.amend_times[0];
+    let after: Vec<FlightPhase> = f.samples.iter().filter(|s| s.0 > at).map(|s| s.1).collect();
+    assert!(
+        !after.iter().any(|p| matches!(p, FlightPhase::PatternEntry | FlightPhase::Downwind)),
+        "went back around: {:?}",
+        f.phases()
+    );
+    let td = f.touchdown_rf.unwrap_or_else(|| panic!("no touchdown; phases {:?}", f.phases()));
+    // 16L lies about 375 ft left (east) of 16R's centerline.
+    assert!((-450.0..-300.0).contains(&td.y), "touchdown {:.0} ft from 16R's centerline", td.y);
+}
+
+#[test]
+fn speed_on_final_holds_until_short_final() {
+    // "Final at 70, traffic behind you", given on final.
+    let amend = Amend {
+        when: Box::new(|s: &AircraftState, ph, _| ph == FlightPhase::Final && s.alt_agl_ft < 700.0),
+        code: "speed(70)",
+        sent_at: None,
+    };
+    let f = fly(
+        "p = pattern(apt.runway('16R'), RIGHT)\njoin(p)",
+        Vec2::new(DOWNWIND_START.0, DOWNWIND_START.1),
+        355.5,
+        1800.0,
+        80.0,
+        vec![amend],
+        900.0,
+    );
+    let mean_ias = |lo: f64, hi: f64| {
+        let v: Vec<f64> = f.final_speeds.iter().filter(|(agl, _)| (lo..hi).contains(agl)).map(|s| s.1).collect();
+        v.iter().sum::<f64>() / v.len() as f64
+    };
+    let normal = load_default_config_bundle().performance.final_speed_kt;
+    let held = mean_ias(300.0, 400.0);
+    assert!(held > normal + 4.5, "{held:.1} kt from 400 to 300 ft (normal {normal})");
+    let short = mean_ias(50.0, 100.0);
+    assert!(short < normal + 2.0, "{short:.1} kt from 100 to 50 ft (normal {normal})");
+    assert_landed_16r(&f);
+}
+
+#[test]
 fn overhead_entry_under_an_altitude_floor_keeps_moving() {
     // C2: "fly over the field at or above 2300, then enter right downwind
     // 34L", read as a floor until base. The entry's descent can't finish
@@ -750,6 +856,32 @@ fn high_on_final_slips_down_and_lands_in_the_zone() {
 }
 
 #[test]
+fn a_moderately_high_final_gets_back_on_the_glidepath() {
+    // Rolling out on a 0.9 nm final about 240 ft above the path (as off an
+    // extended base at Van Nuys): too little for a full slip, but it has
+    // to be down on the path by the threshold, not parallel above it.
+    let f = fly(
+        "p = pattern(apt.runway('16R'), RIGHT)\njoin(p)",
+        Vec2::new(-5400.0, 0.0),
+        175.5,
+        800.0 + 620.0,
+        66.0,
+        vec![],
+        400.0,
+    );
+    let frame = frame_16r();
+    let over = f
+        .samples
+        .iter()
+        .find(|s| frame.to_runway_frame(s.2).x >= 0.0)
+        .map(|s| s.3 - 800.0)
+        .expect("reached the threshold");
+    // The path crosses the threshold at about 100 ft.
+    assert!(over < 140.0, "crossed the threshold at {over:.0} ft");
+    assert_landed_16r(&f);
+}
+
+#[test]
 fn rectangular_course_holds_the_track_in_a_crosswind() {
     // P23: constant distance from the field's edges, constant altitude,
     // correcting for a 10 kt west wind. Two laps around Pierce College.
@@ -955,7 +1087,7 @@ fn a_360_before_rejoining_keeps_the_landing_plan() {
     // orbit(...).then(join(p)). The pattern restarted after the 360
     // without its exit, so the rollout stopped on the runway.
     use xplane_pilot::core::profiles::GuidanceProfile;
-    use xplane_pilot::core::landing_rollout::{ExitOption, RunwayExitPlan};
+    use xplane_pilot::core::landing_rollout::{ExitOption, LandingPlan, RunwayExitPlan};
     let exit = |name: &str, x: f64| RunwayExitPlan {
         taxiway_name: name.to_string(),
         stationing_ft: x,
@@ -969,15 +1101,16 @@ fn a_360_before_rejoining_keeps_the_landing_plan() {
     let mut plan = PlanProfile::new(base.clone(), &state);
     plan.apply(prep("p = pattern(apt.runway('16R'), RIGHT)\njoin(p)", &base, None).delta, &state);
     let holder = plan.landing_plan_mut().expect("a pattern");
-    holder.set_landing_plan(Some(exit("G", 3192.0)), None).unwrap();
-    holder.set_fallback_exits(vec![ExitOption { exit: exit("K", 4487.0), arrival: None }]);
+    let fallbacks = vec![ExitOption { exit: exit("K", 4487.0), arrival: None }];
+    holder.set_landing_plan(LandingPlan { exit: Some(exit("G", 3192.0)), arrival: None, fallbacks }).unwrap();
 
     let p = "p = pattern(apt.runway('16R'), RIGHT)\n";
     plan.apply(prep(&format!("{p}orbit(RIGHT, 360).then(join(p))"), &base, None).delta, &state);
     let name = |plan: &mut PlanProfile| plan.landing_plan_mut().and_then(|h| h.preferred_exit().map(|e| e.taxiway_name.clone()));
     assert_eq!(name(&mut plan).as_deref(), Some("G"), "held through the 360");
     // plan_arrival works during the 360 too: it changes the held plan.
-    plan.landing_plan_mut().unwrap().set_landing_plan(Some(exit("H", 3700.0)), None).unwrap();
+    let h = LandingPlan { exit: Some(exit("H", 3700.0)), ..Default::default() };
+    plan.landing_plan_mut().unwrap().set_landing_plan(h).unwrap();
     // Rejoining the pattern hands it over.
     plan.apply(prep(&format!("{p}join(p)"), &base, None).delta, &state);
     assert_eq!(name(&mut plan).as_deref(), Some("H"), "the new pattern has it");

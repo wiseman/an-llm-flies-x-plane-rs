@@ -17,7 +17,7 @@ use crate::config::ConfigBundle;
 use crate::core::landing_rollout::{
     touchdown_debounce, touchdown_handoff, LandingPlanHolder, LandingRolloutProfile,
 };
-pub use crate::core::landing_rollout::{ArrivalPlan, ExitOption, RunwayExitPlan};
+pub use crate::core::landing_rollout::{ArrivalPlan, ExitOption, LandingPlan, RunwayExitPlan};
 use crate::core::mode_manager::{
     ModeManager, ModeManagerUpdate, PatternClearances, PatternTriggers, BASE_TO_FINAL_FRACTION,
 };
@@ -264,7 +264,6 @@ pub struct PatternMetadata {
     pub last_go_around_reason: Option<String>,
     pub airport_ident: Option<String>,
     pub runway_id: Option<String>,
-    pub field_elevation_ft: Option<f64>,
     pub phase: FlightPhase,
 }
 
@@ -574,14 +573,11 @@ pub struct PatternFlyProfile {
     pub lateral_guidance: L1PathFollower,
     pub pattern: PatternGeometry,
     pub route_manager: RouteManager,
-    /// LLM-set preferred runway exit, carried into the
-    /// `LandingRolloutProfile` that takes over at touchdown. `None` =
+    /// The landing's exit, taxi to parking and backup exits (from
+    /// `plan_arrival` / `choose_runway_exit`), carried into the
+    /// `LandingRolloutProfile` that takes over at touchdown. No exit =
     /// brake to a stop on the runway centerline.
-    pub preferred_exit: Option<RunwayExitPlan>,
-    /// Taxi-to-parking plan to run after the exit (from `plan_arrival`).
-    pub arrival: Option<ArrivalPlan>,
-    /// Exits beyond the preferred one, if it's missed.
-    pub fallback_exits: Vec<ExitOption>,
+    pub landing: LandingPlan,
     /// Continuous ground contact since touchdown (debounces the hand-off).
     ground_contact_s: f64,
     /// Corners to fly square ("square your base").
@@ -626,9 +622,7 @@ impl PatternFlyProfile {
             last_go_around_reason: None,
             config,
             runway_frame,
-            preferred_exit: None,
-            arrival: None,
-            fallback_exits: Vec::new(),
+            landing: LandingPlan::default(),
             ground_contact_s: 0.0,
             square: SquareCorners::default(),
             corner: None,
@@ -655,9 +649,7 @@ impl PatternFlyProfile {
             lateral_guidance: self.lateral_guidance.clone(),
             pattern: self.pattern.clone(),
             route_manager: self.route_manager.clone(),
-            preferred_exit: self.preferred_exit.clone(),
-            arrival: None,
-            fallback_exits: Vec::new(),
+            landing: LandingPlan { exit: self.landing.exit.clone(), ..Default::default() },
             ground_contact_s: self.ground_contact_s,
             square: self.square,
             corner: self.corner,
@@ -986,7 +978,7 @@ impl PatternFlyProfile {
             ),
             FlightPhase::Base => {
                 let pattern_alt = self.config.pattern_altitude_msl_ft();
-                let field_elev_ft = self.config.airport.field_elevation_ft;
+                let field_elev_ft = state.field_elevation_ft;
                 let base_turn_x = self.pattern.base_turn_x_ft;
                 let base_end_alt = glidepath_target_altitude_ft_default(
                     &self.runway_frame,
@@ -1021,7 +1013,7 @@ impl PatternFlyProfile {
             }
             FlightPhase::Final => {
                 let final_slope = 3.0;
-                let field_elev_ft = self.config.airport.field_elevation_ft;
+                let field_elev_ft = state.field_elevation_ft;
                 let glidepath_alt = glidepath_target_altitude_ft_default(
                     &self.runway_frame,
                     state.runway_x_ft.unwrap_or(-3000.0),
@@ -1125,28 +1117,20 @@ impl LandingPlanHolder for PatternFlyProfile {
     }
 
     fn preferred_exit(&self) -> Option<&RunwayExitPlan> {
-        self.preferred_exit.as_ref()
+        self.landing.exit.as_ref()
     }
 
     fn arrival(&self) -> Option<&ArrivalPlan> {
-        self.arrival.as_ref()
+        self.landing.arrival.as_ref()
     }
 
-    fn set_landing_plan(
-        &mut self,
-        exit: Option<RunwayExitPlan>,
-        arrival: Option<ArrivalPlan>,
-    ) -> Result<(), String> {
-        if exit.is_none() {
-            self.fallback_exits.clear();
-        }
-        self.preferred_exit = exit;
-        self.arrival = arrival;
+    fn arrivals_mut(&mut self) -> Vec<&mut ArrivalPlan> {
+        self.landing.arrivals_mut()
+    }
+
+    fn set_landing_plan(&mut self, plan: LandingPlan) -> Result<(), String> {
+        self.landing = plan;
         Ok(())
-    }
-
-    fn set_fallback_exits(&mut self, fallbacks: Vec<ExitOption>) {
-        self.fallback_exits = fallbacks;
     }
 }
 
@@ -1236,11 +1220,10 @@ impl GuidanceProfile for PatternFlyProfile {
             let rollout = LandingRolloutProfile::new(
                 self.config.clone(),
                 self.runway_frame.clone(),
-                self.preferred_exit.take(),
+                None,
             )
             .with_go_around_reason(self.last_go_around_reason.clone())
-            .with_arrival(self.arrival.take())
-            .with_fallback_exits(std::mem::take(&mut self.fallback_exits));
+            .with_landing_plan(std::mem::take(&mut self.landing));
             return touchdown_handoff(rollout, state, dt);
         }
         // Consume one-shot triggers when their corresponding transition
@@ -1303,7 +1286,6 @@ impl GuidanceProfile for PatternFlyProfile {
             last_go_around_reason: self.last_go_around_reason.clone(),
             airport_ident: self.config.airport.airport.clone(),
             runway_id: self.runway_frame.runway.id.clone(),
-            field_elevation_ft: Some(self.config.airport.field_elevation_ft),
             phase: self.phase,
         })
     }
@@ -1323,7 +1305,7 @@ impl GuidanceProfile for PatternFlyProfile {
             FlightPhase::Final => Some(3),
             _ => None,
         };
-        let (route, target_label) = match &self.preferred_exit {
+        let (route, target_label) = match &self.landing.exit {
             Some(exit) => (
                 exit_route_legs(&self.runway_frame, exit),
                 Some(exit.taxiway_name.clone()),
@@ -1496,6 +1478,82 @@ pub enum TaxiProfileMode {
     LineUp,
 }
 
+/// A runway the route enters: the taxi holds short of it until cleared.
+#[derive(Debug, Clone)]
+pub struct RunwayHold {
+    /// The first leg inside the runway's active zone; the hold is at its
+    /// start (the end of the leg before).
+    pub leg_idx: usize,
+    /// The runway's idents ("16R", "34L"): a clearance for either end
+    /// clears it.
+    pub runways: Vec<String>,
+    /// The route taxis along the runway here (a leg in the zone is runway
+    /// pavement), not just across it. A crossing clearance doesn't cover
+    /// that; only a clearance onto the runway does.
+    pub along: bool,
+    pub cleared: bool,
+    announced: bool,
+}
+
+impl RunwayHold {
+    pub fn label(&self) -> String {
+        self.runways.join("/")
+    }
+
+    /// What the hold is waiting for, for status lines and events.
+    pub fn not_cleared(&self) -> &'static str {
+        if self.along {
+            "not cleared to taxi on it"
+        } else {
+            "not cleared to cross"
+        }
+    }
+}
+
+/// What a taxi's clearance lets it do at the runways on its route, by
+/// either end's ident.
+#[derive(Debug, Clone, Default)]
+pub struct RunwayClearances {
+    /// Runways it may cross ("cross runway 16R").
+    pub cross: Vec<String>,
+    /// Runways it may taxi along: named in the route ("taxi via runway
+    /// 16R"), or the one it starts on.
+    pub along: Vec<String>,
+}
+
+/// The runways an apt.dat 1204 active-zone token puts a leg on
+/// ("departure:16R,34L;arrival:16R,34L;ils:16R" → 16R, 34L). ILS critical
+/// areas alone don't need a crossing clearance.
+pub fn runways_in_zone(zones: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for part in zones.split(';') {
+        let Some((kind, idents)) = part.split_once(':') else { continue };
+        if !matches!(kind.trim(), "departure" | "arrival") {
+            continue;
+        }
+        for id in idents.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+            if !out.iter().any(|o| o == id) {
+                out.push(id.to_string());
+            }
+        }
+    }
+    out
+}
+
+/// "16R" and "016r" are the same runway end; "6" and "06" too.
+fn same_runway_ident(a: &str, b: &str) -> bool {
+    let norm = |s: &str| s.trim().trim_start_matches('0').to_ascii_uppercase();
+    norm(a) == norm(b)
+}
+
+/// How far short of the hold point the taxi aims to stop.
+const HOLD_SHORT_STOP_FT: f64 = 10.0;
+/// A hold is news only when taxied up to: one reached within this of where
+/// the taxi started (a planned taxi to parking whose runway exit ends at
+/// the next runway's hold line) is already in the status the hand-off woke
+/// the pilot with, and a second wake had it call Ground twice (2026-10-19).
+const HOLD_NEWS_MIN_TAXI_FT: f64 = 100.0;
+
 pub struct TaxiProfile {
     pub mode: TaxiProfileMode,
     pub legs_ft: Vec<StraightLeg>,
@@ -1533,6 +1591,13 @@ pub struct TaxiProfile {
     /// Where this taxi is going (e.g. a parking spot name), shown in the
     /// mode line / status so the LLM can tell taxis apart.
     pub destination: Option<String>,
+    /// Runways the route crosses, in order; the taxi stops short of each
+    /// one not yet cleared.
+    pub runway_holds: Vec<RunwayHold>,
+    events: Vec<String>,
+    /// Where the taxi started, for telling a hold taxied up to from one
+    /// the taxi began at.
+    start_ft: Option<Vec2>,
 }
 
 impl TaxiProfile {
@@ -1575,7 +1640,77 @@ impl TaxiProfile {
             pose_lead_in: None,
             route_summary,
             destination: None,
+            runway_holds: Vec::new(),
+            events: Vec::new(),
+            start_ft: None,
         }
+    }
+
+    /// Hold short of every runway the route enters: `zones` is each leg's
+    /// apt.dat active-zone token and `on_runway` whether the leg is runway
+    /// pavement (both aligned with the legs; "" / false for a pullout).
+    /// A run of legs in the same runway's zone is one hold: a crossing,
+    /// or, if any leg of the run is on the runway itself, a taxi along it.
+    /// Holds already covered by `cleared` start cleared.
+    pub fn with_runway_holds(mut self, zones: &[String], on_runway: &[bool], cleared: &RunwayClearances) -> Self {
+        let mut prev: Vec<String> = Vec::new();
+        for (i, z) in zones.iter().enumerate().take(self.legs_ft.len()) {
+            let rw = runways_in_zone(z);
+            let continues = rw.iter().any(|r| prev.contains(r));
+            let along = on_runway.get(i).copied().unwrap_or(false);
+            if !rw.is_empty() && !continues {
+                self.runway_holds.push(RunwayHold { leg_idx: i, runways: rw.clone(), along, cleared: false, announced: false });
+            } else if continues && along {
+                if let Some(h) = self.runway_holds.last_mut() {
+                    h.along = true;
+                }
+            }
+            prev = rw;
+        }
+        for h in &mut self.runway_holds {
+            let by = if h.along { &cleared.along } else { &cleared.cross };
+            h.cleared = h.runways.iter().any(|r| by.iter().any(|c| same_runway_ident(r, c)));
+        }
+        self
+    }
+
+    /// Clear the crossing of `runway` (either end's ident). Returns how
+    /// many holds that cleared. A hold where the route taxis along the
+    /// runway isn't a crossing and stays.
+    pub fn clear_crossing(&mut self, runway: &str) -> usize {
+        let mut n = 0;
+        for h in self.runway_holds.iter_mut().filter(|h| !h.cleared && !h.along) {
+            if h.runways.iter().any(|r| same_runway_ident(r, runway)) {
+                h.cleared = true;
+                n += 1;
+            }
+        }
+        n
+    }
+
+    /// The uncleared hold where the route taxis along `runway`, if any.
+    pub fn uncleared_along(&self, runway: &str) -> Option<&RunwayHold> {
+        self.runway_holds
+            .iter()
+            .find(|h| h.along && !h.cleared && h.runways.iter().any(|r| same_runway_ident(r, runway)))
+    }
+
+    /// The next crossing ahead not yet cleared.
+    pub fn next_hold(&self) -> Option<&RunwayHold> {
+        self.runway_holds.iter().find(|h| h.leg_idx >= self.current_idx && !h.cleared)
+    }
+
+    /// Distance along the route to the next uncleared hold point.
+    fn distance_to_hold_ft(&self, state: &AircraftState, hold: &RunwayHold) -> f64 {
+        if hold.leg_idx <= self.current_idx {
+            return 0.0;
+        }
+        let Some(current) = self.current_leg() else { return 0.0 };
+        let mut d = (state.position_ft - current.end_ft).length();
+        for leg in &self.legs_ft[self.current_idx + 1..hold.leg_idx] {
+            d += (leg.end_ft - leg.start_ft).length();
+        }
+        d
     }
 
     fn build_route_summary(taxiway_names: &[String]) -> Option<String> {
@@ -1669,7 +1804,8 @@ impl TaxiProfile {
         // though the aircraft has crossed the leg end.
         let (along, _, leg_len) = leg_projection(state, current);
         let passed = (current.end_ft - current.start_ft).length() > 1.0 && along > leg_len;
-        if dist_to_end < self.leg_advance_distance_ft || passed {
+        let into_hold = self.next_hold().is_some_and(|h| h.leg_idx == self.current_idx + 1);
+        if (dist_to_end < self.leg_advance_distance_ft || passed) && !into_hold {
             // Always increment. If that pushes us past the last leg, the
             // contribute path checks for a pose target; absent one, it
             // sets `finished`. This split lets the pose phase take over
@@ -1764,7 +1900,15 @@ impl TaxiProfile {
                 self.cruise_speed_kt
             }
         };
-        nominal.min(alignment_limit)
+        let hold_limit = match self.next_hold() {
+            Some(h) => {
+                let d = self.distance_to_hold_ft(state, h) - HOLD_SHORT_STOP_FT;
+                let ramp = self.final_stop_distance_ft * 2.0;
+                (d.max(0.0) / ramp * self.cruise_speed_kt).min(self.cruise_speed_kt)
+            }
+            None => f64::INFINITY,
+        };
+        nominal.min(alignment_limit).min(hold_limit)
     }
 
     pub fn active_taxiway_name(&self) -> Option<&str> {
@@ -1941,6 +2085,17 @@ impl GuidanceProfile for TaxiProfile {
         // Normal line-following path.
         let leg = self.current_leg();
         let target_speed = self.target_speed_kt(state);
+        let start = *self.start_ft.get_or_insert(state.position_ft);
+        if let Some(i) = self.runway_holds.iter().position(|h| h.leg_idx >= self.current_idx && !h.cleared) {
+            let d = self.distance_to_hold_ft(state, &self.runway_holds[i]);
+            if !self.runway_holds[i].announced && state.gs_kt < 1.0 && d < 80.0 {
+                self.runway_holds[i].announced = true;
+                if (state.position_ft - start).length() > HOLD_NEWS_MIN_TAXI_FT {
+                    let (label, why) = (self.runway_holds[i].label(), self.runway_holds[i].not_cleared());
+                    self.events.push(format!("holding short of runway {label} ({why})"));
+                }
+            }
+        }
         // Parked at a pose target (a parking spot): set the parking brake,
         // as a pilot would on arrival. It stays set while this profile
         // remains engaged; the next taxi releases it.
@@ -1968,6 +2123,10 @@ impl GuidanceProfile for TaxiProfile {
 
     fn is_complete(&self) -> bool {
         self.finished
+    }
+
+    fn take_events(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.events)
     }
 
     fn spatial_overlay(&self) -> Option<SpatialOverlay> {
@@ -2026,6 +2185,13 @@ impl GuidanceProfile for TaxiProfile {
             )
         } else {
             "finished".to_string()
+        };
+        let tail = match self.next_hold() {
+            Some(h) if self.distance_to_hold_ft(state, h) < 80.0 && state.gs_kt < 1.0 => {
+                format!("holding short of {}, {} · {tail}", h.label(), h.not_cleared())
+            }
+            Some(h) => format!("{tail} · will hold short of {} ({})", h.label(), h.not_cleared()),
+            None => tail,
         };
         let body = match route {
             Some(r) => format!("via {r} · {tail}"),

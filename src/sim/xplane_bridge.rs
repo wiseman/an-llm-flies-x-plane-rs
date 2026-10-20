@@ -159,7 +159,7 @@ fn check_capabilities(host: &str, port: u16, timeout_secs: u64) -> Result<()> {
     Ok(())
 }
 
-fn resolve_dataref_ids(
+pub fn resolve_dataref_ids(
     host: &str,
     port: u16,
     specs: &[DatarefSpec],
@@ -210,7 +210,7 @@ fn url_encode(s: &str) -> String {
 /// One-shot REST fetch of `/datarefs/{id}/value`, returning the raw
 /// `data` payload (or `Value::Null` if absent). Shared by the bootstrap
 /// scalar reads and the byte-array tail-number decode.
-fn fetch_dataref_value(host: &str, port: u16, id: i64, timeout_secs: u64) -> Result<Value> {
+pub fn fetch_dataref_value(host: &str, port: u16, id: i64, timeout_secs: u64) -> Result<Value> {
     let url = format!("{}/datarefs/{}/value", rest_base(host, port), id);
     let payload: Value = ureq::get(&url)
         .timeout(std::time::Duration::from_secs(timeout_secs))
@@ -273,44 +273,47 @@ pub fn post_air_start(
     heading_true_deg: f64,
     speed_mps: f64,
 ) -> Result<()> {
-    let body = serde_json::json!({
-        "data": {
-            "aircraft": {
-                "path": "Aircraft/Laminar Research/Cessna 172 SP/Cessna_172SP.acf"
-            },
-            "lle_air_start": {
-                "latitude": lat_deg,
-                "longitude": lon_deg,
-                "elevation_in_meters": elevation_m,
-                "heading_true": heading_true_deg,
-                "speed_in_meters_per_second": speed_mps,
-                "pitch_in_degrees": 0.0
-            },
-            "engine_status": {"all_engines": {"running": true}}
-        }
-    });
-    post_flight_init(host, port, &body)
+    let data = air_start_data(C172_PATH, lat_deg, lon_deg, elevation_m, heading_true_deg, speed_mps);
+    post_flight_init(host, port, &serde_json::json!({ "data": data }))
+}
+
+/// X-Plane 12's default Cessna 172.
+pub const C172_PATH: &str = "Aircraft/Laminar Research/Cessna 172 SP/Cessna_172SP.acf";
+
+/// The `data` of a flight-init request for an air start, engine running.
+pub fn air_start_data(
+    aircraft_path: &str,
+    lat_deg: f64,
+    lon_deg: f64,
+    elevation_m: f64,
+    heading_true_deg: f64,
+    speed_mps: f64,
+) -> serde_json::Value {
+    serde_json::json!({
+        "aircraft": {"path": aircraft_path},
+        "lle_air_start": {
+            "latitude": lat_deg,
+            "longitude": lon_deg,
+            "elevation_in_meters": elevation_m,
+            "heading_true": heading_true_deg,
+            "speed_in_meters_per_second": speed_mps,
+            "pitch_in_degrees": 0.0
+        },
+        "engine_status": {"all_engines": {"running": true}}
+    })
 }
 
 /// POST `/api/v3/flight` with a full flight-init body (`{"data": {...}}`:
 /// aircraft, a start, engine status, local time, weather).
 pub fn post_flight_init(host: &str, port: u16, body: &serde_json::Value) -> Result<()> {
     let url = format!("http://{host}:{port}/api/v3/flight");
-    let resp = match ureq::post(&url).set("Content-Type", "application/json").send_string(&body.to_string()) {
-        Ok(r) => r,
+    match ureq::post(&url).set("Content-Type", "application/json").send_string(&body.to_string()) {
+        Ok(_) => Ok(()),
         Err(ureq::Error::Status(code, r)) => {
             bail!("X-Plane returned {code} on flight init: {}", r.into_string().unwrap_or_default())
         }
         Err(e) => bail!("X-Plane flight POST failed: {e}"),
-    };
-    if resp.status() / 100 != 2 {
-        bail!(
-            "X-Plane returned {} on flight init: {}",
-            resp.status(),
-            resp.into_string().unwrap_or_default()
-        );
     }
-    Ok(())
 }
 
 /// Resolve a named X-Plane command and fire it once.
@@ -321,20 +324,28 @@ pub fn activate_command(host: &str, port: u16, name: &str) -> Result<()> {
 /// Resolve a named X-Plane command and hold it `duration_s` (0 = one
 /// press).
 pub fn activate_command_for(host: &str, port: u16, name: &str, duration_s: f64) -> Result<()> {
+    activate_command_id(host, port, command_id(host, port, name)?, duration_s)
+        .map_err(|e| anyhow!("command activate for {name:?} failed: {e}"))
+}
+
+/// A named command's session id (stable for the X-Plane session, so
+/// callers firing the same commands repeatedly can cache it).
+pub fn command_id(host: &str, port: u16, name: &str) -> Result<i64> {
     let lookup = format!("http://{host}:{port}/api/v3/commands");
     let resp = ureq::get(&lookup)
         .query("filter[name]", name)
         .call()
         .map_err(|e| anyhow!("command lookup for {name:?} failed: {e}"))?;
     let payload: serde_json::Value = resp.into_json()?;
-    let id = payload["data"][0]["id"]
-        .as_i64()
-        .ok_or_else(|| anyhow!("command {name:?} not found"))?;
+    payload["data"][0]["id"].as_i64().ok_or_else(|| anyhow!("command {name:?} not found"))
+}
+
+/// Fire command `id`, held `duration_s` (0 = one press).
+pub fn activate_command_id(host: &str, port: u16, id: i64, duration_s: f64) -> Result<()> {
     let url = format!("http://{host}:{port}/api/v3/command/{id}/activate");
     ureq::post(&url)
         .set("Content-Type", "application/json")
-        .send_string(&serde_json::json!({"duration": duration_s}).to_string())
-        .map_err(|e| anyhow!("command activate for {name:?} failed: {e}"))?;
+        .send_string(&serde_json::json!({"duration": duration_s}).to_string())?;
     Ok(())
 }
 

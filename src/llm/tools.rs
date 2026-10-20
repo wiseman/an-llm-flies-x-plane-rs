@@ -23,8 +23,8 @@ use crate::llm::backend::ToolDef;
 use crate::core::mission_manager::{
     ActiveClearance, ClearanceSource, MissionGoal, PilotCore, StatusSnapshot,
 };
-use crate::core::landing_rollout::{ArrivalPlan, ExitOption};
-use crate::core::profiles::{GuidanceProfile, RunwayExitPlan, TakeoffRun, TaxiProfile};
+use crate::core::landing_rollout::{ArrivalPlan, ExitOption, LandingPlan};
+use crate::core::profiles::{GuidanceProfile, RunwayClearances, RunwayExitPlan, TakeoffRun, TaxiProfile};
 use crate::data::airspace_query::{self, AircraftSnapshot, AirspaceSource};
 use crate::data::parquet::{
     AIRPORTS_FILE, AIRSPACES_FILE, COMMS_FILE, HOLD_LINES_FILE, PARKING_SPOTS_FILE, RUNWAYS_FILE, TAXI_EDGES_FILE,
@@ -735,7 +735,7 @@ fn dir_join(sibling: &std::path::Path, name: &str) -> PathBuf {
 
 /// The pilot's config with `airport_ident`'s runway `runway_ident` (from
 /// apt.dat) as its reference runway, flown with `side` traffic.
-pub fn runway_config(ctx: &ToolContext, airport_ident: &str, runway_ident: &str, side: &str) -> Result<ConfigBundle> {
+pub fn runway_config(ctx: &ToolContext, airport_ident: &str, runway_ident: &str, side: TrafficSide) -> Result<ConfigBundle> {
     let bridge = ctx
         .bridge
         .as_ref()
@@ -745,8 +745,6 @@ pub fn runway_config(ctx: &ToolContext, airport_ident: &str, runway_ident: &str,
         let guard = ctx.runway_conn.lock().unwrap();
         query_runway_end(guard.as_ref().unwrap(), airport_ident, runway_ident)?
     };
-    let traffic_side = TrafficSide::from_str(side)
-        .ok_or_else(|| anyhow!("invalid side {:?}; expected 'left' or 'right'", side))?;
     // Runway frame anchors at the pavement end (apt.dat row-100 lat/lon)
     // so x=0 means "start of usable takeoff pavement" and x=length is
     // "far end of pavement". The displaced landing threshold sits
@@ -759,18 +757,7 @@ pub fn runway_config(ctx: &ToolContext, airport_ident: &str, runway_ident: &str,
     let mut cfg = ctx.config.lock().clone();
     cfg.airport.airport = Some(airport_ident.to_string());
     cfg.airport.field_elevation_ft = end.elevation_ft;
-    cfg.airport.runway = Runway {
-        id: Some(runway_ident.to_string()),
-        threshold_ft: pavement_end_ft,
-        course_deg: end.course_deg,
-        length_ft: end.length_ft,
-        // Aim 600 ft past the landing threshold, as a plan's
-        // pattern does.
-        touchdown_zone_ft: crate::plan::compile::TOUCHDOWN_ZONE_FT,
-        displaced_threshold_ft: end.displaced_threshold_ft,
-        width_ft: end.width_ft,
-        traffic_side,
-    };
+    cfg.airport.runway = end.runway(runway_ident, pavement_end_ft, side);
     Ok(cfg)
 }
 
@@ -785,6 +772,25 @@ pub struct RunwayEnd {
     pub width_ft: f64,
     pub elevation_ft: f64,
     pub displaced_threshold_ft: f64,
+}
+
+impl RunwayEnd {
+    /// This end as the pilot's runway, its frame anchored at `threshold_ft`
+    /// (the pavement end, in the world frame).
+    pub fn runway(&self, ident: &str, threshold_ft: Vec2, side: TrafficSide) -> Runway {
+        Runway {
+            id: Some(ident.to_string()),
+            threshold_ft,
+            course_deg: self.course_deg,
+            length_ft: self.length_ft,
+            // Aim 600 ft past the landing threshold, as a plan's
+            // pattern does.
+            touchdown_zone_ft: crate::plan::compile::TOUCHDOWN_ZONE_FT,
+            displaced_threshold_ft: self.displaced_threshold_ft,
+            width_ft: self.width_ft,
+            traffic_side: side,
+        }
+    }
 }
 
 /// Look up `runway_ident` at `airport_ident` (either end) in `conn`'s
@@ -1075,12 +1081,7 @@ pub fn tool_fly(ctx: &ToolContext, args: &Map<String, Value>) -> String {
         notes
     };
     let mut out = match (amended, delta) {
-        (Some(notes), _) => {
-            if let Some(d) = &ctx.demo {
-                d.flew_a_plan();
-            }
-            reply("plan amended:".to_string(), notes)
-        }
+        (Some(notes), _) => reply("plan amended:".to_string(), notes),
         (None, Some(delta)) => {
             let traffic = ctx.pilot.lock().traffic.clone();
             let mut profile = PlanProfile::new(base.clone(), &state).with_traffic(traffic);
@@ -1090,17 +1091,15 @@ pub fn tool_fly(ctx: &ToolContext, args: &Map<String, Value>) -> String {
                 None => engage(ctx, Box::new(profile)),
             };
             match engaged {
-                Ok(displaced) => {
-                    if let Some(d) = &ctx.demo {
-                        d.flew_a_plan();
-                    }
-                    reply(format!("plan engaged{displaced}:"), notes)
-                }
+                Ok(displaced) => reply(format!("plan engaged{displaced}:"), notes),
                 Err(e) => return e,
             }
         }
         (None, None) => unreachable!("the delta is used only when a plan was amended"),
     };
+    if let Some(d) = &ctx.demo {
+        d.flew_a_plan();
+    }
     // The takeoff roll's status line tracks the runway ahead.
     if let Some(run) = takeoff_run {
         if let Some(pf) = ctx.pilot.lock().pattern_fly_mut() {
@@ -1437,11 +1436,10 @@ pub fn tool_engage_dead_stick_landing(ctx: &ToolContext, args: &Map<String, Valu
         Ok(s) => s.to_string(),
         Err(e) => return format!("error: {}", e),
     };
-    let side = args
-        .get("side")
-        .and_then(|v| v.as_str())
-        .unwrap_or(DEFAULT_TRAFFIC_SIDE)
-        .to_string();
+    let side_arg = args.get("side").and_then(|v| v.as_str()).unwrap_or(DEFAULT_TRAFFIC_SIDE);
+    let Some(side) = TrafficSide::from_str(side_arg) else {
+        return format!("error: invalid side {side_arg:?}; expected 'left' or 'right'");
+    };
 
     // Snapshot + glide_ratio in one pass each so the on-ground / reach
     // checks don't reacquire locks they already held.
@@ -1457,7 +1455,7 @@ pub fn tool_engage_dead_stick_landing(ctx: &ToolContext, args: &Map<String, Valu
         return "error: aircraft is on the ground; dead-stick landing requires being airborne".to_string();
     }
 
-    let config = match runway_config(ctx, &airport, &runway_ident, &side) {
+    let config = match runway_config(ctx, &airport, &runway_ident, side) {
         Ok(cfg) => cfg,
         Err(e) => return format!("error: {}", e),
     };
@@ -1671,6 +1669,37 @@ pub fn tool_tune_radio(ctx: &ToolContext, args: &Map<String, Value>) -> String {
     )
 }
 
+/// ATC cleared a runway crossing: let the active taxi (and any planned
+/// taxi to parking) continue across it.
+pub fn tool_cross_runway(ctx: &ToolContext, args: &Map<String, Value>) -> String {
+    let runway = match arg_str(args, "runway_ident") {
+        Ok(s) => s.to_string(),
+        Err(e) => return format!("error: {}", e),
+    };
+    let mut pilot = ctx.pilot.lock();
+    let mut cleared = pilot.profile_mut::<TaxiProfile>().map(|t| t.clear_crossing(&runway)).unwrap_or(0);
+    if let Some(holder) = pilot.landing_plan_mut() {
+        for a in holder.arrivals_mut() {
+            cleared += a.taxi.clear_crossing(&runway);
+        }
+    }
+    if cleared == 0 {
+        let along = pilot.profile_mut::<TaxiProfile>().is_some_and(|t| t.uncleared_along(&runway).is_some())
+            || pilot
+                .landing_plan_mut()
+                .is_some_and(|h| h.arrivals_mut().iter().any(|a| a.taxi.uncleared_along(&runway).is_some()));
+        if along {
+            return format!(
+                "error: the route taxis along runway {runway}, not just across it, and a crossing clearance doesn't cover that; nothing changed. Ask Ground for a route that crosses it, or, if cleared onto the runway ('taxi via runway {runway}'), engage the taxi again with {runway} in via_taxiways"
+            );
+        }
+        return format!(
+            "error: no uncleared crossing of runway {runway} on the active or planned taxi route; nothing changed"
+        );
+    }
+    format!("cleared to cross runway {runway}: the taxi continues across it")
+}
+
 pub fn tool_set_parking_brake(ctx: &ToolContext, args: &Map<String, Value>) -> String {
     let engaged = match arg_bool(args, "engaged") {
         Ok(v) => v,
@@ -1780,7 +1809,34 @@ pub fn tool_broadcast_on_radio(ctx: &ToolContext, args: &Map<String, Value>) -> 
 pub struct TaxiLegsPlan {
     pub legs: Vec<StraightLeg>,
     pub names: Vec<String>,
+    /// Each leg's apt.dat active zones ("" for none, and for a pullout).
+    pub zones: Vec<String>,
+    /// Whether each leg is runway pavement (false for a pullout).
+    pub on_runway: Vec<bool>,
     pub pullout_ft: Option<f64>,
+}
+
+/// What the taxi may do on this route's runways without a further
+/// clearance: cross those ATC cleared it to cross, taxi along those its
+/// route clearance names (`via_runways`), and leave the one it's on when
+/// the route starts on runway pavement (that's neither a crossing nor a
+/// taxi on someone else's runway).
+fn runway_clearances(
+    zones: &[String],
+    start_on_runway: bool,
+    cross_runways: &[String],
+    via_runways: &[String],
+) -> RunwayClearances {
+    let mut out = RunwayClearances { cross: cross_runways.to_vec(), along: via_runways.to_vec() };
+    if start_on_runway {
+        // The first leg or two (after a pullout) is the runway underfoot.
+        if let Some(z) = zones.iter().take(2).find(|z| !crate::core::profiles::runways_in_zone(z).is_empty()) {
+            let underfoot = crate::core::profiles::runways_in_zone(z);
+            out.cross.extend(underfoot.iter().cloned());
+            out.along.extend(underfoot);
+        }
+    }
+    out
 }
 
 pub fn build_taxi_legs_with_pullout(
@@ -1798,13 +1854,15 @@ pub fn build_taxi_legs_with_pullout(
         })
         .collect();
     let mut names: Vec<String> = plan_legs.iter().map(|l| l.taxiway_name.clone()).collect();
+    let mut zones: Vec<String> = plan_legs.iter().map(|l| l.active_zones.clone()).collect();
+    let mut on_runway: Vec<bool> = plan_legs.iter().map(|l| l.on_runway).collect();
 
     let Some(first) = legs_ft.first().copied() else {
-        return TaxiLegsPlan { legs: legs_ft, names, pullout_ft: None };
+        return TaxiLegsPlan { legs: legs_ft, names, zones, on_runway, pullout_ft: None };
     };
     let d_ft = (first.start_ft - aircraft_pos_ft).length();
     if d_ft <= PULLOUT_THRESHOLD_FT {
-        return TaxiLegsPlan { legs: legs_ft, names, pullout_ft: None };
+        return TaxiLegsPlan { legs: legs_ft, names, zones, on_runway, pullout_ft: None };
     }
     legs_ft.insert(
         0,
@@ -1814,7 +1872,9 @@ pub fn build_taxi_legs_with_pullout(
         },
     );
     names.insert(0, String::new());
-    TaxiLegsPlan { legs: legs_ft, names, pullout_ft: Some(d_ft) }
+    zones.insert(0, String::new());
+    on_runway.insert(0, false);
+    TaxiLegsPlan { legs: legs_ft, names, zones, on_runway, pullout_ft: Some(d_ft) }
 }
 
 pub fn tool_engage_line_up(ctx: &ToolContext, args: &Map<String, Value>) -> String {
@@ -1881,7 +1941,7 @@ pub fn tool_engage_line_up(ctx: &ToolContext, args: &Map<String, Value>) -> Stri
     // Engage on the resolved runway so later checks (the takeoff
     // alignment guard) compare against the runway we're lining up on,
     // not whatever startup-default runway was in the config.
-    let config = match runway_config(ctx, &airport, &runway, "left") {
+    let config = match runway_config(ctx, &airport, &runway, TrafficSide::Left) {
         Ok(cfg) => cfg,
         Err(e) => return format!("error: {}", e),
     };
@@ -2054,6 +2114,7 @@ pub fn tool_engage_taxi(ctx: &ToolContext, args: &Map<String, Value>) -> String 
         Err(e) => return format!("error: {}", e),
     };
     let via_taxiways = arg_string_array(args, "via_taxiways");
+    let cross_runways = arg_string_array(args, "cross_runways");
     let intersection = args
         .get("intersection")
         .and_then(|v| v.as_str())
@@ -2073,7 +2134,7 @@ pub fn tool_engage_taxi(ctx: &ToolContext, args: &Map<String, Value>) -> String 
         None => TaxiDestination::Runway(&destination_runway),
     });
     let start = TaxiStart { lat: start_lat, lon: start_lon, heading_deg: aircraft_heading_deg };
-    let PlannedTaxi { plan, face_toward_latlon, .. } = {
+    let PlannedTaxi { plan, face_toward_latlon, on_runway, via_runways, .. } = {
         let guard = ctx.runway_conn.lock().unwrap();
         let conn = guard.as_ref().unwrap();
         match taxi_graph(ctx, conn, &airport)
@@ -2086,7 +2147,7 @@ pub fn tool_engage_taxi(ctx: &ToolContext, args: &Map<String, Value>) -> String 
 
     let georef = bridge.georef();
     let aircraft_pos_ft = geodetic_offset_ft(start_lat, start_lon, georef);
-    let TaxiLegsPlan { legs: legs_ft, names, pullout_ft } =
+    let TaxiLegsPlan { legs: legs_ft, names, zones, on_runway: legs_on_runway, pullout_ft } =
         build_taxi_legs_with_pullout(aircraft_pos_ft, &plan.legs, georef);
     // Terminal pose target: stop at the hold-short node aligned with
     // the last leg's direction. Do NOT aim the aircraft at the runway
@@ -2127,7 +2188,9 @@ pub fn tool_engage_taxi(ctx: &ToolContext, args: &Map<String, Value>) -> String 
     }
     let pose_appended = final_pose.is_some();
     let leg_count = legs_ft.len();
-    let mut profile = TaxiProfile::new(legs_ft, names);
+    let clearances = runway_clearances(&zones, on_runway, &cross_runways, &via_runways);
+    let mut profile = TaxiProfile::new(legs_ft, names).with_runway_holds(&zones, &legs_on_runway, &clearances);
+    let crossing_note = crossing_note(&profile);
     if let Some(pose) = final_pose {
         profile = profile.with_final_pose(pose);
     }
@@ -2170,8 +2233,41 @@ pub fn tool_engage_taxi(ctx: &ToolContext, args: &Map<String, Value>) -> String 
     if let Some(crossings) = format_unique_crossings(&plan.runway_crossings) {
         summary.push_str(&format!(" (crossings: {})", crossings));
     }
+    summary.push_str(&crossing_note);
     summary.push_str(&displaced);
     summary
+}
+
+/// What the taxi will do at the runways it crosses or taxis along, for
+/// tool results.
+fn crossing_note(profile: &TaxiProfile) -> String {
+    let labels = |along: bool, cleared: bool| -> Vec<String> {
+        profile.runway_holds.iter().filter(|h| h.along == along && h.cleared == cleared).map(|h| h.label()).collect()
+    };
+    let mut out = String::new();
+    let holding = labels(false, false);
+    if !holding.is_empty() {
+        out.push_str(&format!(
+            ". Holds short of runway {} until cleared: when ATC clears the crossing, call cross_runway",
+            holding.join(", then ")
+        ));
+    }
+    let holding_along = labels(true, false);
+    if !holding_along.is_empty() {
+        out.push_str(&format!(
+            ". The route taxis along runway {} (no way across without it) and holds short until cleared onto it: a crossing clearance doesn't cover that. If ATC clears you onto it, engage the taxi again with the runway in via_taxiways",
+            holding_along.join(", then ")
+        ));
+    }
+    let cleared = labels(false, true);
+    if !cleared.is_empty() {
+        out.push_str(&format!(". Cleared to cross {}", cleared.join(", ")));
+    }
+    let cleared_along = labels(true, true);
+    if !cleared_along.is_empty() {
+        out.push_str(&format!(". Taxis along runway {} as cleared", cleared_along.join(", ")));
+    }
+    out
 }
 
 pub fn tool_plan_taxi_route(ctx: &ToolContext, args: &Map<String, Value>) -> String {
@@ -2283,6 +2379,7 @@ pub fn tool_engage_park(ctx: &ToolContext, args: &Map<String, Value>) -> String 
         Err(e) => return format!("error: {}", e),
     };
     let via_taxiways = arg_string_array(args, "via_taxiways");
+    let cross_runways = arg_string_array(args, "cross_runways");
     let (start_lat, start_lon) = match resolve_engage_start_latlon(ctx, args) {
         Ok(v) => v,
         Err(e) => return format!("error: {}", e),
@@ -2293,6 +2390,8 @@ pub fn tool_engage_park(ctx: &ToolContext, args: &Map<String, Value>) -> String 
         &airport,
         &parking_name,
         &via_taxiways,
+        &cross_runways,
+        true,
         start_lat,
         start_lon,
         start_heading_deg(&bridge),
@@ -2340,13 +2439,15 @@ fn build_park_route(
     airport: &str,
     parking_name: &str,
     via_taxiways: &[String],
+    cross_runways: &[String],
+    may_start_on_runway: bool,
     start_lat: f64,
     start_lon: f64,
     start_heading_deg: f64,
 ) -> std::result::Result<ParkRoute, String> {
     ensure_runway_conn(ctx).map_err(|e| e.to_string())?;
     let start = TaxiStart { lat: start_lat, lon: start_lon, heading_deg: start_heading_deg };
-    let PlannedTaxi { plan, parking, .. } = {
+    let PlannedTaxi { plan, parking, on_runway, via_runways, .. } = {
         let guard = ctx.runway_conn.lock().unwrap();
         let conn = guard.as_ref().unwrap();
         let graph = taxi_graph(ctx, conn, airport).map_err(|e| e.to_string())?;
@@ -2357,7 +2458,7 @@ fn build_park_route(
 
     let georef = bridge.georef();
     let start_pos_ft = geodetic_offset_ft(start_lat, start_lon, georef);
-    let TaxiLegsPlan { legs: mut legs_ft, mut names, pullout_ft } =
+    let TaxiLegsPlan { legs: mut legs_ft, mut names, mut zones, on_runway: mut legs_on_runway, pullout_ft } =
         build_taxi_legs_with_pullout(start_pos_ft, &plan.legs, georef);
 
     // Parking spots sit off the network: add a leg from the last taxi
@@ -2377,12 +2478,17 @@ fn build_park_route(
         if (end_ft - last.end_ft).length() > 1.0 {
             legs_ft.push(StraightLeg { start_ft: last.end_ft, end_ft });
             names.push(format!("(to {})", resolved.spot_name));
+            zones.push(String::new());
+            legs_on_runway.push(false);
         }
     }
     let leg_count = legs_ft.len();
+    let clearances = runway_clearances(&zones, on_runway && may_start_on_runway, cross_runways, &via_runways);
     let profile = TaxiProfile::new(legs_ft, names)
         .with_final_pose(final_pose)
-        .parking_at(resolved.spot_name.clone());
+        .parking_at(resolved.spot_name.clone())
+        .with_runway_holds(&zones, &legs_on_runway, &clearances);
+    let hold_note = crossing_note(&profile);
 
     let headline = format!(
         "{:?} ({}) — {} legs, {:.0} m",
@@ -2402,6 +2508,7 @@ fn build_park_route(
     if let Some(crossings) = format_unique_crossings(&plan.runway_crossings) {
         details.push_str(&format!(" (crossings: {})", crossings));
     }
+    details.push_str(&hold_note);
     Ok(ParkRoute { profile, headline, details })
 }
 
@@ -2427,8 +2534,7 @@ pub fn tool_choose_runway_exit(ctx: &ToolContext, args: &Map<String, Value>) -> 
 
     // Resolve the selected taxi edge into its exact graph path now;
     // the rollout needs it to fly the exit autonomously.
-    let mut exit_plan = None;
-    let mut arrival = None;
+    let mut plan = LandingPlan::default();
     let mut note = String::new();
     if let Some(name) = &taxiway {
         let (airport, runway) = match active_runway(ctx) {
@@ -2451,12 +2557,14 @@ pub fn tool_choose_runway_exit(ctx: &ToolContext, args: &Map<String, Value>) -> 
             match arrival_from_exit(ctx, &airport, exit, parking, via) {
                 Ok(a) => {
                     note.push_str(&format!("; arrival re-planned: taxi to {}", a.summary));
-                    arrival = Some(a);
+                    plan.arrival = Some(a);
                 }
                 Err(e) => return format!("error: can't re-plan the arrival taxi from {name}: {e}"),
             }
         }
-        exit_plan = Some(exit.plan());
+        let parking = arrival_request.as_ref().map(|(p, v)| (p.as_str(), v.as_slice()));
+        plan.fallbacks = fallback_exits(ctx, &airport, &detail, exit, parking);
+        plan.exit = Some(exit.plan());
     } else if let Some((parking, _)) = &arrival_request {
         note = format!("; arrival plan to {parking} dropped (no exit to taxi from)");
     }
@@ -2465,7 +2573,7 @@ pub fn tool_choose_runway_exit(ctx: &ToolContext, args: &Map<String, Value>) -> 
         Some(t) => format!("preferred runway exit set to {:?}{note}", t),
         None => format!("preferred runway exit cleared{note}"),
     };
-    match ctx.pilot.lock().landing_plan_mut().map(|h| h.set_landing_plan(exit_plan, arrival)) {
+    match ctx.pilot.lock().landing_plan_mut().map(|h| h.set_landing_plan(plan)) {
         Some(Ok(())) => display,
         Some(Err(e)) => format!("error: {e}"),
         None => NO_PATTERN.to_string(),
@@ -2527,19 +2635,7 @@ pub fn tool_plan_arrival(ctx: &ToolContext, args: &Map<String, Value>) -> String
         Ok(a) => a,
         Err(e) => return format!("error: {e}"),
     };
-    // Backups if the exit is missed (a long float, too fast at the
-    // intersection): the next few exits, each with its own taxi.
-    let mut fallbacks: Vec<ExitOption> = detail
-        .exits
-        .iter()
-        .filter(|e| e.stationing_ft > exit.stationing_ft)
-        .take(MAX_FALLBACK_EXITS)
-        .map(|e| ExitOption {
-            exit: e.plan(),
-            arrival: arrival_from_exit(ctx, &airport, e, &parking_name, &via_taxiways).ok(),
-        })
-        .collect();
-    fallbacks.sort_by(|a, b| a.exit.stationing_ft.total_cmp(&b.exit.stationing_ft));
+    let fallbacks = fallback_exits(ctx, &airport, &detail, exit, Some((&parking_name, &via_taxiways)));
     let backups = if fallbacks.is_empty() {
         "if the exit is missed it stops on the runway and you're woken (completed: landing_rollout) to choose an exit ahead or engage_park".to_string()
     } else {
@@ -2556,20 +2652,38 @@ pub fn tool_plan_arrival(ctx: &ToolContext, args: &Map<String, Value>) -> String
         if exit_name.is_none() { ", auto-selected" } else { "" },
         arrival.summary,
     );
-    let plan = exit.plan();
-    let mut pilot = ctx.pilot.lock();
-    let Some(holder) = pilot.landing_plan_mut() else { return NO_PATTERN.to_string() };
-    match holder.set_landing_plan(Some(plan), Some(arrival)) {
-        Ok(()) => {
-            holder.set_fallback_exits(fallbacks);
-            reply
-        }
-        Err(e) => format!("error: {e}"),
+    let plan = LandingPlan { exit: Some(exit.plan()), arrival: Some(arrival), fallbacks };
+    match ctx.pilot.lock().landing_plan_mut().map(|h| h.set_landing_plan(plan)) {
+        Some(Ok(())) => reply,
+        Some(Err(e)) => format!("error: {e}"),
+        None => NO_PATTERN.to_string(),
     }
 }
 
-/// Backup exits `plan_arrival` plans beyond the chosen one.
+/// Backup exits planned beyond the chosen one.
 const MAX_FALLBACK_EXITS: usize = 4;
+
+/// The next few exits after `exit`, in runway order, each with its own
+/// taxi to `parking` (when there is one to plan): taken if `exit` is
+/// missed (a float, or too fast at the intersection).
+fn fallback_exits(
+    ctx: &ToolContext,
+    airport: &str,
+    detail: &RunwayExitInfo,
+    exit: &RunwayExitCandidate,
+    parking: Option<(&str, &[String])>,
+) -> Vec<ExitOption> {
+    detail
+        .exits
+        .iter()
+        .filter(|e| e.stationing_ft > exit.stationing_ft)
+        .take(MAX_FALLBACK_EXITS)
+        .map(|e| ExitOption {
+            exit: e.plan(),
+            arrival: parking.and_then(|(p, via)| arrival_from_exit(ctx, airport, e, p, via).ok()),
+        })
+        .collect()
+}
 
 /// The airport and runway the active pattern is anchored to.
 fn active_runway(ctx: &ToolContext) -> std::result::Result<(String, String), String> {
@@ -2632,12 +2746,16 @@ fn arrival_from_exit(
         .as_ref()
         .ok_or("aircraft systems bridge unavailable; planning a taxi route needs the georef")?
         .clone();
+    // The exit leaves the landing runway's zone behind, so every runway
+    // ahead is a crossing; Ground's clearance comes later (cross_runway).
     let route = build_park_route(
         ctx,
         &bridge,
         airport,
         parking_name,
         via_taxiways,
+        &[],
+        false,
         exit.end_lat_deg,
         exit.end_lon_deg,
         exit.end_heading_deg,
@@ -2937,6 +3055,18 @@ fn format_taxi_plan(plan: &taxi_route::TaxiPlan) -> String {
     if let Some(crossings) = format_unique_crossings(&plan.runway_crossings) {
         out.push_str(&format!("  runway zones: {}\n", crossings));
     }
+    let mut along: Vec<&str> = Vec::new();
+    for leg in plan.legs.iter().filter(|l| l.on_runway) {
+        if !along.contains(&leg.taxiway_name.as_str()) {
+            along.push(&leg.taxiway_name);
+        }
+    }
+    if !along.is_empty() {
+        out.push_str(&format!(
+            "  along runway: {} (on the runway itself, not just across it; an engaged taxi holds short there unless via_taxiways names the runway)\n",
+            along.join(", ")
+        ));
+    }
     out.push_str(&format!(
         "  start_node={} destination_node={}\n",
         plan.start_node, plan.destination_node
@@ -3179,6 +3309,7 @@ pub fn dispatch_tool(name: &str, arguments: &str, ctx: &ToolContext) -> ToolResu
         "tune_radio" => tool_tune_radio(ctx, &map),
         "broadcast_on_radio" => tool_broadcast_on_radio(ctx, &map),
         "set_parking_brake" => tool_set_parking_brake(ctx, &map),
+        "cross_runway" => tool_cross_runway(ctx, &map),
         "set_flaps" => tool_set_flaps(ctx, &map),
         "sql_query" => tool_sql_query(ctx, &map),
         "plan_taxi_route" => tool_plan_taxi_route(ctx, &map),
@@ -3345,6 +3476,12 @@ pub fn tool_schemas(include_mission_complete: bool) -> Vec<ToolDef> {
             &["radio", "message"],
         ),
         schema(
+            "cross_runway",
+            "ATC cleared you to cross a runway ('cross runway 16R'): the taxi holding short of it (or about to) continues across. Every taxi stops at the hold-short of each runway on its route that it isn't cleared to cross, including the planned taxi to parking after landing, and reports 'holding short of runway ...'. Never call this without ATC's clearance to cross. Clears that runway on the active taxi and on any planned taxi to parking. Crossings only: where a route taxis along the runway itself (it does that only when via_taxiways names the runway, or when there is no other way across), a crossing clearance doesn't cover it and the reply says so.",
+            json!({"runway_ident": {"type": "string", "description": "The runway cleared to cross; either end's ident works (e.g. '16R' or '34L')."}}),
+            &["runway_ident"],
+        ),
+        schema(
             "set_parking_brake",
             "Engage or release the parking brake. Unlike the toe brakes, the parking brake holds its state without continuous input — this is the right tool for 'set the brake and hold it'. Completes immediately. Note: engage_taxi and engage_park auto-release the brake if set, so there is no need to release it before calling those tools.",
             json!({"engaged": {"type": "boolean", "description": "True to engage (set) the parking brake, false to release it."}}),
@@ -3404,7 +3541,12 @@ pub fn tool_schemas(include_mission_complete: bool) -> Vec<ToolDef> {
                 "via_taxiways": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "Ordered list of taxiway names from the clearance, e.g. ['A', 'D']. Pass [] to let the planner pick the shortest route."
+                    "description": "Ordered list of taxiway names from the clearance, e.g. ['A', 'D']. Pass [] to let the planner pick the shortest route. Routes cross runways but never taxi along one unless it is named here: put the runway in the list ('16R') only when ATC clears you onto it ('taxi via runway 16R', 'backtaxi 16R')."
+                },
+                "cross_runways": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Runways ATC cleared you to cross in this taxi clearance ('taxi via G, A, cross runway 16R' → ['16R']). The taxi stops at the hold-short of every other runway on the route; pass [] when no crossing was cleared, and call cross_runway when it is. Crossing only: a clearance to taxi along a runway goes in via_taxiways."
                 },
                 "intersection": {
                     "type": ["string", "null"],
@@ -3419,7 +3561,7 @@ pub fn tool_schemas(include_mission_complete: bool) -> Vec<ToolDef> {
                     "description": "Starting longitude. If null, the current aircraft position is used."
                 }
             }),
-            &["airport_ident", "destination_runway", "via_taxiways", "intersection", "start_lat", "start_lon"],
+            &["airport_ident", "destination_runway", "via_taxiways", "cross_runways", "intersection", "start_lat", "start_lon"],
         ),
         schema(
             "plan_taxi_route",
@@ -3436,7 +3578,7 @@ pub fn tool_schemas(include_mission_complete: bool) -> Vec<ToolDef> {
                 "via_taxiways": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "Ordered list of taxiway names from the clearance, e.g. ['A', 'D']. Pass [] to let the planner pick the shortest route and report which taxiways it used."
+                    "description": "Ordered list of taxiway names from the clearance, e.g. ['A', 'D']. Pass [] to let the planner pick the shortest route and report which taxiways it used. Routes cross runways but never taxi along one unless it is named here: put the runway in the list ('16R') only when ATC clears you onto it ('taxi via runway 16R', 'backtaxi 16R')."
                 },
                 "start_lat": {
                     "type": ["number", "null"],
@@ -3464,7 +3606,12 @@ pub fn tool_schemas(include_mission_complete: bool) -> Vec<ToolDef> {
                 "via_taxiways": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "Ordered list of taxiway names if you want a specific routing, e.g. ['B', 'A']. Pass [] for shortest route."
+                    "description": "Ordered list of taxiway names if you want a specific routing, e.g. ['B', 'A']. Pass [] for shortest route. Routes cross runways but never taxi along one unless it is named here: put the runway in the list ('16R') only when ATC clears you onto it ('taxi via runway 16R', 'backtaxi 16R')."
+                },
+                "cross_runways": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Runways ATC cleared you to cross in this taxi clearance ('taxi via G, A, cross runway 16R' → ['16R']). The taxi stops at the hold-short of every other runway on the route; pass [] when no crossing was cleared, and call cross_runway when it is. Crossing only: a clearance to taxi along a runway goes in via_taxiways."
                 },
                 "start_lat": {
                     "type": ["number", "null"],
@@ -3475,7 +3622,7 @@ pub fn tool_schemas(include_mission_complete: bool) -> Vec<ToolDef> {
                     "description": "Starting longitude. If null, the current aircraft position is used."
                 }
             }),
-            &["airport_ident", "parking_name", "via_taxiways", "start_lat", "start_lon"],
+            &["airport_ident", "parking_name", "via_taxiways", "cross_runways", "start_lat", "start_lon"],
         ),
         schema(
             "plan_park_route",
@@ -3492,7 +3639,7 @@ pub fn tool_schemas(include_mission_complete: bool) -> Vec<ToolDef> {
                 "via_taxiways": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "Ordered list of taxiway names, or [] for shortest route."
+                    "description": "Ordered list of taxiway names, or [] for shortest route. Routes cross runways but never taxi along one unless it is named here: put the runway in the list ('16R') only when ATC clears you onto it ('taxi via runway 16R', 'backtaxi 16R')."
                 },
                 "start_lat": {
                     "type": ["number", "null"],
@@ -3531,7 +3678,7 @@ pub fn tool_schemas(include_mission_complete: bool) -> Vec<ToolDef> {
                 "via_taxiways": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "Taxiways to follow in order from the exit to parking, e.g. ['A', 'C']. [] for the shortest route."
+                    "description": "Taxiways to follow in order from the exit to parking, e.g. ['A', 'C']. [] for the shortest route. Routes cross runways but never taxi along one unless it is named here: put the runway in the list ('16R') only when ATC clears you onto it ('taxi via runway 16R', 'backtaxi 16R')."
                 }
             }),
             &["parking_name", "exit_taxiway", "via_taxiways"],
@@ -3872,4 +4019,3 @@ mod quiet_tool_tests {
         }
     }
 }
-

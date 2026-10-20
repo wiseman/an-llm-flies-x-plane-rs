@@ -111,6 +111,19 @@ pub fn resolve(apt_dat: &Path, airspace_txt: Option<&Path>) -> Result<AptDatCach
     Ok(cache)
 }
 
+/// `resolve` for the given apt.dat and airspace.txt, else the ones found
+/// in a standard X-Plane 12 install (airspace only when present).
+pub fn resolve_default(apt_dat: Option<PathBuf>, airspace_txt: Option<PathBuf>) -> Result<AptDatCache> {
+    let apt = apt_dat.or_else(apt_dat::default_apt_dat_path).ok_or_else(|| {
+        anyhow!("apt.dat not found; pass --apt-dat-path or install X-Plane 12 at the standard location")
+    })?;
+    if !apt.exists() {
+        return Err(anyhow!("apt.dat not found at {}", apt.display()));
+    }
+    let airspace = airspace_txt.or_else(airspace::default_airspace_txt_path).filter(|p| p.exists());
+    resolve(&apt, airspace.as_deref()).with_context(|| format!("building apt.dat parquet cache from {}", apt.display()))
+}
+
 /// Bump this whenever the parquet schema changes (column names / types /
 /// added or removed files) in an incompatible way. Folded into the cache
 /// directory hash, so old caches are transparently ignored and rebuilt

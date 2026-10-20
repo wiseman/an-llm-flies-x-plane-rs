@@ -462,6 +462,10 @@ pub struct AircraftState {
     pub alt_msl_ft: f64,
     /// Height above field elevation (0 on the ground).
     pub alt_agl_ft: f64,
+    /// The field elevation `alt_agl_ft` is measured from: the reference
+    /// runway's surface at the aim point as the radio altimeter measured
+    /// it, else the airport's published elevation.
+    pub field_elevation_ft: f64,
     /// Geometric height above the terrain directly below (a radar
     /// altimeter), vs `alt_agl_ft` which is height above *field
     /// elevation* (baro minus a database constant). The two disagree
@@ -507,6 +511,7 @@ impl AircraftState {
             position_ft: Vec2::ZERO,
             alt_msl_ft: 1500.0,
             alt_agl_ft: 1000.0,
+            field_elevation_ft: 500.0,
             alt_radio_agl_ft: None,
             pitch_deg: 0.0,
             roll_deg: 0.0,

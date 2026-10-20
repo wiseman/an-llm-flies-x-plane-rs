@@ -22,9 +22,8 @@ use crate::demo::phraseology::spoken_form;
 use crate::demo::radio_voice::{RadioEvent, RadioHandle, Speaker, TxJob};
 use crate::demo::script::{CueActions, DemoScript, RecordAction, Roll, TuiView};
 use crate::demo::xplane::XpCommander;
-use crate::eval_scenario::{CueState, MessageSchedule, Sample, ScenarioMessage, ScheduleInputs};
+use crate::eval_scenario::{MessageSchedule, Sample, ScenarioMessage, ScheduleInputs};
 use crate::llm::conversation::IncomingMessage;
-use crate::llm::tools::ToolBridge;
 
 /// From the operator (TUI keys, `/cue`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,28 +34,17 @@ pub enum DemoCommand {
     Hold,
     /// Drop the next cue without sending it.
     Skip,
-}
-
-/// From the pilot's tools.
-#[derive(Debug, Clone)]
-pub enum DemoEvent {
-    Fly,
-    PilotTx(String),
-}
-
-/// To the TUI.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DemoUi {
+    /// You switched the terminal's view yourself: it stays there.
     View(TuiView),
 }
 
-/// For the TUI's cue hint.
-#[derive(Debug, Clone, Default)]
-pub struct DemoStatus {
-    pub next: Option<(usize, String, Option<CueState>)>,
-    pub total: usize,
-    pub held: bool,
-    pub standby: bool,
+/// From the pilot's tools and the TUI.
+#[derive(Debug, Clone)]
+pub enum DemoEvent {
+    /// The pilot flew a plan.
+    Fly,
+    /// ATC (you, from the TUI) called the pilot.
+    AtcCall(String),
 }
 
 /// What the pilot's tools reach: the radio (to speak the pilot's
@@ -71,7 +59,6 @@ impl DemoHooks {
         if let Some(r) = &self.radio {
             r.transmit(TxJob { id: 0, speaker: Speaker::Pilot, spoken: spoken_form(text) });
         }
-        let _ = self.events.send(DemoEvent::PilotTx(text.to_string()));
     }
 
     pub fn flew_a_plan(&self) {
@@ -83,16 +70,16 @@ impl DemoHooks {
 #[derive(Default)]
 pub struct Stage {
     pub xp: Option<XpCommander>,
-    pub bridge: Option<Arc<dyn ToolBridge>>,
     pub radio: Option<RadioHandle>,
     pub obs: Option<ObsHandle>,
-    pub ui: Option<Sender<DemoUi>>,
+    /// What the terminal shows.
+    pub ui: Option<Sender<TuiView>>,
 }
 
 /// An ATC call waiting for (or on) the radio.
 struct Pending {
-    cue: usize,
     text: String,
+    spoken: String,
     /// The radio's id for it once it's been handed over.
     tx_id: Option<u64>,
 }
@@ -106,11 +93,14 @@ pub struct DemoDirector {
     control_rx: Receiver<DemoCommand>,
     events_rx: Receiver<DemoEvent>,
     stage: Stage,
-    status: Arc<PLMutex<DemoStatus>>,
     timeline: Option<std::fs::File>,
+    /// Pilot transmissions already in the timeline.
+    radio_seen: usize,
     /// Sim time of the first tick: cue times count from here.
     t0: Option<f64>,
     rolled: bool,
+    /// OBS is recording (so the end of the take stops it).
+    recording: bool,
     standby: bool,
     held: bool,
     was_airborne: bool,
@@ -139,7 +129,6 @@ impl DemoDirector {
         timeline_path: Option<&Path>,
     ) -> Self {
         let timeline = timeline_path.and_then(|p| std::fs::File::create(p).ok());
-        let status = Arc::new(PLMutex::new(DemoStatus { total: script.cues.len(), ..Default::default() }));
         Self {
             script,
             schedule,
@@ -149,10 +138,11 @@ impl DemoDirector {
             control_rx,
             events_rx,
             stage,
-            status,
             timeline,
+            radio_seen: 0,
             t0: None,
             rolled: false,
+            recording: false,
             standby: false,
             held: false,
             was_airborne: false,
@@ -166,31 +156,21 @@ impl DemoDirector {
         }
     }
 
-    pub fn status(&self) -> Arc<PLMutex<DemoStatus>> {
-        self.status.clone()
-    }
-
-    /// Paused in standby, waiting for the first cue's key: the control
-    /// loop leaves the controls alone.
-    pub fn is_standby(&self) -> bool {
+    /// Paused in standby, waiting for the first cue's key.
+    #[cfg(test)]
+    fn is_standby(&self) -> bool {
         self.standby
     }
 
-    /// Before the take: the briefing to the pilot, the start camera, and
-    /// the ATC audio rendered ahead.
+    /// Before the take: the start camera, and the ATC audio rendered
+    /// ahead.
     pub fn prepare(&mut self) {
-        if let Some(b) = &self.script.briefing {
-            self.bus.push_log_kind(LogKind::Operator, b.clone());
-            let _ = self.input_tx.send(IncomingMessage::operator(b.clone()));
-        }
         if let (Some(xp), Some(cam)) = (&self.stage.xp, &self.script.xplane.initial_camera) {
             xp.command(cam, 0.0);
         }
         if let Some(r) = &self.stage.radio {
-            for c in &self.script.cues {
-                if let Some(text) = &c.msg.atc {
-                    r.prewarm(Speaker::Atc, &c.act.say.clone().unwrap_or_else(|| spoken_form(text)));
-                }
+            for spoken in self.script.cues.iter().filter_map(|c| c.spoken()) {
+                r.prewarm(Speaker::Atc, &spoken);
             }
         }
         self.log(format!("demo {}: {} cues", self.script.id, self.script.cues.len()));
@@ -210,22 +190,44 @@ impl DemoDirector {
                     self.held = !self.held;
                     self.log(if self.held { "cues held".into() } else { "cues resumed".into() });
                 }
+                DemoCommand::View(v) => {
+                    self.view = Some(v);
+                    for (_, r) in &mut self.reverts {
+                        r.tui = None;
+                    }
+                }
             }
         }
-        // Standby: settle on the autopilot, then pause until the key.
-        if self.script.xplane.roll == Roll::Manual && !self.rolled && !self.standby && rel.t >= self.script.xplane.settle_s {
-            self.standby = true;
-            if let Some(xp) = &self.stage.xp {
-                xp.command("sim/operation/pause_on", 0.0);
+        // Settle on the autopilot, then roll (auto) or pause until the
+        // key (manual).
+        if !self.rolled && !self.standby && rel.t >= self.script.xplane.settle_s {
+            match self.script.xplane.roll {
+                Roll::Auto => self.roll(),
+                Roll::Manual => {
+                    self.standby = true;
+                    if let Some(xp) = &self.stage.xp {
+                        xp.command("sim/operation/pause_on", 0.0);
+                    }
+                    self.log("standby: paused; F6 rolls the take".into());
+                }
             }
-            self.log("standby: paused; F6 rolls the take".into());
         }
         self.radio_events();
         self.release_atc();
+        // The pilot's transmissions: into the timeline, and the latest
+        // for readback cues.
+        let (new_tx, last_tx) = {
+            let log = self.radio_log.lock();
+            let new: Vec<String> = log[self.radio_seen.min(log.len())..].iter().map(|(_, m)| m.clone()).collect();
+            self.radio_seen = log.len();
+            (new, log.last().map(|(t, _)| t - t0))
+        };
+        for text in new_tx {
+            self.record("pilot_tx", serde_json::json!({"text": text}));
+        }
         if !self.held || force || skip {
-            let tx: Vec<f64> = self.radio_log.lock().iter().map(|(t, _)| t - t0).filter(|t| *t >= 0.0).collect();
-            let inputs = ScheduleInputs { pilot_tx_times: &tx, force_next: force || skip, rehearse_manual: false };
-            for (i, msg) in self.schedule.due_with(&rel, dt, &inputs) {
+            let inputs = ScheduleInputs { last_pilot_tx_s: last_tx, force_next: force || skip, rehearse_manual: false };
+            for (i, msg) in self.schedule.due(&rel, dt, &inputs) {
                 if skip {
                     skip = false;
                     self.log(format!("skipped cue {}", self.cue_name(i)));
@@ -242,7 +244,7 @@ impl DemoDirector {
                         self.stage_actions(&h, rel.t);
                     }
                 }
-                DemoEvent::PilotTx(text) => self.record("pilot_tx", serde_json::json!({"text": text})),
+                DemoEvent::AtcCall(text) => self.record("atc_call", serde_json::json!({"text": text})),
             }
         }
         if self.was_airborne && s.on_ground {
@@ -260,7 +262,6 @@ impl DemoDirector {
         for a in due {
             self.stage_actions(&a, rel.t);
         }
-        self.update_status();
     }
 
     fn cue_name(&self, i: usize) -> String {
@@ -268,18 +269,42 @@ impl DemoDirector {
         c.id.clone().unwrap_or_else(|| format!("#{i}"))
     }
 
+    /// The take starts: out of standby, recording (if the script says),
+    /// and the briefing to the pilot.
+    fn roll(&mut self) {
+        self.rolled = true;
+        if self.standby {
+            if let Some(xp) = &self.stage.xp {
+                xp.command("sim/operation/pause_off", 0.0);
+            }
+            self.standby = false;
+        }
+        self.wall_start = Instant::now();
+        self.record("roll", serde_json::json!({}));
+        self.log("rolling".into());
+        if self.script.obs.record {
+            self.start_recording();
+        }
+        if let Some(b) = self.script.briefing.clone() {
+            self.bus.push_log_kind(LogKind::Operator, b.clone());
+            let _ = self.input_tx.send(IncomingMessage::operator(b));
+        }
+        if let Some(a) = self.script.hooks.on_roll.clone() {
+            self.stage_actions(&a, self.last_t);
+        }
+    }
+
+    fn start_recording(&mut self) {
+        if let Some(obs) = &self.stage.obs {
+            obs.start_record();
+            self.recording = true;
+        }
+        self.record("record", serde_json::json!({"action": "start"}));
+    }
+
     fn fire(&mut self, i: usize, msg: &ScenarioMessage, t: f64) {
         if !self.rolled {
-            self.rolled = true;
-            if self.standby {
-                if let Some(xp) = &self.stage.xp {
-                    xp.command("sim/operation/pause_off", 0.0);
-                }
-                self.standby = false;
-            }
-            self.wall_start = Instant::now();
-            self.record("roll", serde_json::json!({}));
-            self.log("rolling".into());
+            self.roll();
         }
         self.record("cue", serde_json::json!({"cue": self.cue_name(i), "atc": msg.atc, "operator": msg.operator}));
         let act = self.script.cues[i].act.clone();
@@ -288,8 +313,8 @@ impl DemoDirector {
             self.bus.push_log_kind(LogKind::Operator, text.clone());
             let _ = self.input_tx.send(IncomingMessage::operator(text.clone()));
         }
-        if let Some(text) = &msg.atc {
-            self.outbox.push_back(Pending { cue: i, text: text.clone(), tx_id: None });
+        if let (Some(text), Some(spoken)) = (&msg.atc, self.script.cues[i].spoken()) {
+            self.outbox.push_back(Pending { text: text.clone(), spoken, tx_id: None });
             self.release_atc();
         }
     }
@@ -308,7 +333,7 @@ impl DemoDirector {
         if front.tx_id.is_some() || !radio.is_clear(self.script.audio.min_gap_s) {
             return;
         }
-        let spoken = self.script.cues[front.cue].act.say.clone().unwrap_or_else(|| spoken_form(&front.text));
+        let spoken = front.spoken.clone();
         let id = self.next_tx_id;
         self.next_tx_id += 1;
         self.outbox.front_mut().unwrap().tx_id = Some(id);
@@ -368,11 +393,24 @@ impl DemoDirector {
         }
         if let Some(v) = a.tui {
             if let Some(ui) = &self.stage.ui {
-                let _ = ui.send(DemoUi::View(v));
+                let _ = ui.send(v);
             }
             revert.tui = self.view.replace(v);
         }
         if let Some(h) = a.hold_s {
+            // A hold during a hold returns to what showed before the first.
+            for (_, r) in &mut self.reverts {
+                if revert.tui.is_some() {
+                    if let Some(v) = r.tui.take() {
+                        revert.tui = Some(v);
+                    }
+                }
+                if revert.scene.is_some() {
+                    if let Some(name) = r.scene.take() {
+                        revert.scene = Some(name);
+                    }
+                }
+            }
             if revert.scene.is_some() || revert.tui.is_some() {
                 self.reverts.push((t + h, revert));
             }
@@ -387,34 +425,27 @@ impl DemoDirector {
             }
         }
         if !a.datarefs.is_empty() {
-            if let Some(b) = &self.stage.bridge {
-                let w: Vec<(String, f64)> = a.datarefs.iter().map(|(k, v)| (k.clone(), *v)).collect();
-                if let Err(e) = b.write_dataref_values(&w) {
-                    self.bus.push_log_kind(LogKind::Error, format!("[demo] datarefs: {e}"));
-                }
+            if let Some(xp) = &self.stage.xp {
+                xp.write_datarefs(a.datarefs.iter().map(|(k, v)| (k.clone(), *v)).collect());
             }
         }
-        if let Some(r) = a.record {
-            if let Some(obs) = &self.stage.obs {
-                match r {
-                    RecordAction::Start => obs.start_record(),
-                    RecordAction::Stop => obs.stop_record(),
-                    RecordAction::Chapter => obs.chapter(&format!("t={t:.0}")),
+        match a.record {
+            Some(RecordAction::Start) if !self.recording => self.start_recording(),
+            Some(RecordAction::Stop) => {
+                if let Some(obs) = &self.stage.obs {
+                    obs.stop_record();
                 }
+                self.recording = false;
+                self.record("record", serde_json::json!({"action": "stop"}));
             }
-            self.record("record", serde_json::json!({"action": format!("{r:?}").to_lowercase()}));
+            Some(RecordAction::Chapter) => {
+                if let Some(obs) = &self.stage.obs {
+                    obs.chapter(&format!("t={t:.0}"));
+                }
+                self.record("record", serde_json::json!({"action": "chapter"}));
+            }
+            _ => {}
         }
-    }
-
-    fn update_status(&mut self) {
-        let next = self.schedule.next_pending().map(|(i, m, st)| {
-            let name = m.id.clone().unwrap_or_else(|| m.atc.clone().unwrap_or_default().chars().take(24).collect());
-            (i, name, Some(st))
-        });
-        let mut s = self.status.lock();
-        s.next = next;
-        s.held = self.held;
-        s.standby = self.standby;
     }
 
     fn log(&self, text: String) {
@@ -428,7 +459,22 @@ impl DemoDirector {
         detail["t"] = serde_json::json!((self.last_t * 10.0).round() / 10.0);
         detail["wall_utc"] = serde_json::json!(chrono::Utc::now().to_rfc3339());
         detail["since_roll_s"] = serde_json::json!(if self.rolled { self.wall_start.elapsed().as_secs_f64() } else { 0.0 });
-        let _ = writeln!(f, "{detail}");
+        // One write per line.
+        let mut line = detail.to_string().into_bytes();
+        line.push(b'\n');
+        let _ = f.write_all(&line);
+    }
+}
+
+/// The take ends with the session: stop a recording still running.
+impl Drop for DemoDirector {
+    fn drop(&mut self) {
+        self.record("end", serde_json::json!({}));
+        if self.recording {
+            if let Some(obs) = &self.stage.obs {
+                obs.stop_record_and_wait(std::time::Duration::from_secs(3));
+            }
+        }
     }
 }
 
@@ -472,6 +518,75 @@ cues:
     }
 
     #[test]
+    fn a_freeform_take_returns_to_its_view_after_the_code_unless_you_switch() {
+        let script: DemoScript = serde_yaml_ng::from_str(
+            r#"
+id: t
+airport: KVNY
+start: {airborne: {runway: 16R, along_ft: 3000, right_ft: 5500, alt_msl_ft: 1800, heading_deg: 355.5, ias_kt: 80}}
+xplane: {settle_s: 1, roll: auto}
+hooks:
+  on_roll: {tui: spatial}
+  on_fly: {tui: log, hold_s: 3}
+"#,
+        )
+        .unwrap();
+        let mut r = Resolver::new(kvny_georef(), &GAZETTEER, &KvnyFixture);
+        let schedule = MessageSchedule::with_order(&script.messages(), &mut r, true).unwrap();
+        let (input_tx, _input_rx) = unbounded();
+        let (control_tx, control_rx) = unbounded();
+        let (events_tx, events_rx) = unbounded();
+        let (ui_tx, ui_rx) = unbounded();
+        let stage = Stage { ui: Some(ui_tx), ..Default::default() };
+        let mut d = DemoDirector::new(
+            script,
+            schedule,
+            input_tx,
+            SimBus::new(false),
+            Arc::new(PLMutex::new(Vec::new())),
+            control_rx,
+            events_rx,
+            stage,
+            None,
+        );
+        d.prepare();
+        let mut t = 1000.0;
+        for _ in 0..10 {
+            d.tick(&sample(t), 0.5);
+            t += 0.5;
+        }
+        assert_eq!(ui_rx.try_iter().collect::<Vec<_>>(), [TuiView::Spatial], "rolled into the spatial view");
+        events_tx.send(DemoEvent::Fly).unwrap();
+        for _ in 0..10 {
+            d.tick(&sample(t), 0.5);
+            t += 0.5;
+        }
+        assert_eq!(ui_rx.try_iter().collect::<Vec<_>>(), [TuiView::Log, TuiView::Spatial]);
+
+        // Two plans in a row: back to the spatial view, not stuck on the code.
+        events_tx.send(DemoEvent::Fly).unwrap();
+        d.tick(&sample(t), 0.5);
+        t += 0.5;
+        events_tx.send(DemoEvent::Fly).unwrap();
+        for _ in 0..10 {
+            d.tick(&sample(t), 0.5);
+            t += 0.5;
+        }
+        assert_eq!(ui_rx.try_iter().last(), Some(TuiView::Spatial));
+
+        // Switching the view yourself during the code: it stays switched.
+        events_tx.send(DemoEvent::Fly).unwrap();
+        d.tick(&sample(t), 0.5);
+        t += 0.5;
+        control_tx.send(DemoCommand::View(TuiView::Spatial)).unwrap();
+        for _ in 0..10 {
+            d.tick(&sample(t), 0.5);
+            t += 0.5;
+        }
+        assert_eq!(ui_rx.try_iter().collect::<Vec<_>>(), [TuiView::Log], "no switch back after yours");
+    }
+
+    #[test]
     fn standby_roll_cues_readbacks_and_the_fly_hook() {
         let script: DemoScript = serde_yaml_ng::from_str(SCRIPT).unwrap();
         let mut r = Resolver::new(kvny_georef(), &GAZETTEER, &KvnyFixture);
@@ -497,8 +612,6 @@ cues:
             Some(&timeline),
         );
         d.prepare();
-        let first = input_rx.try_recv().unwrap();
-        assert_eq!((first.source, first.text.as_str()), (IncomingSource::Operator, "brief"));
 
         // X-Plane's clock starts at 1000 s; the take's at the first tick.
         let base = 1000.0;
@@ -511,7 +624,9 @@ cues:
         control_tx.send(DemoCommand::Next).unwrap();
         d.tick(&sample(base + 15.0), 0.0);
         assert!(!d.is_standby(), "F6 rolled the take");
-        assert_eq!(ui_rx.try_recv().unwrap(), DemoUi::View(TuiView::Spatial));
+        let first = input_rx.try_recv().unwrap();
+        assert_eq!((first.source, first.text.as_str()), (IncomingSource::Operator, "brief"), "briefed at the roll");
+        assert_eq!(ui_rx.try_recv().unwrap(), TuiView::Spatial);
         let mut t = base + 15.0;
         let mut atc = Vec::new();
         for _ in 0..40 {
@@ -533,16 +648,81 @@ cues:
         // A fly call shows the log, then the view comes back after hold_s.
         events_tx.send(DemoEvent::Fly).unwrap();
         d.tick(&sample(t + 0.5), 0.5);
-        assert_eq!(ui_rx.try_recv().unwrap(), DemoUi::View(TuiView::Log));
+        assert_eq!(ui_rx.try_recv().unwrap(), TuiView::Log);
         for k in 0..12 {
             d.tick(&sample(t + 1.0 + k as f64 * 0.5), 0.5);
         }
-        assert_eq!(ui_rx.try_recv().unwrap(), DemoUi::View(TuiView::Spatial));
+        assert_eq!(ui_rx.try_recv().unwrap(), TuiView::Spatial);
 
+        // Your calls from the TUI go in the timeline too.
+        events_tx.send(DemoEvent::AtcCall("Skyhawk 2SP, turn base now".into())).unwrap();
+        d.tick(&sample(t + 8.0), 0.5);
+        drop(d);
         let lines = std::fs::read_to_string(&timeline).unwrap();
-        for kind in ["roll", "cue", "atc_start", "atc_end", "fly"] {
+        assert!(lines.contains("turn base now"), "{lines}");
+        for kind in ["roll", "cue", "atc_start", "atc_end", "fly", "atc_call", "end"] {
             assert!(lines.contains(&format!("\"kind\":\"{kind}\"")), "{kind} missing:\n{lines}");
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod freeform_tests {
+    use super::*;
+    use crate::plan::fixtures::{kvny_georef, KvnyFixture};
+    use crate::plan::gazetteer::GAZETTEER;
+    use crate::plan::resolve::Resolver;
+    use crate::types::Vec2;
+    use crossbeam_channel::unbounded;
+
+    #[test]
+    fn a_take_with_no_cues_rolls_after_settling_and_briefs_the_pilot() {
+        let script: DemoScript = serde_yaml_ng::from_str(
+            r#"
+id: f
+airport: KVNY
+start: {airborne: {runway: 16R, along_ft: 3000, right_ft: 5500, heading_deg: 355.5, ias_kt: 80}}
+briefing: "call the tower"
+xplane: {settle_s: 3, roll: auto}
+obs: {record: true}
+"#,
+        )
+        .unwrap();
+        let mut r = Resolver::new(kvny_georef(), &GAZETTEER, &KvnyFixture);
+        let schedule = MessageSchedule::with_order(&script.messages(), &mut r, true).unwrap();
+        let (input_tx, input_rx) = unbounded();
+        let (_control_tx, control_rx) = unbounded();
+        let (_events_tx, events_rx) = unbounded();
+        let mut d = DemoDirector::new(
+            script,
+            schedule,
+            input_tx,
+            SimBus::new(false),
+            Arc::new(PLMutex::new(Vec::new())),
+            control_rx,
+            events_rx,
+            Stage::default(),
+            None,
+        );
+        d.prepare();
+        let s = |t: f64| Sample {
+            t,
+            pos: Vec2::ZERO,
+            alt_msl_ft: 1800.0,
+            alt_agl_ft: 1000.0,
+            track_deg: 355.0,
+            phase: None,
+            on_ground: false,
+            crashed: false,
+            bank_deg: 0.0,
+            vs_fpm: 0.0,
+        };
+        d.tick(&s(500.0), 0.5);
+        d.tick(&s(502.0), 0.5);
+        assert!(input_rx.try_recv().is_err(), "settling");
+        d.tick(&s(503.5), 0.5);
+        assert!(d.rolled);
+        assert_eq!(input_rx.try_recv().unwrap().text, "call the tower");
     }
 }

@@ -21,8 +21,8 @@ use crate::core::profiles::{
 use crate::core::spatial::SpatialOverlay;
 use crate::guidance::lateral::leg_projection;
 use crate::guidance::runway_geometry::RunwayFrame;
-use crate::types::{KT_TO_FPS, 
-    AircraftState, FlightPhase, GuidanceTargets, LateralMode, StraightLeg, Vec2, VerticalMode,
+use crate::types::{
+    AircraftState, FlightPhase, GuidanceTargets, LateralMode, StraightLeg, Vec2, VerticalMode, KT_TO_FPS,
 };
 
 /// Wheels must stay on the ground this long before an airborne landing
@@ -91,14 +91,31 @@ pub struct ArrivalPlan {
     pub summary: String,
 }
 
-/// A backup exit beyond the chosen one, with its own taxi to parking,
-/// taken if the chosen exit is missed.
 /// Within this of an exit leg's course, the aircraft is lined up on it.
 const EXIT_ALIGNED_DEG: f64 = 15.0;
 
+/// A backup exit beyond the chosen one, with its own taxi to parking,
+/// taken if the chosen exit is missed.
 pub struct ExitOption {
     pub exit: RunwayExitPlan,
     pub arrival: Option<ArrivalPlan>,
+}
+
+/// The landing's plan for leaving the runway: the exit, the taxi to
+/// parking from it (which starts where the exit ends), and backups
+/// beyond it in runway order. Built by the tools, carried by whichever
+/// profile is landing.
+#[derive(Default)]
+pub struct LandingPlan {
+    pub exit: Option<RunwayExitPlan>,
+    pub arrival: Option<ArrivalPlan>,
+    pub fallbacks: Vec<ExitOption>,
+}
+
+impl LandingPlan {
+    pub fn is_empty(&self) -> bool {
+        self.exit.is_none() && self.arrival.is_none()
+    }
 }
 
 /// Progress along the selected exit.
@@ -139,16 +156,17 @@ pub trait LandingPlanHolder {
     fn runway_frame(&self) -> &RunwayFrame;
     fn preferred_exit(&self) -> Option<&RunwayExitPlan>;
     fn arrival(&self) -> Option<&ArrivalPlan>;
-    /// Replace the exit and the arrival together: the arrival taxi starts
-    /// where the exit ends. `Err` once the plan can no longer change.
-    fn set_landing_plan(
-        &mut self,
-        exit: Option<RunwayExitPlan>,
-        arrival: Option<ArrivalPlan>,
-    ) -> Result<(), String>;
-    /// Exits to fall back on, in runway order, if the chosen one is
-    /// missed. Clearing the exit clears these too.
-    fn set_fallback_exits(&mut self, fallbacks: Vec<ExitOption>);
+    /// Replace the whole plan. `Err` once it can no longer change.
+    fn set_landing_plan(&mut self, plan: LandingPlan) -> Result<(), String>;
+    /// The planned taxis to parking (the chosen exit's and the backups'),
+    /// so a crossing clearance from Ground reaches them before they start.
+    fn arrivals_mut(&mut self) -> Vec<&mut ArrivalPlan>;
+}
+
+impl LandingPlan {
+    pub fn arrivals_mut(&mut self) -> Vec<&mut ArrivalPlan> {
+        self.arrival.iter_mut().chain(self.fallbacks.iter_mut().filter_map(|f| f.arrival.as_mut())).collect()
+    }
 }
 
 pub struct LandingRolloutProfile {
@@ -163,8 +181,6 @@ pub struct LandingRolloutProfile {
     last_on_ground: bool,
     arrival: Option<ArrivalPlan>,
     fallbacks: std::collections::VecDeque<ExitOption>,
-    /// A missed exit with no fallback left has been reported.
-    miss_reported: bool,
     events: Vec<String>,
 }
 
@@ -181,25 +197,33 @@ impl LandingRolloutProfile {
             last_on_ground: true,
             arrival: None,
             fallbacks: Default::default(),
-            miss_reported: false,
             events: Vec::new(),
         }
     }
 
-    /// Exits to take, in order, if the selected one is missed.
-    pub fn with_fallback_exits(mut self, fallbacks: Vec<ExitOption>) -> Self {
-        self.fallbacks = fallbacks.into();
+    /// The landing's exit, its taxi to parking, and the backup exits.
+    pub fn with_landing_plan(mut self, plan: LandingPlan) -> Self {
+        self.exit = plan.exit.map(SelectedExit::new);
+        self.arrival = plan.arrival;
+        self.fallbacks = plan.fallbacks.into();
         self
+    }
+
+    /// Runway the aircraft needs to slow from `gs_kt` to the exit's turn
+    /// speed, braking as the approach to an exit does.
+    fn slowdown_ft(&self, gs_kt: f64) -> f64 {
+        let pl = &self.config.post_landing;
+        let (v, v_turn) = (gs_kt * KT_TO_FPS, pl.exit_speed_kt * KT_TO_FPS);
+        ((v * v - v_turn * v_turn) / (2.0 * pl.exit_slowdown_fps2)).max(0.0)
     }
 
     /// The selected exit was missed: take the first fallback still far
     /// enough ahead to slow for, and tell the pilot either way.
     fn on_missed_exit(&mut self, state: &AircraftState) {
         let Some(missed) = self.exit.as_ref().map(|e| e.plan.taxiway_name.clone()) else { return };
-        let x = state.runway_x_ft.unwrap_or(f64::INFINITY);
-        let lead = self.config.post_landing.slowdown_lead_ft;
+        let reach = state.runway_x_ft.unwrap_or(f64::INFINITY) + self.slowdown_ft(state.gs_kt);
         while let Some(next) = self.fallbacks.pop_front() {
-            if next.exit.stationing_ft < x + lead {
+            if next.exit.stationing_ft < reach {
                 continue;
             }
             self.events.push(format!(
@@ -212,16 +236,9 @@ impl LandingRolloutProfile {
             self.arrival = next.arrival;
             return;
         }
-        self.miss_reported = true;
         self.events.push(format!(
             "missed exit {missed} and no planned exit ahead; slowing on the centerline (choose_runway_exit for one ahead)"
         ));
-    }
-
-    /// Continue into a pre-planned taxi to parking after the exit.
-    pub fn with_arrival(mut self, arrival: Option<ArrivalPlan>) -> Self {
-        self.arrival = arrival;
-        self
     }
 
     /// Engine-out landing: throttle stays closed and exits can't be flown.
@@ -251,11 +268,7 @@ impl LandingRolloutProfile {
                 current.plan.taxiway_name
             ));
         }
-        if exit.is_none() {
-            self.fallbacks.clear();
-        }
         self.exit = exit.map(SelectedExit::new);
-        self.miss_reported = false;
         Ok(())
     }
 
@@ -446,18 +459,15 @@ impl LandingPlanHolder for LandingRolloutProfile {
         self.arrival.as_ref()
     }
 
-    fn set_landing_plan(
-        &mut self,
-        exit: Option<RunwayExitPlan>,
-        arrival: Option<ArrivalPlan>,
-    ) -> Result<(), String> {
-        self.set_preferred_exit(exit)?;
-        self.arrival = arrival;
-        Ok(())
+    fn arrivals_mut(&mut self) -> Vec<&mut ArrivalPlan> {
+        self.arrival.iter_mut().chain(self.fallbacks.iter_mut().filter_map(|f| f.arrival.as_mut())).collect()
     }
 
-    fn set_fallback_exits(&mut self, fallbacks: Vec<ExitOption>) {
-        self.fallbacks = fallbacks.into();
+    fn set_landing_plan(&mut self, plan: LandingPlan) -> Result<(), String> {
+        self.set_preferred_exit(plan.exit)?;
+        self.arrival = plan.arrival;
+        self.fallbacks = plan.fallbacks.into();
+        Ok(())
     }
 }
 
@@ -474,8 +484,10 @@ impl GuidanceProfile for LandingRolloutProfile {
         self.last_gs_kt = state.gs_kt;
         self.last_on_ground = state.on_ground;
         if matches!(self.phase, FlightPhase::Rollout | FlightPhase::RunwayExit) {
+            let missed = |p: &Self| p.exit.as_ref().is_some_and(|e| e.progress == ExitProgress::Missed);
+            let was_missed = missed(self);
             self.update_exit_progress(state);
-            if !self.miss_reported && self.exit.as_ref().is_some_and(|e| e.progress == ExitProgress::Missed) {
+            if !was_missed && missed(self) {
                 self.on_missed_exit(state);
             }
         }
@@ -543,7 +555,6 @@ impl GuidanceProfile for LandingRolloutProfile {
             last_go_around_reason: self.last_go_around_reason.clone(),
             airport_ident: self.config.airport.airport.clone(),
             runway_id: self.runway_frame.runway.id.clone(),
-            field_elevation_ft: Some(self.config.airport.field_elevation_ft),
             phase: self.phase,
         })
     }

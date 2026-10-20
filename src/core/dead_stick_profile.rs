@@ -294,7 +294,7 @@ impl DeadStickLandingProfile {
                     name: "pattern_entry".to_string(),
                     position_ft: self.descent_target_world_ft,
                     altitude_ft: Some(
-                        self.config.airport.field_elevation_ft + SPIRAL_EXIT_AGL_FT,
+                        state.field_elevation_ft + SPIRAL_EXIT_AGL_FT,
                     ),
                 };
                 let (desired_track, bank_cmd) =
@@ -640,7 +640,6 @@ impl GuidanceProfile for DeadStickLandingProfile {
             last_go_around_reason: self.last_safety_reason.clone(),
             airport_ident: self.config.airport.airport.clone(),
             runway_id: self.runway_frame.runway.id.clone(),
-            field_elevation_ft: Some(self.config.airport.field_elevation_ft),
             phase: self.phase,
         })
     }

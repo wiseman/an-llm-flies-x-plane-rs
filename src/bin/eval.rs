@@ -7,15 +7,14 @@
 //! iteration on the system prompt or tool surface where the live
 //! X-Plane cost is prohibitive.
 
-use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, Result};
 use chrono::Local;
 use clap::{Parser, ValueEnum};
 
 use xplane_pilot::config::load_default_config_bundle;
-use xplane_pilot::data::{apt_dat, parquet as data_parquet};
+use xplane_pilot::data::parquet as data_parquet;
 use xplane_pilot::eval_runner::{run_eval, EvalConfig};
 use xplane_pilot::llm::backend::LlmProvider;
 use xplane_pilot::llm::conversation::{IncomingMessage, PilotMode};
@@ -150,45 +149,8 @@ impl From<CliPilotMode> for PilotMode {
     }
 }
 
-fn load_dotenv(path: &Path) {
-    let Ok(text) = fs::read_to_string(path) else {
-        return;
-    };
-    for line in text.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        if let Some((k, v)) = line.split_once('=') {
-            let k = k.trim();
-            let v = v.trim();
-            if !k.is_empty() && std::env::var_os(k).is_none() {
-                std::env::set_var(k, v);
-            }
-        }
-    }
-}
-
-fn resolve_apt_dat_cache(
-    explicit_apt: Option<PathBuf>,
-    explicit_airspace: Option<PathBuf>,
-) -> Result<PathBuf> {
-    let apt = explicit_apt.or_else(apt_dat::default_apt_dat_path).ok_or_else(|| {
-        anyhow!("apt.dat not found; pass --apt-dat-path or install X-Plane 12 at the standard location")
-    })?;
-    if !apt.exists() {
-        return Err(anyhow!("apt.dat not found at {}", apt.display()));
-    }
-    let airspace = explicit_airspace
-        .or_else(xplane_pilot::data::airspace::default_airspace_txt_path)
-        .filter(|p| p.exists());
-    let cache = data_parquet::resolve(&apt, airspace.as_deref())
-        .with_context(|| format!("building apt.dat parquet cache from {}", apt.display()))?;
-    Ok(cache.dir)
-}
-
 fn main() -> Result<()> {
-    load_dotenv(Path::new(".env"));
+    xplane_pilot::config::load_dotenv(Path::new(".env"));
     let args = Cli::parse();
 
     let provider = args.pilot_llm_provider;
@@ -199,7 +161,7 @@ fn main() -> Result<()> {
     let pilot_mode: PilotMode = args.pilot_mode.into();
 
     let apt_dat_cache_dir =
-        resolve_apt_dat_cache(args.apt_dat_path.clone(), args.airspace_txt_path.clone())?;
+        data_parquet::resolve_default(args.apt_dat_path.clone(), args.airspace_txt_path.clone())?.dir;
 
     let session_stem = format!("eval-{}", Local::now().format("%Y%m%d-%H%M%S"));
 

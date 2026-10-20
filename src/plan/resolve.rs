@@ -267,16 +267,8 @@ pub fn polyline_junction(a: &Polyline, b: &Polyline, max_gap_ft: f64) -> Option<
 pub fn polyline_intersection(a: &Polyline, b: &Polyline) -> Option<Vec2> {
     for (a0, a1) in a.segments() {
         for (b0, b1) in b.segments() {
-            let r = a1 - a0;
-            let s = b1 - b0;
-            let denom = r.cross(s);
-            if denom.abs() < 1e-9 {
-                continue;
-            }
-            let t = (b0 - a0).cross(s) / denom;
-            let u = (b0 - a0).cross(r) / denom;
-            if (0.0..=1.0).contains(&t) && (0.0..=1.0).contains(&u) {
-                return Some(a0 + r * t);
+            if let Some(t) = crate::guidance::geo::segment_intersection_t(a0, a1, b0, b1) {
+                return Some(a0 + (a1 - a0) * t);
             }
         }
     }

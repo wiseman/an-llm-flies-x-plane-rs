@@ -14,6 +14,7 @@ fn below_target_altitude_and_slow_commands_more_pitch_and_power() {
         66.0,
         0.2,
         (0.75, 1.0),
+        false,
     );
     assert!(pitch > 6.0, "pitch was {}", pitch);
     assert!(throttle > 0.85, "throttle was {}", throttle);
@@ -31,6 +32,7 @@ fn above_target_and_fast_commands_descent_and_power_reduction() {
         100.0,
         0.2,
         (0.1, 0.6),
+        false,
     );
     assert!(pitch < 0.0, "pitch was {}", pitch);
     assert!(throttle < 0.35, "throttle was {}", throttle);

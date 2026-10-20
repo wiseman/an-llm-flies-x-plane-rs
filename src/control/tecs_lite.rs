@@ -17,9 +17,6 @@ const PATH_PITCH_I_MAX_DEG: f64 = 4.0;
 pub struct TECSLite {
     pub gains: TECSGains,
     pub integrator: f64,
-    /// Set by the caller while the target is a glidepath the aircraft is
-    /// on (not capturing from far off it): the pitch integral runs.
-    pub tracking_path: bool,
     pitch_integrator_deg: f64,
 }
 
@@ -28,7 +25,6 @@ impl TECSLite {
         Self {
             gains,
             integrator: 0.0,
-            tracking_path: false,
             pitch_integrator_deg: 0.0,
         }
     }
@@ -38,7 +34,10 @@ impl TECSLite {
         self.pitch_integrator_deg = 0.0;
     }
 
-    /// Returns (pitch_cmd_deg, throttle_cmd).
+    /// Returns (pitch_cmd_deg, throttle_cmd). `tracking_path`: the target
+    /// is a glidepath the aircraft is on (not capturing it from far off),
+    /// so the pitch integral runs; otherwise it holds until the phase
+    /// changes.
     #[allow(clippy::too_many_arguments)]
     pub fn update(
         &mut self,
@@ -50,6 +49,7 @@ impl TECSLite {
         ias_kt: f64,
         dt: f64,
         throttle_limit: (f64, f64),
+        tracking_path: bool,
     ) -> (f64, f64) {
         let (throttle_trim, pitch_trim) = Self::trim_for_phase(phase);
         let (
@@ -87,7 +87,7 @@ impl TECSLite {
             FlightPhase::Final => 0.0,
             _ => self.gains.kd_balance,
         };
-        if self.tracking_path {
+        if tracking_path {
             self.pitch_integrator_deg = clamp(
                 self.pitch_integrator_deg + PATH_PITCH_KI * altitude_error_ft * dt,
                 -PATH_PITCH_I_MAX_DEG,
@@ -163,10 +163,9 @@ mod tests {
             let (v_fps, dt) = (62.0 * 1.6878, 0.2);
             let (mut alt, mut path) = (1300.0_f64, 1300.0_f64);
             for _ in 0..(120.0 / dt) as usize {
-                tecs.tracking_path = tracking;
                 path -= v_fps * 3.0_f64.to_radians().tan() * dt;
                 let vs_fpm = 0.0;
-                let (pitch, _) = tecs.update(FlightPhase::Final, path, 62.0, alt, vs_fpm, 62.0, dt, (0.0, 1.0));
+                let (pitch, _) = tecs.update(FlightPhase::Final, path, 62.0, alt, vs_fpm, 62.0, dt, (0.0, 1.0), tracking);
                 alt += v_fps * pitch.to_radians().sin() * dt;
             }
             alt - path
@@ -195,6 +194,7 @@ mod tests {
                 /* ias_kt */ 90.0,
                 /* dt */ 0.1,
                 /* throttle_limit */ (0.0, 0.5),
+                false,
             );
         }
         // Without anti-windup the integrator would charge right to the
@@ -223,6 +223,7 @@ mod tests {
                 /* ias_kt */ 110.0,
                 /* dt */ 0.1,
                 /* throttle_limit */ (0.0, 1.0),
+                false,
             );
         }
         // energy_total ≈ 0.1 per tick → ~5 after 500 ticks of 0.1 s.

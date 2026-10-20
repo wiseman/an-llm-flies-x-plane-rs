@@ -46,10 +46,6 @@ pub enum RadioEvent {
     Done(u64),
 }
 
-enum Work {
-    Prewarm(Speaker, String),
-    Play(TxJob),
-}
 
 struct RadioState {
     busy: AtomicBool,
@@ -61,14 +57,17 @@ struct RadioState {
 /// handler transmits; the demo director transmits ATC and reads events).
 #[derive(Clone)]
 pub struct RadioHandle {
-    tx: Sender<Work>,
+    play_tx: Sender<TxJob>,
+    /// Clips to render ahead; a transmission always goes first.
+    prewarm_tx: Sender<(Speaker, String)>,
     events_rx: Receiver<RadioEvent>,
     state: Arc<RadioState>,
 }
 
 impl RadioHandle {
     pub fn spawn(audio: AudioSetup, bus: SimBus) -> Self {
-        let (tx, rx) = unbounded::<Work>();
+        let (play_tx, play_rx) = unbounded::<TxJob>();
+        let (prewarm_tx, prewarm_rx) = unbounded::<(Speaker, String)>();
         let (events_tx, events_rx) = unbounded::<RadioEvent>();
         let state = Arc::new(RadioState {
             busy: AtomicBool::new(false),
@@ -80,51 +79,55 @@ impl RadioHandle {
             .name("demo-radio".into())
             .spawn(move || {
                 let mut voices = Voices::default();
-                for w in rx {
-                    match w {
-                        Work::Prewarm(sp, spoken) => {
-                            let v = voice_for(&audio, sp);
-                            if let Err(e) = voices.render(v, &spoken) {
-                                bus.push_log_kind(LogKind::Error, format!("[radio] rendering {spoken:?}: {e:#}"));
-                            }
-                        }
-                        Work::Play(job) => {
-                            st.busy.store(true, Ordering::Release);
-                            st.queued.fetch_sub(1, Ordering::AcqRel);
-                            let v = voice_for(&audio, job.speaker);
-                            let clip = voices.render(v, &job.spoken);
-                            let _ = events_tx.send(RadioEvent::Started {
-                                id: job.id,
-                                speaker: job.speaker,
-                                spoken: job.spoken.clone(),
-                            });
-                            match clip {
-                                Ok(path) => {
-                                    if let Err(e) = play(&path) {
-                                        bus.push_log_kind(LogKind::Error, format!("[radio] playing: {e:#}"));
-                                    }
+                loop {
+                    let job = crossbeam_channel::select_biased! {
+                        recv(play_rx) -> job => match job {
+                            Ok(job) => job,
+                            Err(_) => break,
+                        },
+                        recv(prewarm_rx) -> w => {
+                            if let Ok((sp, spoken)) = w {
+                                if let Err(e) = voices.render(voice_for(&audio, sp), &spoken) {
+                                    bus.push_log_kind(LogKind::Error, format!("[radio] rendering {spoken:?}: {e:#}"));
                                 }
-                                Err(e) => bus.push_log_kind(LogKind::Error, format!("[radio] rendering {:?}: {e:#}", job.spoken)),
                             }
-                            *st.last_end.lock() = Instant::now();
-                            st.busy.store(false, Ordering::Release);
-                            let _ = events_tx.send(RadioEvent::Done(job.id));
+                            continue;
+                        },
+                    };
+                    st.busy.store(true, Ordering::Release);
+                    st.queued.fetch_sub(1, Ordering::AcqRel);
+                    let v = voice_for(&audio, job.speaker);
+                    let clip = voices.render(v, &job.spoken);
+                    let _ = events_tx.send(RadioEvent::Started {
+                        id: job.id,
+                        speaker: job.speaker,
+                        spoken: job.spoken.clone(),
+                    });
+                    match clip {
+                        Ok(path) => {
+                            if let Err(e) = play(&path) {
+                                bus.push_log_kind(LogKind::Error, format!("[radio] playing: {e:#}"));
+                            }
                         }
+                        Err(e) => bus.push_log_kind(LogKind::Error, format!("[radio] rendering {:?}: {e:#}", job.spoken)),
                     }
+                    *st.last_end.lock() = Instant::now();
+                    st.busy.store(false, Ordering::Release);
+                    let _ = events_tx.send(RadioEvent::Done(job.id));
                 }
             })
             .expect("spawn demo-radio");
-        Self { tx, events_rx, state }
+        Self { play_tx, prewarm_tx, events_rx, state }
     }
 
     /// Render (and cache) a clip ahead of time.
     pub fn prewarm(&self, speaker: Speaker, spoken: &str) {
-        let _ = self.tx.send(Work::Prewarm(speaker, spoken.to_string()));
+        let _ = self.prewarm_tx.send((speaker, spoken.to_string()));
     }
 
     pub fn transmit(&self, job: TxJob) {
         self.state.queued.fetch_add(1, Ordering::AcqRel);
-        let _ = self.tx.send(Work::Play(job));
+        let _ = self.play_tx.send(job);
     }
 
     /// Nothing playing or queued, and `min_gap_s` of silence since the
@@ -245,10 +248,24 @@ struct RawClip {
 
 /// Band-limited, compressed, a little crushed, with a key-up click of
 /// noise before and a squelch tail after: a VHF radio.
-fn radio_filter(raw: &RawClip, out: &Path, preset: &str) -> Result<()> {
-    let noise = if preset == "pilot" { 0.012 } else { 0.035 };
+/// A quiet, overwriting ffmpeg command.
+pub fn ffmpeg() -> Command {
     let mut cmd = Command::new("ffmpeg");
     cmd.args(["-hide_banner", "-loglevel", "error", "-y"]);
+    cmd
+}
+
+/// Run an ffmpeg command, failing with `what` if it does.
+pub fn run_ffmpeg(mut cmd: Command, what: &str) -> Result<()> {
+    if !cmd.status().context("running ffmpeg")?.success() {
+        bail!("ffmpeg {what} failed");
+    }
+    Ok(())
+}
+
+fn radio_filter(raw: &RawClip, out: &Path, preset: &str) -> Result<()> {
+    let noise = if preset == "pilot" { 0.012 } else { 0.035 };
+    let mut cmd = ffmpeg();
     if let Some(hz) = raw.pcm_s16le_hz {
         cmd.args(["-f", "s16le", "-ar", &hz.to_string(), "-ac", "1"]);
     }
@@ -268,10 +285,7 @@ fn radio_filter(raw: &RawClip, out: &Path, preset: &str) -> Result<()> {
     ]);
     let tmp = out.with_extension("tmp.wav");
     cmd.arg(&tmp);
-    let st = cmd.status().context("running ffmpeg")?;
-    if !st.success() {
-        bail!("ffmpeg radio filter failed");
-    }
+    run_ffmpeg(cmd, "radio filter")?;
     std::fs::rename(&tmp, out)?;
     Ok(())
 }

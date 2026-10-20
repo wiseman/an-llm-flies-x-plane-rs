@@ -339,7 +339,9 @@ fn phonetic_spell(s: &str) -> Option<String> {
     if out.is_empty() { None } else { Some(out) }
 }
 
-fn phonetic_word(c: char) -> Option<&'static str> {
+/// The phonetic-alphabet word for a letter or digit ("golf", "niner"
+/// is the caller's business: this says "nine").
+pub fn phonetic_word(c: char) -> Option<&'static str> {
     Some(match c.to_ascii_uppercase() {
         'A' => "alpha", 'B' => "bravo", 'C' => "charlie", 'D' => "delta",
         'E' => "echo", 'F' => "foxtrot", 'G' => "golf", 'H' => "hotel",

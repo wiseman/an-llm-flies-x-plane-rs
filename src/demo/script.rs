@@ -19,7 +19,8 @@ pub struct DemoScript {
     pub description: Option<String>,
     pub airport: String,
     pub start: Start,
-    /// Operator message queued before the take starts.
+    /// Operator message sent to the pilot when the take rolls (so its
+    /// first call is on the recording).
     #[serde(default)]
     pub briefing: Option<String>,
     /// Cues without `after` follow the one before them.
@@ -42,6 +43,8 @@ pub struct DemoScript {
     pub audio: AudioSetup,
     #[serde(default)]
     pub hooks: Hooks,
+    /// Scripted ATC; none for a freeform take, where you're the tower.
+    #[serde(default)]
     pub cues: Vec<DemoCue>,
     #[serde(default)]
     pub broll: Vec<BrollPass>,
@@ -59,6 +62,15 @@ pub struct DemoCue {
     pub msg: ScenarioMessage,
     #[serde(flatten)]
     pub act: CueActions,
+}
+
+impl DemoCue {
+    /// What the radio voice says for its ATC call: `say`, else the call
+    /// in spoken radio form.
+    pub fn spoken(&self) -> Option<String> {
+        let text = self.msg.atc.as_ref()?;
+        Some(self.act.say.clone().unwrap_or_else(|| crate::demo::phraseology::spoken_form(text)))
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -84,20 +96,6 @@ pub struct CueActions {
     pub datarefs: BTreeMap<String, f64>,
     #[serde(default)]
     pub record: Option<RecordAction>,
-    /// Show the transmission in the OBS caption source.
-    #[serde(default)]
-    pub caption: Option<bool>,
-}
-
-impl CueActions {
-    pub fn is_empty(&self) -> bool {
-        self.scene.is_none()
-            && self.tui.is_none()
-            && self.camera.is_none()
-            && self.xplane_commands.is_empty()
-            && self.datarefs.is_empty()
-            && self.record.is_none()
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -154,7 +152,8 @@ fn default_settle_s() -> f64 {
 }
 
 /// How a take starts: paused in standby until the first cue's key
-/// (`manual`), or flying as soon as it's set up (`auto`).
+/// (`manual`), or rolling by itself once the flight has settled
+/// (`auto`).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Roll {
@@ -171,6 +170,9 @@ pub struct ObsSetup {
     /// OBS text source showing the current transmission.
     #[serde(default)]
     pub caption_input: Option<String>,
+    /// Record from the roll until the take ends (quitting the TUI).
+    #[serde(default)]
+    pub record: bool,
 }
 
 impl ObsSetup {
@@ -242,6 +244,9 @@ pub struct Hooks {
     pub on_fly: Option<CueActions>,
     #[serde(default)]
     pub on_touchdown: Option<CueActions>,
+    /// The take rolls (the starting view, so `hold_s` has one to return to).
+    #[serde(default)]
+    pub on_roll: Option<CueActions>,
 }
 
 /// A B-roll pass over the take's replay: camera shots on the take's
@@ -254,7 +259,14 @@ pub struct BrollPass {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct BrollShot {
-    /// `start`, `cue:<id>`, or `event:touchdown`.
+    /// When, in the take:
+    /// - `start` (the roll);
+    /// - `cue:<id>`;
+    /// - `atc:<words>`: the first ATC call containing them ("atc:base");
+    /// - `pilot:<words>`: the first pilot transmission containing them;
+    /// - `event:<kind>`: `touchdown`, `fly` (the pilot flew a plan), ...
+    ///
+    /// Any of them takes `#n` for the nth match (`event:fly#2`).
     pub at: String,
     #[serde(default)]
     pub offset_s: f64,
@@ -291,16 +303,23 @@ impl DemoScript {
     pub fn messages(&self) -> Vec<ScenarioMessage> {
         self.cues.iter().map(|c| c.msg.clone()).collect()
     }
-
-    /// A cue's index by id.
-    pub fn cue_index(&self, id: &str) -> Option<usize> {
-        self.cues.iter().position(|c| c.msg.id.as_deref() == Some(id))
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_freeform_demo_records_from_the_roll_with_no_cues() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("demo/kvny-16r-freeform.yaml");
+        let d = DemoScript::load(&path).unwrap();
+        assert!(d.cues.is_empty());
+        assert!(d.obs.record);
+        assert_eq!(d.xplane.roll, Roll::Auto);
+        assert!(d.hooks.on_fly.as_ref().is_some_and(|h| h.scene.is_none()), "scenes are yours");
+        assert!(d.hooks.on_touchdown.is_none(), "the camera stays in the cockpit");
+        assert_eq!(d.hooks.on_roll.and_then(|h| h.tui), Some(TuiView::Spatial), "the code view has a view to return to");
+    }
 
     #[test]
     fn the_kvny_demo_parses_and_rehearses_as_a_scenario() {

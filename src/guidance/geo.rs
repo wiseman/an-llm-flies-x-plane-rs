@@ -161,6 +161,20 @@ pub fn point_in_polygon(p: Vec2, ring: &[Vec2]) -> bool {
     inside
 }
 
+/// Where segment `p0→p1` crosses segment `q0→q1`, as a fraction along
+/// `p0→p1`.
+pub fn segment_intersection_t(p0: Vec2, p1: Vec2, q0: Vec2, q1: Vec2) -> Option<f64> {
+    let r = p1 - p0;
+    let s = q1 - q0;
+    let denom = r.cross(s);
+    if denom.abs() < 1e-9 {
+        return None;
+    }
+    let t = (q0 - p0).cross(s) / denom;
+    let u = (q0 - p0).cross(r) / denom;
+    ((0.0..=1.0).contains(&t) && (0.0..=1.0).contains(&u)).then_some(t)
+}
+
 pub fn segments_intersect(p1: Vec2, p2: Vec2, q1: Vec2, q2: Vec2) -> bool {
     let d1 = (p2 - p1).cross(q1 - p1);
     let d2 = (p2 - p1).cross(q2 - p1);

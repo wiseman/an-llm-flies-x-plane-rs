@@ -9,6 +9,7 @@ pub fn estimate_aircraft_state(
     raw: &DynamicsState,
     config: &ConfigBundle,
     runway_frame: &RunwayFrame,
+    field_elevation_ft: f64,
     dt: f64,
 ) -> AircraftState {
     let runway_position = runway_frame.to_runway_frame(raw.position_ft);
@@ -36,8 +37,9 @@ pub fn estimate_aircraft_state(
         alt_agl_ft: if raw.on_ground {
             0.0
         } else {
-            (raw.altitude_ft - config.airport.field_elevation_ft).max(0.0)
+            (raw.altitude_ft - field_elevation_ft).max(0.0)
         },
+        field_elevation_ft,
         alt_radio_agl_ft: raw.agl_ft.map(|v| v.max(0.0)),
         pitch_deg: raw.pitch_deg,
         roll_deg: raw.roll_deg,

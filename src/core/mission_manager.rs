@@ -94,6 +94,15 @@ impl ClearanceSource {
     }
 }
 
+/// Append to the event ring (sequence-numbered for the heartbeat pump).
+fn push_event(seq: &mut u64, log: &mut std::collections::VecDeque<(u64, String)>, text: String) {
+    *seq += 1;
+    log.push_back((*seq, text));
+    if log.len() > EVENT_LOG_LEN {
+        log.pop_front();
+    }
+}
+
 /// Radio-altimeter samples over the pavement count below this height...
 const SURFACE_MAX_AGL_FT: f64 = 400.0;
 /// ...and this far beside its edges.
@@ -111,7 +120,6 @@ const SURFACE_MAX_SLOPE: f64 = 0.02;
 struct SurfaceElevation {
     /// The runway it belongs to (its origin in the world frame).
     runway: Vec2,
-    published_ft: f64,
     n: f64,
     sx: f64,
     se: f64,
@@ -123,10 +131,9 @@ struct SurfaceElevation {
 }
 
 impl SurfaceElevation {
-    fn new(runway: Vec2, published_ft: f64) -> Self {
+    fn new(runway: Vec2) -> Self {
         Self {
             runway,
-            published_ft,
             n: 0.0,
             sx: 0.0,
             se: 0.0,
@@ -352,10 +359,9 @@ pub struct PilotCore {
     event_log: std::collections::VecDeque<(u64, String)>,
     event_seq: u64,
     /// The reference runway's surface as the radio altimeter measures
-    /// it, and the published field elevation it replaces. apt.dat has
-    /// one elevation per airport; the sim's pavement can sit tens of
-    /// feet off it (KVNY: published 800, touchdown zone 784), which
-    /// puts the glidepath that far above the real surface.
+    /// it. apt.dat has one elevation per airport; the sim's pavement can
+    /// sit tens of feet off it (KVNY: published 800, touchdown zone
+    /// ~782), which puts the glidepath that far above the real surface.
     surface: Option<SurfaceElevation>,
     /// Other aircraft, as sensed (scripted in evals). Plans read it
     /// through `PlanProfile::with_traffic`.
@@ -506,6 +512,18 @@ impl PilotCore {
         Ok(self.install_profiles(new_profiles))
     }
 
+    /// An airborne hand-over: hold present heading and altitude and
+    /// `ias_kt`, so nothing coasts while the pilot gets going.
+    pub fn engage_airborne_holds(&mut self, heading_deg: f64, alt_msl_ft: f64, ias_kt: f64) {
+        use crate::core::profiles::{AltitudeHoldProfile, HeadingHoldProfile, SpeedHoldProfile};
+        let bank = self.config.limits.max_bank_pattern_deg;
+        let _ = self.engage_profiles(vec![
+            Box::new(HeadingHoldProfile::new(heading_deg, bank)),
+            Box::new(AltitudeHoldProfile::new(alt_msl_ft)),
+            Box::new(SpeedHoldProfile::new(ias_kt)),
+        ]);
+    }
+
     /// Make `config`'s runway the reference frame (the one `runway_x_ft`
     /// / `runway_y_ft` are measured against) without touching the profile
     /// stack. For a plan that moves its pattern to another runway in
@@ -513,12 +531,9 @@ impl PilotCore {
     pub fn set_reference_config(&mut self, config: ConfigBundle) {
         self.runway_frame = RunwayFrame::new(config.airport.runway.clone());
         self.config = config;
-        // Same runway: keep the measured surface over the published one.
-        match &self.surface {
-            Some(s) if s.runway == self.config.airport.runway.threshold_ft => {
-                self.config.airport.field_elevation_ft = s.at(self.runway_frame.touchdown_runway_x_ft());
-            }
-            _ => self.surface = None,
+        // A measured surface belongs to its runway.
+        if self.surface.as_ref().is_some_and(|s| s.runway != self.config.airport.runway.threshold_ft) {
+            self.surface = None;
         }
     }
 
@@ -526,40 +541,44 @@ impl PilotCore {
     /// `SURFACE_MAX_AGL_FT` (or rolling on it) the radio altimeter gives
     /// the elevation under the aircraft. A line fitted through those
     /// samples (runways slope: KVNY 16R drops ~0.5%) gives the elevation
-    /// at the aim point, which then stands in for the published one in
-    /// the glidepath and the height above the field.
+    /// at the aim point.
     fn measure_surface(&mut self, raw: &DynamicsState) {
         let Some(radio_ft) = raw.agl_ft else { return };
         if radio_ft > SURFACE_MAX_AGL_FT {
             return;
         }
-        let p = self.runway_frame.to_runway_frame(raw.position_ft);
-        let rw = &self.runway_frame.runway;
-        if p.x < 0.0 || p.x > rw.length_ft || p.y.abs() > self.runway_frame.half_width_plus_ft(SURFACE_SIDE_FT) {
+        if !self.runway_frame.on_runway_surface(raw.position_ft, SURFACE_SIDE_FT) {
             return;
         }
-        let published = self.surface.as_ref().map(|s| s.published_ft).unwrap_or(self.config.airport.field_elevation_ft);
+        let x = self.runway_frame.to_runway_frame(raw.position_ft).x;
+        let published = self.config.airport.field_elevation_ft;
         let elevation = raw.altitude_ft - radio_ft;
         if (elevation - published).abs() > SURFACE_MAX_OFFSET_FT {
             return;
         }
-        let surface = self
-            .surface
-            .get_or_insert_with(|| SurfaceElevation::new(rw.threshold_ft, published));
-        surface.add(p.x, elevation);
-        let at_aim = surface.at(self.runway_frame.touchdown_runway_x_ft());
+        let runway = self.runway_frame.runway.threshold_ft;
+        let surface = self.surface.get_or_insert_with(|| SurfaceElevation::new(runway));
+        surface.add(x, elevation);
         if !surface.reported && surface.span_ft() >= SURFACE_FIT_SPAN_FT {
             surface.reported = true;
-            self.event_seq += 1;
-            self.event_log.push_back((
-                self.event_seq,
-                format!("runway surface at the touchdown zone measured at {at_aim:.0} ft (published field elevation {published:.0} ft)"),
+            let at_aim = self.field_elevation_ft();
+            self.push_event(format!(
+                "runway surface at the touchdown zone measured at {at_aim:.0} ft (published field elevation {published:.0} ft)"
             ));
-            if self.event_log.len() > EVENT_LOG_LEN {
-                self.event_log.pop_front();
-            }
         }
-        self.config.airport.field_elevation_ft = at_aim;
+    }
+
+    /// The field elevation heights are measured from: the measured
+    /// runway surface at the aim point, else the published elevation.
+    pub fn field_elevation_ft(&self) -> f64 {
+        match &self.surface {
+            Some(s) => s.at(self.runway_frame.touchdown_runway_x_ft()),
+            None => self.config.airport.field_elevation_ft,
+        }
+    }
+
+    fn push_event(&mut self, text: String) {
+        push_event(&mut self.event_seq, &mut self.event_log, text);
     }
 
     /// Ask every active profile matching `affected` whether it may be
@@ -671,7 +690,7 @@ impl PilotCore {
             .unwrap_or_else(|| self.runway_frame.runway.clone());
         SpatialSnapshot {
             runway,
-            field_elevation_ft: self.config.airport.field_elevation_ft,
+            field_elevation_ft: self.field_elevation_ft(),
             roundout_height_ft: self.config.flare.roundout_height_ft,
             flare_start_ft: self.config.flare.flare_start_ft,
             runway_clear_margin_ft: self.config.post_landing.runway_clear_margin_ft,
@@ -700,7 +719,7 @@ impl PilotCore {
 
     pub fn update(&mut self, raw_state: &DynamicsState, dt: f64) -> (AircraftState, ActuatorCommands) {
         self.measure_surface(raw_state);
-        let state = estimate_aircraft_state(raw_state, &self.config, &self.runway_frame, dt);
+        let state = estimate_aircraft_state(raw_state, &self.config, &self.runway_frame, self.field_elevation_ft(), dt);
         let (guidance, metadata) = self.compose_guidance(&state, dt);
         let commands = self.commands_from_guidance(&state, &guidance);
         // `metadata` is captured inside `compose_guidance` BEFORE any
@@ -753,7 +772,7 @@ impl PilotCore {
             go_around_reason: metadata.as_ref().and_then(|m| m.last_go_around_reason.clone()),
             airport_ident: metadata.as_ref().and_then(|m| m.airport_ident.clone()),
             runway_id: metadata.as_ref().and_then(|m| m.runway_id.clone()),
-            field_elevation_ft: metadata.as_ref().and_then(|m| m.field_elevation_ft),
+            field_elevation_ft: metadata.as_ref().map(|_| state.field_elevation_ft),
             debug_lines,
             completed_profiles,
             profile_mode_line_suffixes,
@@ -794,11 +813,7 @@ impl PilotCore {
                 metadata = profile.pattern_metadata();
             }
             for text in profile.take_events() {
-                self.event_seq += 1;
-                self.event_log.push_back((self.event_seq, text));
-                if self.event_log.len() > EVENT_LOG_LEN {
-                    self.event_log.pop_front();
-                }
+                push_event(&mut self.event_seq, &mut self.event_log, text);
             }
             contributions.push((owns, contribution));
             if let Some(ho) = hand_off {
@@ -956,19 +971,18 @@ impl PilotCore {
                 self.tecs.reset();
                 self.last_tecs_phase = Some(tecs_phase);
             }
-            let (target_altitude_ft, throttle_limit) = match guidance.glidepath {
+            let slipping = slip.abs() > 0.1;
+            let (target_altitude_ft, throttle_limit, tracking_path) = match guidance.glidepath {
                 Some(gp) if guidance.vertical_mode == VerticalMode::GlidepathTrack => {
                     // On the path (its target not clamped for a capture)
                     // and not slipping down to it: trim out any standing
                     // offset.
-                    self.tecs.tracking_path = slip.abs() <= 0.1
+                    let on_path = !slipping
                         && (state.alt_msl_ft - self.glidepath_alt_ft(state, gp)).abs() < MAX_GLIDEPATH_CAPTURE_ERROR_FT;
-                    self.glidepath_targets_slipping(state, gp, throttle_limit, slip.abs() > 0.1)
+                    let (alt, limit) = self.glidepath_targets_slipping(state, gp, throttle_limit, slipping);
+                    (alt, limit, on_path)
                 }
-                _ => {
-                    self.tecs.tracking_path = false;
-                    (guidance.target_altitude_ft.unwrap_or(state.alt_msl_ft), throttle_limit)
-                }
+                _ => (guidance.target_altitude_ft.unwrap_or(state.alt_msl_ft), throttle_limit, false),
             };
             self.tecs.update(
                 tecs_phase,
@@ -979,6 +993,7 @@ impl PilotCore {
                 state.ias_kt,
                 state.dt,
                 throttle_limit,
+                tracking_path,
             )
         } else if guidance.vertical_mode == VerticalMode::FlareTrack {
             let pitch_cmd = self.flare_controller.target_pitch_deg(
@@ -1010,6 +1025,10 @@ impl PilotCore {
         } else {
             (taxi_brake_override.unwrap_or(guidance.brakes), taxi_pivot_brake)
         };
+        // Nor power against it: a taxi asking for speed at full throttle
+        // drags a 172 through the parking brake (2026-10-19, across a
+        // hold-short line the pilot had braked at).
+        let throttle_cmd = if parking_brake_set && state.on_ground { 0.0 } else { throttle_cmd };
 
         ActuatorCommands {
             aileron: clamp(aileron, -1.0, 1.0),
@@ -1030,6 +1049,10 @@ impl PilotCore {
 /// command: a controlled intercept instead of a dive when joining above
 /// the path, or a zoom when below it.
 const MAX_GLIDEPATH_CAPTURE_ERROR_FT: f64 = 25.0;
+/// How far below the aircraft the target may sit when joining from
+/// above: power is off by then (see `glidepath_targets`), so TECS holds
+/// speed and the descent is at most an idle glide, never a dive.
+const HIGH_CAPTURE_ERROR_FT: f64 = 45.0;
 /// The same while slipping.
 const SLIP_CAPTURE_ERROR_FT: f64 = 60.0;
 
@@ -1062,10 +1085,7 @@ impl PilotCore {
         let path_alt_ft = self.glidepath_alt_ft(state, gp);
         // Only once established: lined up and on the centerline. A slip
         // while still turning final fights the turn.
-        let course = self.runway_frame.runway.course_deg;
-        let lined_up = wrap_degrees_180(state.track_deg - course).abs() < 10.0
-            && state.runway_y_ft.is_some_and(|y| y.abs() < 300.0);
-        if !lined_up {
+        if !self.lined_up(state) {
             return 0.0;
         }
         let above = state.alt_msl_ft - path_alt_ft;
@@ -1077,21 +1097,30 @@ impl PilotCore {
         if speed_ok { SLIP_MAX * amount * fade } else { 0.0 }
     }
 
+    /// Lined up on the reference runway's final: track within 10° of its
+    /// course and within 300 ft of the centerline.
+    fn lined_up(&self, state: &AircraftState) -> bool {
+        let course = self.runway_frame.runway.course_deg;
+        wrap_degrees_180(state.track_deg - course).abs() < 10.0 && state.runway_y_ft.is_some_and(|y| y.abs() < 300.0)
+    }
+
     /// The altitude of glidepath `gp` abeam the aircraft.
     fn glidepath_alt_ft(&self, state: &AircraftState, gp: crate::types::Glidepath) -> f64 {
         let distance_to_aim_ft = gp.aimpoint_ft_from_threshold - state.runway_x_ft.unwrap_or(-3000.0);
-        self.config.airport.field_elevation_ft
+        state.field_elevation_ft
             + (gp.threshold_crossing_height_ft + distance_to_aim_ft * gp.slope_deg.to_radians().tan()).max(0.0)
     }
 
     /// TECS altitude target and throttle limits for tracking `gp` on the
     /// reference runway. Joining from above, the target sits at most
-    /// `MAX_GLIDEPATH_CAPTURE_ERROR_FT` below the aircraft; that alone
-    /// only steepens the descent slightly, and with power holding speed
-    /// the aircraft would fly parallel to the path all the way down the
-    /// runway. So power comes off as well (full authority up to 30 ft
-    /// above the path, idle by 70 ft) and TECS has to pitch down to hold
-    /// speed. Below Vref power comes back regardless: never trade
+    /// `HIGH_CAPTURE_ERROR_FT` below the aircraft; that alone only
+    /// steepens the descent slightly, and with power holding speed the
+    /// aircraft would fly parallel to the path all the way down the
+    /// runway. So power comes off as well (lined up: full authority up to
+    /// 10 ft above the path, idle by 40 ft; still turning final, 30 and
+    /// 70) and TECS has to pitch down to hold speed. A wider cap settles high: a 172 in X-Plane holds a 3° path
+    /// on about 35% power, which a 30-70 ft cap allowed at 55 ft above
+    /// it, and it flew whole finals that far up. Below Vref power comes back regardless: never trade
     /// airspeed for the glidepath.
     pub fn glidepath_targets(
         &self,
@@ -1120,10 +1149,20 @@ impl PilotCore {
         // out trades all the airspeed for a few feet.
         // A slip's drag lets the nose come further down without speeding
         // up, so it may aim lower.
-        let below = if slipping { SLIP_CAPTURE_ERROR_FT } else { MAX_GLIDEPATH_CAPTURE_ERROR_FT };
+        // Still turning onto final, capture gently: coming down hard in
+        // the turn reaches the stabilized-approach gate before lined up.
+        let lined_up = self.lined_up(state);
+        let below = if slipping {
+            SLIP_CAPTURE_ERROR_FT
+        } else if lined_up {
+            HIGH_CAPTURE_ERROR_FT
+        } else {
+            MAX_GLIDEPATH_CAPTURE_ERROR_FT
+        };
         let target_alt_ft = path_alt_ft.clamp(state.alt_msl_ft - below, state.alt_msl_ft + MAX_GLIDEPATH_CAPTURE_ERROR_FT);
         let above_path_ft = state.alt_msl_ft - path_alt_ft;
-        let high_ceiling = (1.0 - (above_path_ft - 30.0) / 40.0).clamp(0.0, 1.0);
+        let (full_ft, idle_ft) = if lined_up { (10.0, 40.0) } else { (30.0, 70.0) };
+        let high_ceiling = (1.0 - (above_path_ft - full_ft) / (idle_ft - full_ft)).clamp(0.0, 1.0);
         let floor_kt = self.config.performance.vref_kt - if slipping { 5.0 } else { 0.0 };
         let slow_floor = ((floor_kt - state.ias_kt) / 5.0).clamp(0.0, 1.0);
         let max_throttle = throttle_limit.1.min(high_ceiling.max(slow_floor));
@@ -1212,7 +1251,7 @@ mod tests {
         let mut pilot = PilotCore::new(cfg.clone());
         // Downwind, over terrain: not the runway.
         pilot.update(&raw_at(&pilot, 3000.0, 5500.0, 1800.0, Some(1023.0), 0.0), 0.2);
-        assert_eq!(pilot.config.airport.field_elevation_ft, 800.0);
+        assert_eq!(pilot.field_elevation_ft(), 800.0);
         // Short final over higher ground short of the runway (ignored),
         // then over pavement that slopes down 0.5% from 795 ft.
         let surface = |x: f64| 795.0 - 0.005 * x;
@@ -1221,7 +1260,7 @@ mod tests {
             pilot.update(&raw_at(&pilot, x, 10.0, 807.0 + 150.0, Some(150.0), t), 0.2);
             t += 0.2;
         }
-        assert_eq!(pilot.config.airport.field_elevation_ft, 800.0, "terrain short of the runway");
+        assert_eq!(pilot.field_elevation_ft(), 800.0, "terrain short of the runway");
         let mut x = 0.0;
         while x <= 1500.0 {
             pilot.update(&raw_at(&pilot, x, 10.0, surface(x) + 60.0, Some(60.0), t), 0.2);
@@ -1229,7 +1268,7 @@ mod tests {
             x += 50.0;
         }
         let aim = pilot.runway_frame.touchdown_runway_x_ft();
-        let elev = pilot.config.airport.field_elevation_ft;
+        let elev = pilot.field_elevation_ft();
         assert!((elev - surface(aim)).abs() < 0.5, "{elev} vs {} at the aim point", surface(aim));
         let (state, _) = pilot.update(&raw_at(&pilot, 1550.0, 0.0, elev + 20.0, Some(20.0), t), 0.2);
         assert!((state.alt_agl_ft - 20.0).abs() < 0.6, "{}", state.alt_agl_ft);
@@ -1238,11 +1277,12 @@ mod tests {
         // The same runway re-engaged (a new plan) keeps the measurement; a
         // different runway drops it.
         pilot.set_reference_config(cfg.clone());
-        assert!((pilot.config.airport.field_elevation_ft - surface(aim)).abs() < 0.5);
+        assert!((pilot.field_elevation_ft() - surface(aim)).abs() < 0.5);
+        assert_eq!(pilot.config.airport.field_elevation_ft, 800.0, "the config stays as published");
         let mut other = cfg;
         other.airport.runway.threshold_ft = Vec2::new(5000.0, 5000.0);
         pilot.set_reference_config(other);
-        assert_eq!(pilot.config.airport.field_elevation_ft, 800.0);
+        assert_eq!(pilot.field_elevation_ft(), 800.0);
     }
 
     #[test]

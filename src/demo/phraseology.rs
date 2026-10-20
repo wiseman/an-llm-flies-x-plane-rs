@@ -3,39 +3,9 @@
 //! niner point three", "the 118" is "the one-eighteen". For the radio
 //! voice; the text on screen stays as written.
 
-const DIGITS: [&str; 10] = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "niner"];
+use crate::transcribe::keyterms::phonetic_word;
 
-fn phonetic(c: char) -> Option<&'static str> {
-    Some(match c.to_ascii_uppercase() {
-        'A' => "Alpha",
-        'B' => "Bravo",
-        'C' => "Charlie",
-        'D' => "Delta",
-        'E' => "Echo",
-        'F' => "Foxtrot",
-        'G' => "Golf",
-        'H' => "Hotel",
-        'I' => "India",
-        'J' => "Juliet",
-        'K' => "Kilo",
-        'L' => "Lima",
-        'M' => "Mike",
-        'N' => "November",
-        'O' => "Oscar",
-        'P' => "Papa",
-        'Q' => "Quebec",
-        'R' => "Romeo",
-        'S' => "Sierra",
-        'T' => "Tango",
-        'U' => "Uniform",
-        'V' => "Victor",
-        'W' => "Whiskey",
-        'X' => "X-ray",
-        'Y' => "Yankee",
-        'Z' => "Zulu",
-        _ => return None,
-    })
-}
+const DIGITS: [&str; 10] = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "niner"];
 
 fn digit(c: char) -> &'static str {
     DIGITS[c.to_digit(10).unwrap_or(0) as usize]
@@ -123,8 +93,8 @@ fn spoken_token(t: &str, prev: &str) -> String {
         for c in body.chars() {
             if c.is_ascii_digit() {
                 out.push(capitalize(digit(c)));
-            } else if let Some(p) = phonetic(c) {
-                out.push(p.to_string());
+            } else if let Some(p) = phonetic_word(c) {
+                out.push(capitalize(p));
             }
         }
         return out.join(" ");

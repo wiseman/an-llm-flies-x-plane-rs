@@ -5,7 +5,7 @@ mod common;
 use approx::assert_abs_diff_eq;
 use common::exit;
 use xplane_pilot::config::{load_default_config_bundle, ConfigBundle};
-use xplane_pilot::core::landing_rollout::{ExitOption, LandingPlanHolder, LandingRolloutProfile};
+use xplane_pilot::core::landing_rollout::{ExitOption, LandingPlan, LandingPlanHolder, LandingRolloutProfile};
 use xplane_pilot::core::mission_manager::PilotCore;
 use xplane_pilot::core::profiles::{GuidanceProfile, PatternFlyProfile, TaxiProfile};
 use xplane_pilot::guidance::runway_geometry::RunwayFrame;
@@ -95,8 +95,11 @@ fn a_missed_exit_falls_back_to_the_next_one_it_can_make() {
         ExitOption { exit: exit("C", &[(3200.0, 0.0), (3150.0, 100.0)]), arrival: None },
         ExitOption { exit: exit("D", &[(4500.0, 0.0), (4450.0, 100.0)]), arrival: None },
     ];
-    let mut p = LandingRolloutProfile::new(cfg, frame.clone(), Some(exit("B", &[(3000.0, 0.0), (2950.0, 100.0)])))
-        .with_fallback_exits(fallbacks);
+    let mut p = LandingRolloutProfile::new(cfg, frame.clone(), None).with_landing_plan(LandingPlan {
+        exit: Some(exit("B", &[(3000.0, 0.0), (2950.0, 100.0)])),
+        arrival: None,
+        fallbacks,
+    });
     p.contribute(&on_ground(&frame, 3070.0, 0.0, 30.0), 0.2);
     assert_eq!(p.preferred_exit().map(|e| e.taxiway_name.as_str()), Some("D"));
     let events = p.take_events();
@@ -203,7 +206,7 @@ fn pattern_fly_hands_off_to_landing_rollout_at_touchdown() {
     let mut pilot = PilotCore::new(cfg.clone());
     let mut pattern = PatternFlyProfile::new(cfg, frame.clone());
     pattern.phase = FlightPhase::Flare;
-    pattern.preferred_exit = Some(exit("E", &[(3000.0, 0.0), (3000.0, -100.0)]));
+    pattern.landing.exit = Some(exit("E", &[(3000.0, 0.0), (3000.0, -100.0)]));
     pilot.engage_profile(Box::new(pattern)).unwrap();
 
     let raw = xplane_pilot::sim::simple_dynamics::SimpleAircraftModel::new(

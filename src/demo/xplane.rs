@@ -3,7 +3,9 @@
 //! worker that fires X-Plane commands (cameras, pause) off the control
 //! loop.
 
+use std::collections::HashMap;
 use std::path::Path;
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -16,16 +18,13 @@ use crate::data::parquet::{AIRPORTS_FILE, COMMS_FILE, RUNWAYS_FILE};
 use crate::demo::script::DemoScript;
 use crate::eval_scenario::Start;
 use crate::guidance::runway_geometry::RunwayFrame;
-use crate::llm::tools::{open_apt_dat_parquet, query_runway_end, RunwayEnd};
+use crate::llm::tools::{open_apt_dat_parquet, query_runway_end, RunwayEnd, ToolBridge};
 use crate::sim::xplane_bridge::{
-    activate_command_for, geodetic_offset_ft, latlon_from_offset_ft, post_flight_init, probe_bootstrap_sample,
-    BootstrapSample, GeoReference,
+    activate_command_id, air_start_data, command_id, geodetic_offset_ft, latlon_from_offset_ft, post_flight_init,
+    probe_bootstrap_sample, BootstrapSample, GeoReference, C172_PATH,
 };
-use crate::types::{Runway, TrafficSide, Vec2, NM_TO_FT};
+use crate::types::{Vec2, KT_TO_FPS, M_TO_FT, NM_TO_FT};
 
-const C172_PATH: &str = "Aircraft/Laminar Research/Cessna 172 SP/Cessna_172SP.acf";
-const KT_TO_MPS: f64 = 0.514_444;
-const FT_TO_M: f64 = 0.3048;
 
 /// Where a take starts.
 #[derive(Debug, Clone)]
@@ -39,7 +38,7 @@ pub struct StartFix {
 }
 
 /// The script's airborne start as a lat/lon, from its runway in apt.dat.
-pub fn start_fix(script: &DemoScript, apt_dat_cache_dir: &Path) -> Result<StartFix> {
+pub fn start_fix(script: &DemoScript, apt_dat_cache_dir: &Path, pattern_agl_ft: f64) -> Result<StartFix> {
     let Start::Airborne { airborne: a } = &script.start else {
         bail!("a demo starts airborne (start: {{airborne: ...}})");
     };
@@ -50,39 +49,23 @@ pub fn start_fix(script: &DemoScript, apt_dat_cache_dir: &Path) -> Result<StartF
     )?;
     let end = query_runway_end(&conn, &script.airport, &a.runway)?;
     let anchor = GeoReference { threshold_lat_deg: end.threshold_lat_deg, threshold_lon_deg: end.threshold_lon_deg };
-    let frame = RunwayFrame::new(Runway {
-        id: Some(a.runway.clone()),
-        threshold_ft: Vec2::ZERO,
-        course_deg: end.course_deg,
-        length_ft: end.length_ft,
-        touchdown_zone_ft: crate::plan::compile::TOUCHDOWN_ZONE_FT,
-        displaced_threshold_ft: end.displaced_threshold_ft,
-        width_ft: end.width_ft,
-        traffic_side: if a.right_ft >= 0.0 { TrafficSide::Right } else { TrafficSide::Left },
-    });
+    let frame = RunwayFrame::new(end.runway(&a.runway, Vec2::ZERO, a.side()));
     let (lat_deg, lon_deg) = latlon_from_offset_ft(frame.to_world_frame(Vec2::new(a.along_ft, a.right_ft)), anchor);
-    let alt_msl_ft = a
-        .alt_msl_ft
-        .or(a.alt_agl_ft.map(|h| end.elevation_ft + h))
-        .unwrap_or(end.elevation_ft + 1000.0);
+    let alt_msl_ft = a.start_alt_msl_ft(end.elevation_ft, pattern_agl_ft);
     Ok(StartFix { lat_deg, lon_deg, alt_msl_ft, heading_deg: a.heading_deg, ias_kt: a.ias_kt, runway: end })
 }
 
 /// The `/api/v3/flight` body for the take.
 pub fn flight_init_body(script: &DemoScript, fix: &StartFix) -> Value {
     let x = &script.xplane;
-    let mut data = json!({
-        "aircraft": {"path": x.aircraft.clone().unwrap_or_else(|| C172_PATH.to_string())},
-        "lle_air_start": {
-            "latitude": fix.lat_deg,
-            "longitude": fix.lon_deg,
-            "elevation_in_meters": fix.alt_msl_ft * FT_TO_M,
-            "heading_true": fix.heading_deg,
-            "speed_in_meters_per_second": fix.ias_kt * KT_TO_MPS,
-            "pitch_in_degrees": 0.0
-        },
-        "engine_status": {"all_engines": {"running": true}}
-    });
+    let mut data = air_start_data(
+        x.aircraft.as_deref().unwrap_or(C172_PATH),
+        fix.lat_deg,
+        fix.lon_deg,
+        fix.alt_msl_ft / M_TO_FT,
+        fix.heading_deg,
+        fix.ias_kt * KT_TO_FPS / M_TO_FT,
+    );
     // X-Plane wants both fields of a local time; a missing one is today
     // or noon.
     if x.day_of_year.is_some() || x.time_in_24_hours.is_some() {
@@ -120,22 +103,43 @@ pub fn init_flight(host: &str, port: u16, script: &DemoScript, fix: &StartFix) -
     Err(anyhow!("X-Plane didn't put the aircraft at the start within 90 s ({last})"))
 }
 
-/// Fires X-Plane commands on its own thread, so a slow REST call never
-/// holds up the control loop.
+enum XpWork {
+    Command(String, f64),
+    Datarefs(Vec<(String, f64)>),
+}
+
+/// Fires X-Plane commands (ids cached) and writes datarefs on its own
+/// thread, so a slow REST call never holds up the control loop.
 #[derive(Clone)]
 pub struct XpCommander {
-    tx: Sender<(String, f64)>,
+    tx: Sender<XpWork>,
 }
 
 impl XpCommander {
-    pub fn spawn(host: String, port: u16, bus: SimBus) -> Self {
-        let (tx, rx) = unbounded::<(String, f64)>();
+    pub fn spawn(host: String, port: u16, bridge: Option<Arc<dyn ToolBridge>>, bus: SimBus) -> Self {
+        let (tx, rx) = unbounded::<XpWork>();
         thread::Builder::new()
             .name("demo-xplane".into())
             .spawn(move || {
-                for (name, duration_s) in rx {
-                    if let Err(e) = activate_command_for(&host, port, &name, duration_s) {
-                        bus.push_log_kind(LogKind::Error, format!("[demo] X-Plane command {name}: {e}"));
+                let mut ids: HashMap<String, i64> = HashMap::new();
+                for work in rx {
+                    let (what, result) = match work {
+                        XpWork::Command(name, duration_s) => {
+                            let id = match ids.get(&name) {
+                                Some(id) => Ok(*id),
+                                None => command_id(&host, port, &name).inspect(|id| {
+                                    ids.insert(name.clone(), *id);
+                                }),
+                            };
+                            (name, id.and_then(|id| activate_command_id(&host, port, id, duration_s)))
+                        }
+                        XpWork::Datarefs(values) => match &bridge {
+                            Some(b) => ("datarefs".to_string(), b.write_dataref_values(&values)),
+                            None => continue,
+                        },
+                    };
+                    if let Err(e) = result {
+                        bus.push_log_kind(LogKind::Error, format!("[demo] X-Plane {what}: {e:#}"));
                     }
                 }
             })
@@ -144,7 +148,11 @@ impl XpCommander {
     }
 
     pub fn command(&self, name: &str, duration_s: f64) {
-        let _ = self.tx.send((name.to_string(), duration_s));
+        let _ = self.tx.send(XpWork::Command(name.to_string(), duration_s));
+    }
+
+    pub fn write_datarefs(&self, values: Vec<(String, f64)>) {
+        let _ = self.tx.send(XpWork::Datarefs(values));
     }
 }
 

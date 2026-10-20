@@ -594,3 +594,21 @@ mod tests {
         assert!(serde_yaml_ng::from_str::<RawAircraft>(bad).is_err());
     }
 }
+
+/// Load `KEY=value` lines from a `.env` file into the environment
+/// (best effort; variables already set win).
+pub fn load_dotenv(path: &std::path::Path) {
+    let Ok(text) = std::fs::read_to_string(path) else { return };
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if let Some((key, value)) = line.split_once('=') {
+            let (key, value) = (key.trim(), value.trim());
+            if !key.is_empty() && std::env::var_os(key).is_none() {
+                std::env::set_var(key, value);
+            }
+        }
+    }
+}

@@ -250,6 +250,21 @@ pub struct AirborneStart {
     pub ias_kt: f64,
 }
 
+impl AirborneStart {
+    /// The traffic side its offset from the runway puts it on.
+    pub fn side(&self) -> crate::types::TrafficSide {
+        if self.right_ft >= 0.0 { crate::types::TrafficSide::Right } else { crate::types::TrafficSide::Left }
+    }
+
+    /// Its altitude: as given (MSL, or AGL over the field), else pattern
+    /// altitude.
+    pub fn start_alt_msl_ft(&self, field_elevation_ft: f64, pattern_agl_ft: f64) -> f64 {
+        self.alt_msl_ft
+            .or(self.alt_agl_ft.map(|h| field_elevation_ft + h))
+            .unwrap_or(field_elevation_ft + pattern_agl_ft)
+    }
+}
+
 /// One scripted transmission (a cue). It is *armed* from the start, or
 /// once the cue named by `after` has been sent; then it triggers when
 /// every condition it gives holds (`at_s` sim seconds, `when`, a pilot
@@ -517,31 +532,17 @@ struct PendingMsg {
 }
 
 /// What a schedule needs to know besides the aircraft's state.
-#[derive(Debug, Default, Clone, Copy)]
-pub struct ScheduleInputs<'a> {
-    /// Sim times of the pilot's radio transmissions so far.
-    pub pilot_tx_times: &'a [f64],
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ScheduleInputs {
+    /// Sim time of the pilot's latest radio transmission.
+    pub last_pilot_tx_s: Option<f64>,
     /// Send the next unsent cue now, whatever its triggers.
     pub force_next: bool,
     /// Nobody at the keys (a rehearsal): manual cues send themselves.
     pub rehearse_manual: bool,
 }
 
-/// Where the next unsent cue stands.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CueState {
-    /// Waiting for the cue it follows.
-    Waiting,
-    Armed,
-    /// Triggered; out after its delay.
-    Triggered,
-}
-
 impl MessageSchedule {
-    pub fn new(messages: &[ScenarioMessage], resolver: &mut Resolver) -> Result<Self> {
-        Self::with_order(messages, resolver, false)
-    }
-
     /// `sequential`: a cue without `after` follows the one before it.
     pub fn with_order(messages: &[ScenarioMessage], resolver: &mut Resolver, sequential: bool) -> Result<Self> {
         let mut pending = Vec::new();
@@ -575,12 +576,14 @@ impl MessageSchedule {
         Ok(Self { sent_at: vec![None; messages.len()], pending, prev_pos: None })
     }
 
-    /// Messages due this tick, in order.
-    pub fn due(&mut self, s: &Sample, dt: f64) -> Vec<(usize, ScenarioMessage)> {
-        self.due_with(s, dt, &ScheduleInputs::default())
+    /// Every message has gone out, the last at least `grace_s` before `t`
+    /// (time for the pilot to act on it).
+    pub fn all_sent(&self, t: f64, grace_s: f64) -> bool {
+        self.sent_at.iter().all(|s| s.is_some_and(|at| t >= at + grace_s))
     }
 
-    pub fn due_with(&mut self, s: &Sample, dt: f64, inp: &ScheduleInputs) -> Vec<(usize, ScenarioMessage)> {
+    /// Messages due this tick, in order.
+    pub fn due(&mut self, s: &Sample, dt: f64, inp: &ScheduleInputs) -> Vec<(usize, ScenarioMessage)> {
         let prev = self.prev_pos.unwrap_or(s.pos);
         self.prev_pos = Some(s.pos);
         let no_gates = HashSet::new();
@@ -612,7 +615,7 @@ impl MessageSchedule {
                 // timers stay current.
                 let when_ok = p.cond.as_mut().is_none_or(|c| c.eval(&ctx));
                 let readback_ok = !m.after_readback
-                    || inp.pilot_tx_times.iter().any(|&tx| tx > armed)
+                    || inp.last_pilot_tx_s.is_some_and(|tx| tx > armed)
                     || m.readback_timeout_s.is_some_and(|to| s.t >= armed + to);
                 let turned_ok = m.turned_deg.is_none_or(|deg| p.turned_deg.abs() >= deg);
                 let manual_ok = !m.manual || (inp.rehearse_manual && s.t >= armed + m.rehearse_after_s.unwrap_or(20.0));
@@ -628,18 +631,6 @@ impl MessageSchedule {
             }
         }
         out
-    }
-
-    /// The next unsent cue and where it stands.
-    pub fn next_pending(&self) -> Option<(usize, &ScenarioMessage, CueState)> {
-        let i = self.sent_at.iter().position(|t| t.is_none())?;
-        let p = &self.pending[i];
-        let state = match (p.armed_at, p.triggered_at) {
-            (_, Some(_)) => CueState::Triggered,
-            (Some(_), None) => CueState::Armed,
-            (None, None) => CueState::Waiting,
-        };
-        Some((i, &p.msg, state))
     }
 }
 
@@ -694,6 +685,22 @@ fn longest_span(samples: &[Sample], pred: impl FnMut(&Sample) -> bool) -> (f64, 
 }
 
 impl Sample {
+    /// A sample of the pilot's estimated state at sim time `t`.
+    pub fn from_state(st: &crate::types::AircraftState, phase: Option<FlightPhase>, t: f64) -> Self {
+        Self {
+            t,
+            pos: st.position_ft,
+            alt_msl_ft: st.alt_msl_ft,
+            alt_agl_ft: st.alt_agl_ft,
+            track_deg: st.track_deg,
+            phase,
+            on_ground: st.on_ground,
+            crashed: false,
+            bank_deg: st.roll_deg,
+            vs_fpm: st.vs_fpm,
+        }
+    }
+
     /// The condition-evaluation context at this sample.
     fn ctx<'a>(&self, prev_pos: Vec2, dt: f64, gates: &'a HashSet<String>) -> EvalCtx<'a> {
         EvalCtx {
@@ -1347,7 +1354,7 @@ mod schedule_tests {
     }
 
     fn sent(s: &mut MessageSchedule, t: f64, track: f64, inp: &ScheduleInputs) -> Vec<usize> {
-        s.due_with(&sample(t, track), 1.0, inp).into_iter().map(|(i, _)| i).collect()
+        s.due(&sample(t, track), 1.0, inp).into_iter().map(|(i, _)| i).collect()
     }
 
     #[test]
@@ -1364,9 +1371,9 @@ mod schedule_tests {
         assert!(sent(&mut s, 1.0, 0.0, &none).is_empty());
         assert_eq!(sent(&mut s, 2.0, 0.0, &none), vec![0]);
         // Armed at 2 s; a transmission from before then doesn't count.
-        let early = ScheduleInputs { pilot_tx_times: &[1.5], ..Default::default() };
+        let early = ScheduleInputs { last_pilot_tx_s: Some(1.5), ..Default::default() };
         assert!(sent(&mut s, 5.0, 0.0, &early).is_empty());
-        let readback = ScheduleInputs { pilot_tx_times: &[1.5, 6.0], ..Default::default() };
+        let readback = ScheduleInputs { last_pilot_tx_s: Some(6.0), ..Default::default() };
         assert!(sent(&mut s, 7.0, 0.0, &readback).is_empty(), "delay_s holds it");
         assert_eq!(sent(&mut s, 10.0, 0.0, &readback), vec![1]);
         // The third waits for 300° of turn after the second went out.
@@ -1397,7 +1404,6 @@ mod schedule_tests {
         );
         let live = ScheduleInputs::default();
         assert!(sent(&mut s, 30.0, 0.0, &live).is_empty(), "manual waits for the key");
-        assert_eq!(s.next_pending().map(|p| p.0), Some(0));
         let key = ScheduleInputs { force_next: true, ..Default::default() };
         assert_eq!(sent(&mut s, 31.0, 0.0, &key), vec![0]);
         // No readback: the timeout sends it.
@@ -1407,7 +1413,7 @@ mod schedule_tests {
         let rehearse = ScheduleInputs { rehearse_manual: true, ..Default::default() };
         assert!(sent(&mut s, 44.0, 0.0, &rehearse).is_empty());
         assert_eq!(sent(&mut s, 46.0, 0.0, &rehearse), vec![2]);
-        assert!(s.next_pending().is_none());
+        assert!(s.sent_at.iter().all(|t| t.is_some()));
     }
 
     #[test]

@@ -37,6 +37,13 @@ pub struct ObsClient {
 }
 
 impl ObsClient {
+    /// Connect with `OBS_WS_URL` (default `ws://127.0.0.1:4455`) and
+    /// `OBS_WS_PASSWORD` (unset or empty: no password).
+    pub fn connect_from_env() -> Result<Self> {
+        let (url, password) = env_config();
+        Self::connect(&url, password.as_deref())
+    }
+
     pub fn connect(url: &str, password: Option<&str>) -> Result<Self> {
         let (mut ws, _) = tungstenite::connect(url).map_err(|e| anyhow!("connecting to OBS at {url}: {e}"))?;
         if let MaybeTlsStream::Plain(s) = ws.get_mut() {
@@ -94,9 +101,15 @@ fn read_op(ws: &mut Ws, op: u64) -> Result<Value> {
     }
 }
 
-enum ObsWork {
-    Request(String, Value),
+/// The OBS URL and password from the environment.
+fn env_config() -> (String, Option<String>) {
+    let url = std::env::var("OBS_WS_URL").unwrap_or_else(|_| "ws://127.0.0.1:4455".into());
+    let password = std::env::var("OBS_WS_PASSWORD").ok().filter(|p| !p.is_empty());
+    (url, password)
 }
+
+/// An OBS request for the worker, and who (if anyone) waits for it.
+type ObsWork = (String, Value, Option<Sender<()>>);
 
 /// Fire-and-forget OBS requests, on a worker thread.
 #[derive(Clone)]
@@ -106,8 +119,7 @@ pub struct ObsHandle {
 
 impl ObsHandle {
     pub fn spawn(bus: SimBus) -> Self {
-        let url = std::env::var("OBS_WS_URL").unwrap_or_else(|_| "ws://127.0.0.1:4455".into());
-        let password = std::env::var("OBS_WS_PASSWORD").ok().filter(|p| !p.is_empty());
+        let (url, password) = env_config();
         let (tx, rx) = unbounded::<ObsWork>();
         thread::Builder::new()
             .name("demo-obs".into())
@@ -115,7 +127,7 @@ impl ObsHandle {
                 let mut client: Option<ObsClient> = None;
                 let mut warned = false;
                 let mut retry_at = Instant::now();
-                for ObsWork::Request(kind, data) in rx {
+                for (kind, data, done) in rx {
                     if client.is_none() && Instant::now() >= retry_at {
                         match ObsClient::connect(&url, password.as_deref()) {
                             Ok(c) => {
@@ -132,7 +144,11 @@ impl ObsHandle {
                         }
                     }
                     let Some(c) = client.as_mut() else { continue };
-                    if let Err(e) = c.request(&kind, data) {
+                    let result = c.request(&kind, data);
+                    if let Some(done) = done {
+                        let _ = done.send(());
+                    }
+                    if let Err(e) = result {
                         bus.push_log_kind(LogKind::Error, format!("[demo] OBS {kind}: {e:#}"));
                         if e.to_string().contains("closed") || e.downcast_ref::<tungstenite::Error>().is_some() {
                             client = None;
@@ -147,7 +163,15 @@ impl ObsHandle {
     }
 
     fn send(&self, kind: &str, data: Value) {
-        let _ = self.tx.send(ObsWork::Request(kind.to_string(), data));
+        let _ = self.tx.send((kind.to_string(), data, None));
+    }
+
+    /// Stop recording and wait (up to `timeout`) for OBS to take it: for
+    /// shutdown, when the worker won't outlive the process.
+    pub fn stop_record_and_wait(&self, timeout: Duration) {
+        let (done_tx, done_rx) = crossbeam_channel::bounded(1);
+        let _ = self.tx.send(("StopRecord".to_string(), json!({}), Some(done_tx)));
+        let _ = done_rx.recv_timeout(timeout);
     }
 
     pub fn scene(&self, name: &str) {

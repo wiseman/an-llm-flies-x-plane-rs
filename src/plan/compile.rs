@@ -44,6 +44,13 @@ impl RPattern {
             && self.spec.runway.eq_ignore_ascii_case(&other.spec.runway)
     }
 
+    /// The same runway and the same side: a pattern that can be amended
+    /// in flight. Left traffic for the runway being flown right is a new
+    /// pattern, not an edit.
+    pub fn same_circuit(&self, other: &RPattern) -> bool {
+        self.same_runway(other) && self.spec.side == other.spec.side
+    }
+
     pub fn describe(&self) -> String {
         let mut bits = vec![format!(
             "{} traffic {} {}",

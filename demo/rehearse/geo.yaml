@@ -1,0 +1,57 @@
+# Rehearsal of the landmark freeform script: remain south of the 118,
+# I'll call your base; direct Cal State Northridge and hold over it; a
+# right base from there to 16R; then Ground to Prop Park. Two operator
+# questions about the area ride along.
+#
+#   cargo run --release --bin eval -- --scenario demo/rehearse/geo.yaml \
+#     --pilot-llm-provider claude-code --pilot-llm-model claude-sonnet-5-5 --pilot-mode realistic
+id: rehearse-geo
+description: South of the 118, hold over CSUN, right base 16R, taxi to Prop Park
+airport: KVNY
+start:
+  airborne: {runway: 16R, along_ft: 3000, right_ft: 5500, alt_msl_ft: 1800, heading_deg: 355.5, ias_kt: 80}
+briefing: >
+  You are Cessna 172SP, callsign "Skyhawk 2SP", on a right downwind
+  for runway 16R at Van Nuys (KVNY) at pattern altitude, inbound for a full
+  stop. The autopilot is holding heading, altitude and speed for now. COM1
+  is on Van Nuys Tower, 119.3: call them, and fly their instructions.
+sequential: true
+max_sim_s: 1800
+# Run on past the landing; parking (brake set) ends it.
+end_after_s: 1750
+
+messages:
+  - id: extend
+    at_s: 4
+    atc: "Skyhawk 2SP, Van Nuys Tower, extend downwind, remain south of the 118, I'll call your base."
+  - id: csun
+    after_readback: true
+    readback_timeout_s: 30
+    when: {cond: abeam, target: {ref: runway, airport: KVNY, runway: 16R, part: threshold}}
+    delay_s: 3
+    atc: "Two Sierra Papa, traffic is a jet on a four-mile final. Proceed direct Cal State Northridge and hold over the campus, I'll call you back."
+  - id: ask-burbank
+    when: {cond: elapsed, s: 20}
+    operator: "How far are we from Burbank right now?"
+  - id: base
+    turned_deg: 540
+    atc: "Two Sierra Papa, traffic no factor. Leave the campus, enter a right base runway 16R, cleared to land."
+  - id: exit
+    when: {cond: agl_below, ft: 3}
+    delay_s: 6
+    atc: "Two Sierra Papa, turn right at Golf, contact Ground 121.7."
+  - id: taxi
+    after_readback: true
+    readback_timeout_s: 30
+    delay_s: 15
+    atc: "Skyhawk 2SP, Van Nuys Ground, taxi to Prop Park via Golf, Alpha."
+  - id: ask-lake
+    when: {cond: elapsed, s: 20}
+    operator: "What's the lake south of the field called?"
+
+checks:
+  - {check: remain, holds: {cond: side_of, target: {ref: place, name: CA-118}, side_deg: 180}, label: south of the 118}
+  - {check: loiter, near: {ref: place, name: Cal State Northridge}, radius_ft: 6000, min_s: 90}
+  - {check: landed, runway: 16R}
+  - {check: loiter, near: {ref: latlon, lat: 34.21604, lon: -118.49948}, radius_ft: 800, min_s: 15}
+  - {check: no_crash}

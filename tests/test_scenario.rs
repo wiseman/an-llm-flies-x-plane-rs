@@ -6,7 +6,7 @@ use common::exit;
 use xplane_pilot::config::{load_default_config_bundle, ConfigBundle};
 use xplane_pilot::core::mission_manager::PilotCore;
 use xplane_pilot::core::profiles::TaxiProfile;
-use xplane_pilot::core::landing_rollout::{ArrivalPlan, LandingRolloutProfile, RunwayExitPlan};
+use xplane_pilot::core::landing_rollout::{ArrivalPlan, LandingPlan, LandingRolloutProfile, RunwayExitPlan};
 use xplane_pilot::guidance::runway_geometry::RunwayFrame;
 use xplane_pilot::sim::scenario::ScenarioRunner;
 use xplane_pilot::sim::simple_dynamics::SimpleAircraftModel;
@@ -275,14 +275,16 @@ fn arrival_plan_rolls_out_exits_and_parks_without_further_input() {
         vec!["P".to_string()],
     )
     .with_final_pose(pose);
-    let rollout = LandingRolloutProfile::new(config.clone(), frame.clone(), Some(exit)).with_arrival(
-        Some(ArrivalPlan {
+    let rollout = LandingRolloutProfile::new(config.clone(), frame.clone(), None).with_landing_plan(LandingPlan {
+        exit: Some(exit),
+        arrival: Some(ArrivalPlan {
             parking_name: "Spot 1".to_string(),
             via_taxiways: vec![],
             taxi: Box::new(taxi),
             summary: "Spot 1".to_string(),
         }),
-    );
+        fallbacks: vec![],
+    });
     let mut r = start_rollout_with(config, rollout, 1500.0, 45.0);
 
     let mut saw_taxi = false;

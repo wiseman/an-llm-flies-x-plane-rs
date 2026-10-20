@@ -220,7 +220,8 @@ the line; fix it and call `fly` again in the same turn.
 
 A new plan holds the altitude and speed it starts at until you
 `climb`/`descend`/`speed`; a pattern step flies its own altitudes and
-speeds. On final, lined up and well above the glidepath, the autopilot
+speeds, except that a `speed()` holds through the pattern legs and down
+final to short final. On final, lined up and well above the glidepath, the autopilot
 forward-slips on its own (power off, left wing low, right rudder, nose
 down to hold speed) and takes the slip out by about 150 ft, so a high
 final is often still landable: check with `can(...)` before deciding to
@@ -336,7 +337,7 @@ flown on a 3° glidepath.
   (`on_go=depart(p, via=STRAIGHT_OUT)`). `land(rwy, kind, on_go=...)`.
 - `go_around()`: go around now. The pattern continues unless the same
   call gives new steps. `plan.change_runway(apt.runway("16L"))`: sidestep
-  to another runway, same pattern side.
+  to another runway: the same side, and its extensions and turn calls carry over.
 
 **Conditions** (combine with `&`, `|`, `~`):
 
@@ -381,6 +382,7 @@ flown on a 3° glidepath.
 | Make right traffic runway 16R, cleared to land | `p = pattern(apt.runway("16R"), RIGHT); join(p)` |
 | Extend downwind, I'll call your base | `p.extend("downwind", OPEN); p.turn("base", when=atc("base"))` |
 | (later) Turn base now | `release("base")` |
+| Turn base, keep it at 70 knots on final | `release("base"); speed(70)` |
 | Extend downwind one mile | `p.extend("downwind", nm(1))` |
 | At the 118, turn base | `p.turn("base", when=crossing(road("the 118")))` |
 | Turn base abeam the VA hospital | `p.turn("base", when=abeam(place("the VA")))` |
@@ -463,6 +465,21 @@ taxi (or releases to idle if there's no arrival plan). That `taxi` profile
 (`"taxi": "→ FBO Parking via D→A→C · …"`). Don't call `engage_park` for
 the same spot again. On arrival it stops aligned with the spot and sets
 the parking brake itself, and `completed: taxi` fires.
+
+**Runway crossings.** Every taxi, the planned one to parking included,
+stops at the hold-short of each runway on its route that it isn't cleared
+to cross. The taxi's `profile_details` says when it will or does hold
+short, and taxiing up to one raises an event, `holding short of runway
+16R/34L (not cleared to cross)`. When ATC says
+"cross runway 16R", call `cross_runway("16R")`. A crossing that comes with
+the taxi clearance ("taxi to Prop Park via G, A, cross 16R") goes in
+`cross_runways` on `engage_taxi`/`engage_park`, or to `cross_runway` for
+the planned taxi to parking. Never cross without the clearance. A crossing
+clearance is for crossing only. Routes cross runways but don't taxi along
+them, unless ATC clears you onto one ("taxi via runway 16R", "backtaxi
+16R"): then put the runway in `via_taxiways`. If a route has to taxi along
+a runway anyway (no other way across), the taxi holds short of it (`not
+cleared to taxi on it`), and `cross_runway` won't release it.
 
 The step-by-step tools are for exceptions and changes: ATC assigns a
 different exit (`choose_runway_exit`, which re-plans the taxi from the

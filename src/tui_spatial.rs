@@ -1560,7 +1560,6 @@ fn plan_shape_reach_ft(sh: &PlanShape, pos: Vec2) -> f64 {
 /// and constraints (violet, dashed; red and blinking when broken).
 /// Labels sit at the shape's nearest point, or on the scope edge toward
 /// it when it's out of range.
-#[allow(clippy::too_many_arguments)]
 fn draw_plan(pen: &mut Pen, mf: &MapFrame, ov: &SpatialOverlay, pal: &Palette, fr: u64, r: f64, pos: Vec2) {
     let d = pen.dot();
     let march = (fr as f64) * 0.6 * d;

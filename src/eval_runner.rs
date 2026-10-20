@@ -235,7 +235,11 @@ pub struct ResolvedStart {
     pub parking_heading_deg: f64,
 }
 
+/// How long after the last scripted message a stop can end the run.
+const SCRIPT_GRACE_S: f64 = 60.0;
+
 /// Runways and frequencies at the eval airport, for the simulated ATC.
+
 fn airport_brief(cfg: &EvalConfig) -> Result<String> {
     use crate::llm::tools::open_apt_dat_parquet;
     let cache = &cfg.apt_dat_cache_dir;
@@ -692,13 +696,12 @@ fn run_control_loop(mut ctx: ControlLoopCtx) -> (MissionOutcome, f64, f64) {
             };
             ctx.samples.lock().push(sample);
             if let Some(schedule) = ctx.schedule.as_mut() {
-                let tx_times: Vec<f64> = ctx.radio_log.lock().iter().map(|(t, _)| *t).collect();
                 let inputs = crate::eval_scenario::ScheduleInputs {
-                    pilot_tx_times: &tx_times,
+                    last_pilot_tx_s: ctx.radio_log.lock().last().map(|(t, _)| *t),
                     force_next: false,
                     rehearse_manual: true,
                 };
-                let due = schedule.due_with(&sample, ctx.dt, &inputs);
+                let due = schedule.due(&sample, ctx.dt, &inputs);
                 if !due.is_empty() {
                     *ctx.sent_at.lock() = schedule.sent_at.clone();
                 }
@@ -715,7 +718,8 @@ fn run_control_loop(mut ctx: ControlLoopCtx) -> (MissionOutcome, f64, f64) {
                 }
             }
             let end = ctx.scenario_end.unwrap();
-            if end.on_landed && been_airborne && on_ground && gs_kt < 3.0 {
+            let script_done = ctx.schedule.as_ref().is_none_or(|s| s.all_sent(sim_time_s, SCRIPT_GRACE_S));
+            if end.on_landed && script_done && been_airborne && on_ground && gs_kt < 3.0 {
                 let outcome = MissionOutcome::auto_success(format!("landed and stopped at t_sim={sim_time_s:.1}s"));
                 let _ = ctx.outcome_tx.try_send(outcome.clone());
                 return finish(&ctx, outcome, max_alt_agl_ft);
@@ -764,15 +768,18 @@ fn run_control_loop(mut ctx: ControlLoopCtx) -> (MissionOutcome, f64, f64) {
             return finish(&ctx, outcome, max_alt_agl_ft);
         }
 
-        // Auto-success: been airborne, now stopped with parking brake.
-        // been_airborne=false at startup excludes the initial state.
+        // Auto-success: been airborne, now stopped with parking brake
+        // (once any scripted messages have all gone out and had time to
+        // be acted on: holding short for a crossing isn't the end). been_airborne=false at startup
+        // excludes the initial state.
+        let script_done = ctx.schedule.as_ref().is_none_or(|s| s.all_sent(sim_time_s, SCRIPT_GRACE_S));
         if been_airborne {
             let brake_set = ctx
                 .bridge
                 .get_dataref_value(PARKING_BRAKE_RATIO.name)
                 .map(|v| v >= 0.5)
                 .unwrap_or(false);
-            if on_ground && gs_kt < 1.0 && brake_set {
+            if on_ground && gs_kt < 1.0 && brake_set && script_done {
                 let outcome = MissionOutcome::auto_success(format!(
                     "post-flight stopped with parking brake set at t_sim={:.1}s phase={:?}",
                     sim_time_s, phase_now
@@ -914,10 +921,7 @@ pub fn run_eval_with_brain(
     if let Some(a) = &airborne_start {
         let frame = crate::guidance::runway_geometry::RunwayFrame::new(eval_config.airport.runway.clone());
         dyn_initial.position_ft = frame.to_world_frame(Vec2::new(a.along_ft, a.right_ft));
-        dyn_initial.altitude_ft = a
-            .alt_msl_ft
-            .or(a.alt_agl_ft.map(|h| resolved.field_elevation_ft + h))
-            .unwrap_or(resolved.field_elevation_ft + eval_config.pattern.altitude_agl_ft);
+        dyn_initial.altitude_ft = a.start_alt_msl_ft(resolved.field_elevation_ft, eval_config.pattern.altitude_agl_ft);
         dyn_initial.heading_deg = a.heading_deg;
         dyn_initial.ias_kt = a.ias_kt;
         dyn_initial.on_ground = false;
@@ -1020,12 +1024,7 @@ pub fn run_eval_with_brain(
         // heading, altitude and speed, so nothing coasts while the pilot
         // reads the briefing.
         if airborne_start.is_some() {
-            use crate::core::profiles::{AltitudeHoldProfile, HeadingHoldProfile, SpeedHoldProfile};
-            let _ = pilot.engage_profiles(vec![
-                Box::new(HeadingHoldProfile::new(dyn_state.heading_deg, eval_config.limits.max_bank_pattern_deg)),
-                Box::new(AltitudeHoldProfile::new(dyn_state.altitude_ft)),
-                Box::new(SpeedHoldProfile::new(dyn_state.ias_kt)),
-            ]);
+            pilot.engage_airborne_holds(dyn_state.heading_deg, dyn_state.altitude_ft, dyn_state.ias_kt);
             let _ = pilot.update(&dyn_state, cfg.dt);
         }
     }

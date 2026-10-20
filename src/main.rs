@@ -1,6 +1,5 @@
 //! `sim-pilot` CLI.
 
-use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context, Result};
@@ -273,28 +272,6 @@ fn resolve_track_paths(disabled: bool, stem: &str) -> Option<(PathBuf, PathBuf)>
     ))
 }
 
-fn load_dotenv(path: &Path) {
-    if !path.is_file() {
-        return;
-    }
-    let Ok(text) = fs::read_to_string(path) else {
-        return;
-    };
-    for line in text.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        if let Some((key, value)) = line.split_once('=') {
-            let key = key.trim();
-            let value = value.trim();
-            if !key.is_empty() && std::env::var_os(key).is_none() {
-                std::env::set_var(key, value);
-            }
-        }
-    }
-}
-
 /// `--atc-message` and `--operator-message` values, interleaved in the
 /// order they appeared on the command line so scripted scenarios can rely
 /// on e.g. operator context arriving before an ATC clearance.
@@ -319,7 +296,7 @@ fn ordered_startup_messages(matches: &ArgMatches) -> Vec<IncomingMessage> {
 
 fn main() -> Result<()> {
     // Best-effort .env loader so OPENAI_API_KEY can live in a gitignored file.
-    load_dotenv(Path::new(".env"));
+    xplane_pilot::config::load_dotenv(Path::new(".env"));
 
     let matches = Cli::command().get_matches();
     let startup_messages = ordered_startup_messages(&matches);

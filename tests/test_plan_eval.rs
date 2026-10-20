@@ -183,7 +183,7 @@ fn all_scenarios_parse_and_resolve() {
         if let Some(rw) = s.start.runway() {
             assert!(r.airport(&s.airport).unwrap().runway(rw).is_some(), "{}: no runway {rw}", path.display());
         }
-        MessageSchedule::new(&s.messages, &mut r).unwrap_or_else(|e| panic!("{}: {e:#}", path.display()));
+        MessageSchedule::with_order(&s.messages, &mut r, s.sequential).unwrap_or_else(|e| panic!("{}: {e:#}", path.display()));
         let elev = r.airport(&s.airport).unwrap().elevation_ft;
         let traffic = xplane_pilot::eval_scenario::ScriptedTraffic::new(&s.traffic, &s.airport, elev, &mut r)
             .unwrap_or_else(|e| panic!("{} traffic: {e:#}", path.display()));

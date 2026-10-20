@@ -1,0 +1,56 @@
+# Rehearsal of the "fixes" freeform script: extend downwind and I'll call
+# your base, a right 360, change to 16L (the base gate must carry over),
+# base and 70 kt down final, then Ground: taxi to Prop Park via Golf,
+# Alpha, crossing 16R.
+#
+#   cargo run --release --bin eval -- --scenario demo/rehearse/fixes.yaml \
+#     --pilot-llm-provider claude-code --pilot-llm-model claude-sonnet-5-5 --pilot-mode realistic
+id: rehearse-fixes
+description: Extend, 360, change to 16L, 70 kt final, taxi to Prop Park
+airport: KVNY
+start:
+  airborne: {runway: 16R, along_ft: 3000, right_ft: 5500, alt_msl_ft: 1800, heading_deg: 355.5, ias_kt: 80}
+briefing: >
+  You are Cessna 172SP, callsign "Skyhawk 2SP", on a right downwind
+  for runway 16R at Van Nuys (KVNY) at pattern altitude, inbound for a full
+  stop. The autopilot is holding heading, altitude and speed for now. COM1
+  is on Van Nuys Tower, 119.3: call them, and fly their instructions.
+sequential: true
+max_sim_s: 1500
+# Run on past the landing; parking (brake set) ends it.
+end_after_s: 1450
+
+messages:
+  - id: extend
+    at_s: 4
+    atc: "Skyhawk 2SP, Van Nuys Tower, extend downwind, I'll call your base."
+  - id: three-sixty
+    after_readback: true
+    readback_timeout_s: 30
+    when: {cond: past, target: {ref: runway, airport: KVNY, runway: 16R, part: threshold}}
+    delay_s: 5
+    atc: "Two Sierra Papa, make a right three-sixty for spacing, then continue downwind."
+  - id: change
+    turned_deg: 330
+    delay_s: 3
+    atc: "Two Sierra Papa, change to runway 16L, continue downwind."
+  - id: base
+    when: {cond: elapsed, s: 30}
+    atc: "Two Sierra Papa, turn base, runway 16L, cleared to land. Keep it at seventy knots on final, traffic behind you."
+  - id: exit
+    when: {cond: agl_below, ft: 3}
+    delay_s: 6
+    atc: "Two Sierra Papa, turn right at Golf, contact Ground 121.7."
+  - id: taxi
+    after_readback: true
+    readback_timeout_s: 30
+    delay_s: 15
+    atc: "Skyhawk 2SP, Van Nuys Ground, taxi to Prop Park via Golf, Alpha, cross runway 16R."
+
+checks:
+  - {check: orbit, dir: right}
+  # No base turn before it's called (message 3).
+  - {check: turn_after_message, leg: base, message: 3, within_s: 20}
+  - {check: landed, runway: 16L}
+  - {check: loiter, near: {ref: latlon, lat: 34.21604, lon: -118.49948}, radius_ft: 800, min_s: 15}
+  - {check: no_crash}

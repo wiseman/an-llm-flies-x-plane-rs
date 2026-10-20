@@ -245,7 +245,7 @@ use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use ratatui::Terminal;
 
 use crate::bus::{LogEntry, LogKind, SimBus};
-use crate::demo::director::{DemoCommand, DemoUi};
+use crate::demo::director::{DemoCommand, DemoEvent};
 use crate::demo::script::TuiView;
 use crate::core::mission_manager::{
     ActiveClearance, MissionGoal, PilotCore, StatusSnapshot,
@@ -259,18 +259,28 @@ use crate::tui_spatial::{
     parse_view_command, Palette, SpatialWidget, Trail, ViewCommand, ViewMode,
 };
 
+/// The TUI's side of a demo take: view changes in; your ATC calls (for
+/// the timeline) and the unmarked override keys (F6 next cue, F7 hold,
+/// F8 skip) out. The screen looks as it does in any other session.
+pub struct DemoTuiLink {
+    pub control_tx: Sender<DemoCommand>,
+    pub ui_rx: crossbeam_channel::Receiver<TuiView>,
+    pub events_tx: Sender<DemoEvent>,
+}
+
+/// Tell a demo take you switched the view yourself, so it doesn't switch
+/// back after showing the pilot's code.
+fn tell_demo_view(demo: &Option<DemoTuiLink>, spatial_on: bool) {
+    if let Some(d) = demo {
+        let v = if spatial_on { TuiView::Spatial } else { TuiView::Log };
+        let _ = d.control_tx.send(DemoCommand::View(v));
+    }
+}
+
 /// Run the interactive AI Pilot Console on the calling thread. Blocks
 /// until the user exits (Ctrl-C / Ctrl-D / Esc); on return, `stop_event`
 /// is set so background threads can shut down gracefully.
 #[allow(clippy::too_many_arguments)]
-/// The TUI's side of a demo take: view changes in, and the unmarked
-/// override keys out (F6 next cue, F7 hold, F8 skip). The screen looks
-/// as it does in any other session.
-pub struct DemoTuiLink {
-    pub control_tx: Sender<DemoCommand>,
-    pub ui_rx: crossbeam_channel::Receiver<DemoUi>,
-}
-
 pub fn run_tui(
     bus: SimBus,
     input_queue: Sender<IncomingMessage>,
@@ -403,6 +413,7 @@ pub fn run_tui(
                         }
                         KeyCode::Char('v') => {
                             spatial_on = !spatial_on;
+                            tell_demo_view(&demo, spatial_on);
                             continue;
                         }
                         KeyCode::Char('a') => {
@@ -547,6 +558,7 @@ pub fn run_tui(
                                 match parse_view_command(rest) {
                                     Ok(cmd) => {
                                         apply_view_command(cmd, &mut spatial_on, &mut spatial_mode);
+                                        tell_demo_view(&demo, spatial_on);
                                         bus.push_log_kind(
                                             LogKind::System,
                                             describe_view_state(spatial_on, spatial_mode),
@@ -589,6 +601,9 @@ pub fn run_tui(
                                 // only pick the message up seconds later.
                                 if source == "atc" {
                                     bus.push_radio(format!("[atc] {payload}"));
+                                    if let Some(d) = &demo {
+                                        let _ = d.events_tx.send(DemoEvent::AtcCall(payload.clone()));
+                                    }
                                 } else {
                                     bus.push_log_kind(LogKind::Operator, payload);
                                 }
@@ -678,7 +693,7 @@ pub fn run_tui(
             // Built on demand from the active profiles, only while the
             // view is visible.
             if let Some(d) = &demo {
-                for DemoUi::View(v) in d.ui_rx.try_iter() {
+                for v in d.ui_rx.try_iter() {
                     spatial_on = v == TuiView::Spatial;
                 }
             }

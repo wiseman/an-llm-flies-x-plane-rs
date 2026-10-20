@@ -1,0 +1,58 @@
+# Freeform take: you're Van Nuys Tower, live, over push-to-talk.
+#
+# The aircraft starts on a right downwind for 16R in the cockpit view.
+# After a few seconds settling on the autopilot the take rolls by
+# itself: OBS starts recording and the pilot gets the briefing, so its
+# first call to you is on the recording. Hold Tab, talk, release, Enter
+# (fix a misheard word first if you need to). The pilot reads back in
+# its radio voice. Quit the TUI to end the take; that stops the
+# recording. Switch OBS scenes yourself (or from your phone).
+#
+#   scripts/demo/take.sh demo/kvny-16r-freeform.yaml
+id: demo-kvny-16r-freeform
+description: Van Nuys 16R right downwind, live ATC (you)
+airport: KVNY
+start:
+  airborne: {runway: 16R, along_ft: 3000, right_ft: 5500, alt_msl_ft: 1800, heading_deg: 355.5, ias_kt: 80}
+briefing: >
+  You are Cessna 172SP, callsign "Skyhawk 2SP", on a right downwind
+  for runway 16R at Van Nuys (KVNY) at pattern altitude, inbound for a full
+  stop. The autopilot is holding heading, altitude and speed for now. COM1
+  is on Van Nuys Tower, 119.3: call them, and fly their instructions.
+max_sim_s: 3600
+
+xplane:
+  time_in_24_hours: 16.5
+  datarefs:
+    sim/cockpit2/radios/actuators/com1_frequency_hz_833: 119300
+    # X-Plane at full volume runs over the radio voices. At 0.35 the engine
+    # still sat only 8 dB under the pilot (2026-10-19 take); 0.1 puts it
+    # about 20 dB under, in the headset and the recording alike.
+    sim/operation/sound/master_volume_ratio: 0.1
+  settle_s: 6
+  roll: auto
+  initial_camera: sim/view/3d_cockpit_cmnd_look
+
+obs:
+  # Record from the roll until you quit; scenes are yours to switch.
+  record: true
+
+audio:
+  pilot: {backend: kokoro, voice: am_adam, speed: 1.05, preset: pilot}
+  min_gap_s: 1.0
+
+hooks:
+  # The take opens on the spatial view; the terminal shows the plan code
+  # the pilot writes, then goes back to it.
+  on_roll: {tui: spatial}
+  on_fly: {tui: log, hold_s: 12}
+
+broll:
+  - name: chase
+    shots: [{at: start, camera: sim/view/chase}]
+  - name: cut
+    shots:
+      - {at: start, camera: sim/view/chase}
+      - {at: "atc:360", offset_s: 4, camera: sim/view/circle}
+      - {at: "atc:base", offset_s: 2, camera: sim/view/chase}
+      - {at: "event:touchdown", offset_s: -20, camera: sim/view/tower}

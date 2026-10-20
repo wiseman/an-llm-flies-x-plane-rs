@@ -11,6 +11,13 @@ cd "$(dirname "$0")/../.."
 script="${1:?usage: scripts/demo/take.sh demo/<script>.yaml [flags]}"
 shift
 nice -n 5 cargo build --release --bin sim-pilot
+# OBS's X-Plane capture follows a window id that changes whenever X-Plane
+# restarts, and a stale one records black. Rebind it now; if OBS is running
+# but can't see X-Plane, don't start a take it would ruin.
+if pgrep -xq OBS; then
+  uv run --offline scripts/demo/obs_setup.py --xplane-only ||
+    { echo "OBS can't capture X-Plane; fix that before the take (is X-Plane running and on screen?)" >&2; exit 1; }
+fi
 exec ./target/release/sim-pilot --demo "$script" \
   --pilot-llm-provider claude-code --pilot-llm-model claude-sonnet-5-5 \
   --pilot-mode realistic "$@"

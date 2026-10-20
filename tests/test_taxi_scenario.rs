@@ -8,7 +8,7 @@
 
 use xplane_pilot::config::load_default_config_bundle;
 use xplane_pilot::core::mission_manager::PilotCore;
-use xplane_pilot::core::profiles::TaxiProfile;
+use xplane_pilot::core::profiles::{RunwayClearances, TaxiProfile};
 use xplane_pilot::sim::simple_dynamics::{DynamicsState, SimpleAircraftModel};
 use xplane_pilot::types::{StraightLeg, TaxiPose, Vec2};
 
@@ -257,4 +257,162 @@ fn parking_converges_from_any_arrival_angle() {
         assert!(hdg_err < 8.0, "turn {turn}: heading error {hdg_err:.1}°");
         assert_eq!(pilot.parking_brake.value(), Some(1.0), "turn {turn}: brake not set");
     }
+}
+
+/// East along A, across a runway's active zone (one leg), and on.
+fn route_across_16r() -> (Vec<StraightLeg>, Vec<String>, Vec<String>) {
+    let legs = vec![
+        StraightLeg { start_ft: Vec2::new(0.0, 0.0), end_ft: Vec2::new(400.0, 0.0) },
+        StraightLeg { start_ft: Vec2::new(400.0, 0.0), end_ft: Vec2::new(550.0, 0.0) },
+        StraightLeg { start_ft: Vec2::new(550.0, 0.0), end_ft: Vec2::new(900.0, 0.0) },
+    ];
+    let names = vec!["A".into(), "A".into(), "A".into()];
+    let zones = vec![String::new(), "departure:16R,34L;arrival:16R,34L;ils:16R".into(), String::new()];
+    (legs, names, zones)
+}
+
+/// East on G onto 16R, 300 ft south down the runway itself, and off east
+/// on H: the shape of the 2026-10-19 KVNY route, where "cross runway 16R"
+/// let the taxi roll down the runway to the next taxiway.
+fn route_along_16r() -> (Vec<StraightLeg>, Vec<String>, Vec<String>, Vec<bool>) {
+    let zone = "departure:16R,34L;arrival:16R,34L;ils:16R";
+    let legs = vec![
+        StraightLeg { start_ft: Vec2::new(0.0, 0.0), end_ft: Vec2::new(400.0, 0.0) },
+        StraightLeg { start_ft: Vec2::new(400.0, 0.0), end_ft: Vec2::new(500.0, 0.0) },
+        StraightLeg { start_ft: Vec2::new(500.0, 0.0), end_ft: Vec2::new(500.0, -300.0) },
+        StraightLeg { start_ft: Vec2::new(500.0, -300.0), end_ft: Vec2::new(600.0, -400.0) },
+        StraightLeg { start_ft: Vec2::new(600.0, -400.0), end_ft: Vec2::new(900.0, -400.0) },
+    ];
+    let names = vec!["G".into(), "G".into(), "16R/34L".into(), "H".into(), "H".into()];
+    let zones = vec![String::new(), zone.into(), "departure:16R,34L;arrival:16R,34L;ils:16R,34L".into(), zone.into(), String::new()];
+    let on_runway = vec![false, false, true, false, false];
+    (legs, names, zones, on_runway)
+}
+
+fn events(pilot: &PilotCore) -> Vec<String> {
+    pilot.latest_snapshot.as_ref().map(|s| s.events.iter().map(|(_, t)| t.clone()).collect()).unwrap_or_default()
+}
+
+#[test]
+fn holds_short_of_an_uncleared_runway_until_cleared() {
+    let cfg = load_default_config_bundle();
+    let mut pilot = PilotCore::new(cfg.clone());
+    let dyn_model = SimpleAircraftModel::new(cfg, Vec2::ZERO);
+    let (legs, names, zones) = route_across_16r();
+    pilot.engage_profile(Box::new(TaxiProfile::new(legs, names).with_runway_holds(&zones, &[], &RunwayClearances::default()))).unwrap();
+    let mut state = dyn_model.initial_state_at(Vec2::ZERO, 90.0, dyn_model.config.airport.field_elevation_ft);
+
+    run_until_stopped(&mut pilot, &dyn_model, &mut state, 600);
+    let x = state.position_ft.x;
+    assert!((340.0..=400.0).contains(&x), "stopped at x={x:.0}, the hold-short is at 400");
+    assert!(
+        events(&pilot).iter().any(|e| e.contains("holding short of runway 16R/34L")),
+        "{:?}",
+        events(&pilot)
+    );
+
+    // "Cross runway 34L" (the other end's ident) clears it.
+    assert_eq!(pilot.profile_mut::<TaxiProfile>().unwrap().clear_crossing("34L"), 1);
+    run_until_stopped(&mut pilot, &dyn_model, &mut state, 900);
+    assert!(state.position_ft.x > 850.0, "crossed and went on: x={:.0}", state.position_ft.x);
+}
+
+#[test]
+fn a_crossing_cleared_up_front_doesnt_stop() {
+    let cfg = load_default_config_bundle();
+    let mut pilot = PilotCore::new(cfg.clone());
+    let dyn_model = SimpleAircraftModel::new(cfg, Vec2::ZERO);
+    let (legs, names, zones) = route_across_16r();
+    let cleared = RunwayClearances { cross: vec!["16R".to_string()], ..Default::default() };
+    let profile = TaxiProfile::new(legs, names).with_runway_holds(&zones, &[], &cleared);
+    pilot.engage_profile(Box::new(profile)).unwrap();
+    let mut state = dyn_model.initial_state_at(Vec2::ZERO, 90.0, dyn_model.config.airport.field_elevation_ft);
+    run_until_stopped(&mut pilot, &dyn_model, &mut state, 900);
+    assert!(state.position_ft.x > 850.0, "x={:.0}", state.position_ft.x);
+}
+
+#[test]
+fn the_parking_brake_holds_against_a_taxi() {
+    // The pilot sets the brake mid-taxi: no power goes against it.
+    let cfg = load_default_config_bundle();
+    let mut pilot = PilotCore::new(cfg.clone());
+    let dyn_model = SimpleAircraftModel::new(cfg, Vec2::ZERO);
+    let legs = vec![StraightLeg { start_ft: Vec2::ZERO, end_ft: Vec2::new(3000.0, 0.0) }];
+    pilot.engage_profile(Box::new(TaxiProfile::new(legs, vec!["A".into()]))).unwrap();
+    let mut state = dyn_model.initial_state_at(Vec2::ZERO, 90.0, dyn_model.config.airport.field_elevation_ft);
+    for _ in 0..100 {
+        let (_, cmds) = pilot.update(&state, 0.2);
+        dyn_model.step(&mut state, &cmds, 0.2);
+    }
+    assert!(state.ias_kt > 5.0, "taxiing before the brake: {:.1} kt", state.ias_kt);
+    state.parking_brake = 1.0;
+    pilot.parking_brake.note_written(1.0);
+    let mut max_throttle: f64 = 0.0;
+    for _ in 0..100 {
+        let (_, cmds) = pilot.update(&state, 0.2);
+        max_throttle = max_throttle.max(cmds.throttle);
+        dyn_model.step(&mut state, &cmds, 0.2);
+    }
+    assert_eq!(max_throttle, 0.0, "powered against the parking brake");
+    assert!(state.ias_kt < 0.5, "still rolling at {:.1} kt", state.ias_kt);
+}
+
+#[test]
+fn a_taxi_that_starts_at_a_hold_holds_without_a_second_wake() {
+    // A planned taxi to parking whose runway exit ends at the next runway's
+    // hold line: it holds, but says nothing new (the hand-off already woke
+    // the pilot with the route and its hold).
+    let cfg = load_default_config_bundle();
+    let mut pilot = PilotCore::new(cfg.clone());
+    let dyn_model = SimpleAircraftModel::new(cfg, Vec2::ZERO);
+    let (legs, names, zones) = route_across_16r();
+    let profile = TaxiProfile::new(legs[1..].to_vec(), names[1..].to_vec()).with_runway_holds(&zones[1..], &[], &RunwayClearances::default());
+    pilot.engage_profile(Box::new(profile)).unwrap();
+    let mut state = dyn_model.initial_state_at(Vec2::new(395.0, 0.0), 90.0, dyn_model.config.airport.field_elevation_ft);
+    run_until_stopped(&mut pilot, &dyn_model, &mut state, 300);
+    assert!(state.position_ft.x <= 400.0, "crossed uncleared: x={:.0}", state.position_ft.x);
+    assert!(!events(&pilot).iter().any(|e| e.contains("holding short")), "{:?}", events(&pilot));
+}
+
+#[test]
+fn a_crossing_clearance_doesnt_clear_a_taxi_along_the_runway() {
+    let cfg = load_default_config_bundle();
+    let mut pilot = PilotCore::new(cfg.clone());
+    let dyn_model = SimpleAircraftModel::new(cfg, Vec2::ZERO);
+    let (legs, names, zones, on_runway) = route_along_16r();
+    let profile = TaxiProfile::new(legs, names).with_runway_holds(&zones, &on_runway, &RunwayClearances::default());
+    assert_eq!(profile.runway_holds.len(), 1);
+    assert!(profile.runway_holds[0].along, "entering, rolling down and leaving 16R is one taxi along it");
+    pilot.engage_profile(Box::new(profile)).unwrap();
+    let mut state = dyn_model.initial_state_at(Vec2::ZERO, 90.0, dyn_model.config.airport.field_elevation_ft);
+    run_until_stopped(&mut pilot, &dyn_model, &mut state, 600);
+    assert!(state.position_ft.x <= 400.0, "entered the runway uncleared: x={:.0}", state.position_ft.x);
+    assert!(
+        events(&pilot).iter().any(|e| e.contains("holding short of runway 16R/34L (not cleared to taxi on it)")),
+        "{:?}",
+        events(&pilot)
+    );
+
+    // "Cross runway 16R" doesn't cover it: the taxi stays put.
+    let taxi = pilot.profile_mut::<TaxiProfile>().unwrap();
+    assert_eq!(taxi.clear_crossing("16R"), 0);
+    assert!(taxi.uncleared_along("34L").is_some());
+    run_until_stopped(&mut pilot, &dyn_model, &mut state, 300);
+    assert!(state.position_ft.x <= 400.0, "a crossing clearance let it onto the runway: x={:.0}", state.position_ft.x);
+}
+
+#[test]
+fn a_route_cleared_along_the_runway_taxis_down_it() {
+    // "Taxi via G, runway 16R, H": the clearance names the runway.
+    let cfg = load_default_config_bundle();
+    let mut pilot = PilotCore::new(cfg.clone());
+    let dyn_model = SimpleAircraftModel::new(cfg, Vec2::ZERO);
+    let (legs, names, zones, on_runway) = route_along_16r();
+    let cleared = RunwayClearances { along: vec!["16R".to_string()], ..Default::default() };
+    let profile = TaxiProfile::new(legs, names).with_runway_holds(&zones, &on_runway, &cleared);
+    assert!(profile.next_hold().is_none());
+    pilot.engage_profile(Box::new(profile)).unwrap();
+    let mut state = dyn_model.initial_state_at(Vec2::ZERO, 90.0, dyn_model.config.airport.field_elevation_ft);
+    run_until_stopped(&mut pilot, &dyn_model, &mut state, 1500);
+    assert!(state.position_ft.y < -250.0, "went down the runway: {:?}", state.position_ft);
 }

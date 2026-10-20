@@ -1,0 +1,1043 @@
+1    800 0 0 KVNY Van Nuys
+1302 allows_circuits 0
+1302 city Van Nuys
+1302 country USA United States
+1302 datum_lat 34.209805556
+1302 datum_lon -118.489972222
+1302 faa_code VNY
+1302 gui_label 3D
+1302 gw_credits BFG, higgins, moewoud, vasquer1
+1302 iata_code VNY
+1302 icao_code KVNY
+1302 region_code K2
+1302 state California
+1302 transition_alt 18000
+1302 transition_level 18000
+1302 drive_on_left 1
+100 45.72 1 0 0.25 0 3 0 16R 34.2189100 -118.4912405 437 46 3 8 0 0 34L 34.1969940 -118.4891688 0 52 3 0 0 0
+100 22.86 1 0 0.25 0 2 0 16L 34.2189960 -118.4900040 437 0 1 0 0 0 34R 34.2080050 -118.4889650 0 0 1 0 0 0
+1300 34.217552 -118.500527 89.5 tie_down turboprops|props Prop Park Hangar
+1301 A general_aviation 
+1300 34.217170 -118.500291 135.7 tie_down turboprops|props Prop Park Hangar
+1301 A general_aviation 
+1300 34.216822 -118.500571 70.1 tie_down turboprops|props Prop Park Hangar
+1301 A general_aviation 
+1300 34.216415 -118.500346 76.3 tie_down turboprops|props Prop Park Hangar
+1301 A general_aviation 
+1300 34.216058 -118.500504 115.2 tie_down turboprops|props Prop Park Hangar
+1301 A general_aviation 
+1300 34.217468 -118.498748 -113.6 tie_down turboprops|props Prop Park Hangar
+1301 A general_aviation 
+1300 34.217151 -118.498675 -89.7 tie_down turboprops|props Prop Park Hangar
+1301 A general_aviation 
+1300 34.216851 -118.498582 -90.6 tie_down turboprops|props Prop Park Hangar
+1301 A general_aviation 
+1300 34.216442 -118.498515 243.8 tie_down turboprops|props Prop Park Hangar
+1301 A general_aviation 
+1300 34.215498 -118.498482 2.8 tie_down props Prop Park Tie-Down
+1301 A general_aviation 
+1300 34.215001 -118.498864 2.5 tie_down props Prop Park Tie-Down
+1301 A general_aviation 
+1300 34.214916 -118.499447 -180.0 tie_down props Prop Park Tie-Down
+1301 A general_aviation 
+1300 34.214753 -118.499275 359.5 tie_down props Prop Park Tie-Down
+1301 A general_aviation 
+1300 34.214376 -118.500281 0.5 tie_down props Prop Park Tie-Down
+1301 A general_aviation 
+1300 34.214053 -118.499113 270.0 tie_down props Prop Park Tie-Down
+1301 A general_aviation 
+1300 34.211351 -118.491995 88.0 tie_down props MPG Aviation Prop Tie-Down
+1301 A general_aviation 
+1300 34.211152 -118.491974 90.2 tie_down props MPG Aviation Prop Tie-Down
+1301 A general_aviation 
+1300 34.210950 -118.491956 87.6 tie_down props MPG Aviation Prop Tie-Down
+1301 A general_aviation 
+1300 34.210755 -118.491936 85.6 tie_down props MPG Aviation Prop Tie-Down
+1301 A general_aviation 
+1300 34.210497 -118.491916 89.2 tie_down props MPG Aviation Prop Tie-Down
+1301 A general_aviation 
+1300 34.210373 -118.491905 85.6 tie_down props MPG Aviation Prop Tie-Down
+1301 A general_aviation 
+1300 34.210109 -118.491876 87.1 tie_down props MPG Aviation Prop Tie-Down
+1301 A general_aviation 
+1300 34.209920 -118.491858 87.1 tie_down props MPG Aviation Prop Tie-Down
+1301 A general_aviation 
+1300 34.209711 -118.491830 89.5 tie_down props MPG Aviation Prop Tie-Down
+1301 A general_aviation 
+1300 34.209614 -118.491852 91.3 tie_down props MPG Aviation Prop Tie-Down
+1301 A general_aviation 
+1300 34.209514 -118.491834 85.0 tie_down props MPG Aviation Prop Tie-Down
+1301 A general_aviation 
+1300 34.209408 -118.491808 85.0 tie_down props MPG Aviation Prop Tie-Down
+1301 A general_aviation 
+1300 34.219010 -118.493912 85.8 tie_down turboprops|props Jet Aviation
+1301 B general_aviation 
+1300 34.218420 -118.493198 264.1 tie_down turboprops|props Gulfstream
+1301 B general_aviation 
+1300 34.218469 -118.496440 71.8 tie_down jets|turboprops Signature North Jet Tie-Down
+1301 B general_aviation 
+1300 34.218153 -118.496419 68.5 tie_down jets|turboprops Signature North Jet Tie-Down
+1301 B general_aviation 
+1300 34.218636 -118.496166 184.4 tie_down props Signture North Prop Tie-Down
+1301 A general_aviation 
+1300 34.218305 -118.495921 2.5 tie_down props Signture North Prop Tie-Down
+1301 A general_aviation 
+1300 34.218429 -118.495834 180.6 tie_down props Signture North Prop Tie-Down
+1301 A general_aviation 
+1300 34.218228 -118.496057 -178.7 tie_down props Signture North Prop Tie-Down
+1301 A general_aviation 
+1300 34.217882 -118.495928 -169.9 tie_down props Signture North Prop Tie-Down
+1301 A general_aviation 
+1300 34.217858 -118.495773 -169.9 tie_down props Signture North Prop Tie-Down
+1301 A general_aviation 
+1300 34.204243 -118.491696 180.5 tie_down props Signature West FBO Parking
+1301 A general_aviation 
+1300 34.203556 -118.491327 37.2 tie_down jets Signature West FBO Jet Tie-Down
+1301 B general_aviation 
+1300 34.203001 -118.491573 0.1 tie_down jets Signature West FBO Jet Tie-Down
+1301 B general_aviation 
+1300 34.202287 -118.491539 181.8 tie_down jets Signature West FBO Jet Tie-Down
+1301 B general_aviation 
+1300 34.200904 -118.488021 225.0 tie_down jets Signature East Jet Tie-Down
+1301 A general_aviation 
+1300 34.200797 -118.487851 -89.6 tie_down jets Signature East Jet Tie-Down
+1301 B general_aviation 
+1300 34.200067 -118.487641 359.2 tie_down jets Signature East Jet Tie-Down
+1301 A general_aviation 
+1300 34.200078 -118.487918 91.0 tie_down jets Signature East Jet Tie-Down
+1301 B general_aviation 
+1300 34.199680 -118.487915 91.0 tie_down jets Signature East Jet Tie-Down
+1301 B general_aviation 
+1300 34.199594 -118.487631 0.0 tie_down jets Signature East Jet Tie-Down
+1301 A general_aviation 
+1300 34.199169 -118.487873 91.0 tie_down jets Signature East Jet Tie-Down
+1301 B general_aviation 
+1300 34.198740 -118.487849 91.0 tie_down jets Signature East Jet Tie-Down
+1301 B general_aviation 
+1300 34.205961 -118.487271 -88.6 tie_down jets Clay Lacy Aviation
+1301 B general_aviation 
+1300 34.205703 -118.487020 -68.6 tie_down jets Clay Lacy Aviation
+1301 B general_aviation 
+1300 34.205296 -118.487733 -44.7 tie_down jets Clay Lacy Aviation
+1301 B general_aviation 
+1300 34.205073 -118.487706 -44.7 tie_down jets Clay Lacy Aviation
+1301 B general_aviation 
+1300 34.204849 -118.487691 -44.7 tie_down jets Clay Lacy Aviation
+1301 B general_aviation 
+1300 34.204433 -118.487034 -125.6 tie_down jets Clay Lacy Aviation
+1301 B general_aviation 
+1300 34.203882 -118.487822 -38.1 tie_down jets Clay Lacy Aviation
+1301 B general_aviation 
+1300 34.203928 -118.487408 0.0 tie_down jets Clay Lacy Aviation
+1301 B general_aviation 
+1300 34.208203 -118.487593 0.1 tie_down jets Net Jets Tie-Down
+1301 B general_aviation 
+1300 34.208203 -118.487299 0.1 tie_down jets Net Jets Tie-Down
+1301 B general_aviation 
+1300 34.208691 -118.487445 179.1 tie_down jets Net Jets Tie-Down
+1301 B general_aviation 
+1300 34.208693 -118.487207 179.1 tie_down jets Net Jets Tie-Down
+1301 B general_aviation 
+1300 34.208693 -118.486968 -179.7 tie_down jets Net Jets Tie-Down
+1301 B general_aviation 
+1300 34.209844 -118.487000 90.5 tie_down jets Western Jet Aviation
+1301 B general_aviation 
+1300 34.209634 -118.486990 90.5 tie_down jets Western Jet Aviation
+1301 B general_aviation 
+1300 34.209670 -118.486002 269.4 tie_down jets Western Jet Aviation Hangar
+1301 B general_aviation 
+1300 34.200595 -118.490946 -0.5 tie_down jets Paramount Pictures Corporate
+1301 B general_aviation 
+1300 34.211148 -118.487066 -180.0 tie_down jets|turboprops|props MP Aero
+1301 B general_aviation 
+1300 34.211045 -118.487289 90.8 tie_down jets|turboprops|props MP Aero
+1301 B general_aviation 
+1300 34.210955 -118.486005 -90.0 tie_down jets|turboprops|props MP Aero Hangar
+1301 B general_aviation 
+1300 34.200096 -118.490952 90.3 tie_down props Southwest Hangar
+1301 A general_aviation 
+1300 34.199347 -118.490887 90.3 tie_down props Southwest Hangar
+1301 A general_aviation 
+1300 34.199770 -118.490974 358.2 tie_down props Southwest Ramp Tie-Down
+1301 A general_aviation 
+1300 34.199749 -118.490859 -2.7 tie_down props Southwest Ramp Tie-Down
+1301 A general_aviation 
+1300 34.199777 -118.490734 2.4 tie_down props Southwest Ramp Tie-Down
+1301 A general_aviation 
+1300 34.199148 -118.490819 177.8 tie_down props Southwest Ramp Tie-Down
+1301 A general_aviation 
+1300 34.199152 -118.490599 173.6 tie_down props Southwest Ramp Tie-Down
+1301 A general_aviation 
+1300 34.198914 -118.490804 182.7 tie_down props Southwest Ramp Tie-Down
+1301 A general_aviation 
+1300 34.199027 -118.490642 -3.6 tie_down props Southwest Ramp Tie-Down
+1301 A general_aviation 
+1300 34.198461 -118.487788 -90.2 tie_down jets|turboprops|props So Cal Jets Tie-Down
+1301 A general_aviation 
+1300 34.198321 -118.487791 -90.2 tie_down jets|turboprops|props So Cal Jets Tie-Down
+1301 A general_aviation 
+1300 34.198264 -118.488078 -136.2 tie_down jets|turboprops So Cal Jets Tie-Down
+1301 A general_aviation 
+1300 34.198143 -118.488049 -138.2 tie_down jets|turboprops So Cal Jets Tie-Down
+1301 A general_aviation 
+1300 34.198006 -118.488045 -138.2 tie_down jets|turboprops So Cal Jets Tie-Down
+1301 A general_aviation 
+1300 34.196843 -118.487786 -142.6 tie_down jets Jet Tech Tie-Down
+1301 A general_aviation 
+1300 34.196698 -118.487756 -146.1 tie_down jets Jet Tech Tie-Down
+1301 A general_aviation 
+1300 34.196397 -118.487501 89.5 tie_down jets Jet Tech Tie-Down
+1301 B general_aviation 
+1300 34.195709 -118.487679 270.0 tie_down jets Jet Tech Tie-Down
+1301 B general_aviation 
+1300 34.195479 -118.487674 270.0 tie_down jets Jet Tech Tie-Down
+1301 B general_aviation 
+1300 34.194982 -118.487644 270.0 tie_down jets|turboprops Advanced Air Tie-Down
+1301 B general_aviation 
+1300 34.194695 -118.487589 270.0 tie_down jets|turboprops Advanced Air Tie-Down
+1301 B general_aviation 
+1300 34.194160 -118.487598 -89.2 tie_down jets|turboprops Advanced Air Tie-Down
+1301 A general_aviation 
+1300 34.207515 -118.493281 179.9 tie_down jets|turboprops Elite Aviation
+1301 B general_aviation 
+1300 34.208883 -118.492031 132.9 tie_down jets|turboprops Castle & Cooke
+1301 B general_aviation 
+1300 34.208663 -118.492021 132.9 tie_down jets|turboprops Castle & Cooke
+1301 B general_aviation 
+1300 34.208083 -118.491751 91.0 tie_down jets|turboprops Castle & Cooke
+1301 B general_aviation 
+1300 34.205951 -118.493559 1.1 tie_down jets|turboprops Castle & Cooke
+1301 B general_aviation 
+1300 34.205004 -118.493464 10.2 tie_down jets|turboprops Castle & Cooke
+1301 B general_aviation 
+1300 34.204815 -118.493018 -89.7 tie_down turboprops|props Castle & Cooke
+1301 A general_aviation 
+1300 34.204633 -118.493025 -83.5 tie_down turboprops|props Castle & Cooke
+1301 A general_aviation 
+1300 34.219490 -118.493066 -94.5 tie_down props Jet Aviation
+1301 A general_aviation 
+1300 34.219354 -118.493040 -94.5 tie_down props Jet Aviation
+1301 A general_aviation 
+1300 34.203572 -118.493364 -8.9 tie_down turboprops|props Aerolease West Hangar
+1301 A general_aviation 
+1300 34.203458 -118.492930 9.6 tie_down turboprops|props Aerolease West Hangar
+1301 A general_aviation 
+1300 34.202873 -118.492541 0.9 tie_down turboprops|props Aerolease West Hangar
+1301 A general_aviation 
+1300 34.216134 -118.484832 152.9 tie_down jets|turboprops|props Aerolease East Hangar
+1301 B general_aviation 
+1300 34.216113 -118.484639 -172.1 tie_down jets|turboprops|props Aerolease East Hangar
+1301 B general_aviation 
+1300 34.215787 -118.488181 -28.5 tie_down helos Helinet Tie-Down
+1301 A general_aviation 
+1300 34.215656 -118.488472 -3.5 tie_down helos Helinet Tie-Down
+1301 A general_aviation 
+1300 34.215361 -118.488248 -5.5 tie_down helos Helinet Tie-Down
+1301 A general_aviation 
+1300 34.198738 -118.490523 87.8 tie_down helos Rotorcraft Support Heli Tie-Down
+1301 A general_aviation 
+1300 34.198432 -118.490691 90.3 tie_down helos Rotorcraft Support Heli Tie-Down
+1301 A general_aviation 
+1300 34.198252 -118.490746 90.3 tie_down helos Rotorcraft Support Heli Tie-Down
+1301 A general_aviation 
+1300 34.198227 -118.490541 90.3 tie_down helos Rotorcraft Support Heli Tie-Down
+1301 A general_aviation 
+1300 34.198078 -118.490575 90.3 tie_down helos Rotorcraft Support Heli Tie-Down
+1301 A general_aviation 
+1300 34.197917 -118.490670 269.6 tie_down helos Rotorcraft Support Heli Tie-Down
+1301 A general_aviation 
+1300 34.197778 -118.490767 0.7 tie_down helos Rotorcraft Support Heli Tie-Down
+1301 A general_aviation 
+1300 34.197784 -118.490613 0.7 tie_down helos Rotorcraft Support Heli Tie-Down
+1301 A general_aviation 
+1300 34.197779 -118.490455 0.7 tie_down helos Rotorcraft Support Heli Tie-Down
+1301 A general_aviation 
+1300 34.218298 -118.497080 96.2 tie_down jets National Helicopter Service Tie-Down
+1301 C general_aviation 
+1300 34.217791 -118.497328 77.4 tie_down helos National Helicopter Service Tie-Down
+1301 A general_aviation 
+1300 34.217551 -118.497268 77.4 tie_down helos National Helicopter Service Tie-Down
+1301 A general_aviation 
+1300 34.202639 -118.487798 -89.6 tie_down turboprops|props Airtel Plaza Hotel Tie-Down
+1301 A general_aviation 
+1300 34.202482 -118.487804 -89.6 tie_down turboprops|props Airtel Plaza Hotel Tie-Down
+1301 A general_aviation 
+1300 34.202320 -118.487802 -89.6 tie_down turboprops|props Airtel Plaza Hotel Tie-Down
+1301 A general_aviation 
+1300 34.202158 -118.487801 -89.6 tie_down turboprops|props Airtel Plaza Hotel Tie-Down
+1301 A general_aviation 
+1300 34.201977 -118.487788 -89.6 tie_down turboprops|props Airtel Plaza Hotel Tie-Down
+1301 A general_aviation 
+1300 34.201806 -118.487806 -88.0 tie_down turboprops|props Airtel Plaza Hotel Tie-Down
+1301 A general_aviation 
+1300 34.197371 -118.490768 90.6 tie_down props Group 3 Aviation Tie-Down
+1301 A general_aviation 
+1300 34.197168 -118.490915 180.0 tie_down props Group 3 Aviation Tie-Down
+1301 A general_aviation 
+1300 34.197003 -118.490762 90.7 tie_down props Group 3 Aviation Tie-Down
+1301 A general_aviation 
+1300 34.196826 -118.490855 -91.2 tie_down props Group 3 Aviation Tie-Down
+1301 A general_aviation 
+1300 34.195005 -118.490790 -174.1 tie_down props Schaffer Ambulance Tie-Down
+1301 A general_aviation 
+1300 34.194792 -118.490467 -92.7 tie_down props Schaffer Ambulance Tie-Down
+1301 A general_aviation 
+1300 34.194764 -118.490658 90.0 tie_down props Schaffer Ambulance Tie-Down
+1301 A general_aviation 
+1300 34.194665 -118.490473 -96.5 tie_down props Schaffer Ambulance Tie-Down
+1301 A general_aviation 
+1300 34.194634 -118.490662 90.4 tie_down props Schaffer Ambulance Tie-Down
+1301 A general_aviation 
+1300 34.194356 -118.490393 359.3 tie_down props Schaffer Ambulance Tie-Down
+1301 A general_aviation 
+1300 34.194357 -118.490573 0.0 tie_down props Schaffer Ambulance Tie-Down
+1301 A general_aviation 
+1050 127550 ATIS
+1051 119300 CTAF
+1051 122950 UNICOM
+1053 121700 GROUND
+1052 126600 CLEARANCE DELIVERY
+1054 120200 TOWER (16L/34R)
+1054 119300 TOWER (16R/34L)
+1054 119000 TOWER (HELI)
+1055 124600 SOCAL APP/DEP (SE)
+1055 134200 SOCAL APP/DEP (SW)
+1055 135050 SOCAL APP/DEP (E)
+1056 120400 SOCAL APP/DEP (N)
+1201 34.197537 -118.487536 both 0
+1201 34.207307 -118.487569 both 1
+1201 34.204531 -118.493057 both 2
+1201 34.206226 -118.493058 both 3
+1201 34.207506 -118.493100 both 4
+1201 34.206400 -118.493099 both 5
+1201 34.206746 -118.493099 both 6
+1201 34.206570 -118.493100 both 7
+1201 34.194150 -118.487707 both 8
+1201 34.197882 -118.487719 both 9
+1201 34.198652 -118.487741 both 10
+1201 34.199302 -118.487666 both 11
+1201 34.203650 -118.487408 both 12
+1201 34.203495 -118.487410 both 13
+1201 34.206009 -118.486851 both 14
+1201 34.205860 -118.486893 both 15
+1201 34.208361 -118.492030 both 16
+1201 34.203113 -118.491888 both 17
+1201 34.203271 -118.492072 both 18
+1201 34.203274 -118.492203 both 19
+1201 34.202787 -118.492200 both 20
+1201 34.197539 -118.491094 both 21
+1201 34.218632 -118.493338 both 22
+1201 34.217914 -118.496970 both 23
+1201 34.218861 -118.497147 both 24
+1201 34.218780 -118.495635 both 25
+1201 34.217726 -118.495517 both 26
+1201 34.217477 -118.493232 both 27
+1201 34.215469 -118.498156 both 28
+1201 34.215987 -118.499815 both 29
+1201 34.217489 -118.499777 both 30
+1201 34.217474 -118.499397 both 31
+1201 34.215395 -118.499349 both 32
+1201 34.216857 -118.488284 both 33
+1201 34.216718 -118.487253 both 34
+1201 34.216962 -118.487201 both 35
+1201 34.195268 -118.487422 both 36
+1201 34.195050 -118.487120 both 37
+1201 34.197562 -118.487534 both 38
+1201 34.197570 -118.487114 both 39
+1201 34.207195 -118.492164 both 40
+1201 34.207070 -118.492400 both 41
+1201 34.206819 -118.492412 both 42
+1201 34.215475 -118.492684 both 43
+1201 34.215476 -118.493574 both 44
+1201 34.215733 -118.493571 both 45
+1201 34.211247 -118.487566 both 46
+1201 34.211406 -118.487765 both 47
+1201 34.209873 -118.487430 both 48
+1201 34.208977 -118.487563 both 49
+1201 34.209264 -118.487591 both 50
+1201 34.207304 -118.486300 both 51
+1201 34.220090 -118.492395 both 52
+1201 34.220102 -118.492672 both 53
+1201 34.219525 -118.489589 both 54
+1201 34.219966 -118.491805 both 55
+1201 34.218958 -118.489218 both 56
+1201 34.219212 -118.489302 both 57
+1201 34.219407 -118.489442 both 58
+1201 34.217275 -118.489054 both 59
+1201 34.215222 -118.488577 both 60
+1201 34.215439 -118.488621 both 61
+1201 34.207956 -118.487905 both 62
+1201 34.208373 -118.487926 both 63
+1201 34.208573 -118.487945 both 64
+1201 34.209285 -118.488015 both 65
+1201 34.206346 -118.488016 both 66
+1201 34.207315 -118.487956 both 67
+1201 34.207351 -118.487953 both 68
+1201 34.201897 -118.488013 both 69
+1201 34.201300 -118.488351 both 70
+1201 34.200654 -118.488280 both 71
+1201 34.200987 -118.488343 both 72
+1201 34.199175 -118.488272 both 73
+1201 34.199292 -118.488269 both 74
+1201 34.197830 -118.488140 both 75
+1201 34.198495 -118.488207 both 76
+1201 34.198616 -118.488219 both 77
+1201 34.197555 -118.488029 both 78
+1201 34.194349 -118.488032 both 79
+1201 34.194888 -118.488034 both 80
+1201 34.195316 -118.488028 both 81
+1201 34.197537 -118.488029 both 82
+1201 34.194101 -118.488520 both 83
+1201 34.194191 -118.488225 both 84
+1201 34.194098 -118.489825 both 85
+1201 34.194942 -118.490278 both 86
+1201 34.194370 -118.490182 both 87
+1201 34.194192 -118.490075 both 88
+1201 34.196635 -118.490440 both 89
+1201 34.195024 -118.490281 both 90
+1201 34.197278 -118.490266 both 91
+1201 34.197102 -118.490307 both 92
+1201 34.196895 -118.490401 both 93
+1201 34.201417 -118.490661 both 94
+1201 34.197540 -118.490293 both 95
+1201 34.203339 -118.491182 both 96
+1201 34.203132 -118.491148 both 97
+1201 34.202984 -118.491126 both 98
+1201 34.202408 -118.490964 both 99
+1201 34.214835 -118.492264 both 100
+1201 34.208316 -118.491650 both 101
+1201 34.207228 -118.491548 both 102
+1201 34.206819 -118.491510 both 103
+1201 34.206754 -118.491503 both 104
+1201 34.215867 -118.492407 both 105
+1201 34.215613 -118.492374 both 106
+1201 34.216161 -118.492541 both 107
+1201 34.219886 -118.492881 both 108
+1201 34.219063 -118.492807 both 109
+1201 34.197164 -118.489189 both 110
+1201 34.218759 -118.491227 both 111
+1201 34.216975 -118.491058 both 112
+1201 34.215228 -118.490893 both 113
+1201 34.215262 -118.490232 both 114
+1201 34.215262 -118.490069 both 115
+1201 34.216893 -118.490388 both 116
+1201 34.216871 -118.490211 both 117
+1201 34.216835 -118.489926 both 118
+1201 34.208277 -118.488994 both 119
+1201 34.218876 -118.489992 both 120
+1201 34.216731 -118.489789 both 121
+1201 34.215269 -118.489650 both 122
+1201 34.213302 -118.489463 both 123
+1201 34.213327 -118.489039 both 124
+1201 34.215281 -118.489229 both 125
+1201 34.216770 -118.489373 both 126
+1201 34.197040 -118.490005 both 127
+1201 34.197055 -118.489839 both 128
+1201 34.197065 -118.489620 both 129
+1201 34.197097 -118.488742 both 130
+1201 34.197108 -118.488504 both 131
+1201 34.201396 -118.490420 both 132
+1201 34.201132 -118.490392 both 133
+1201 34.201134 -118.490248 both 134
+1201 34.201187 -118.489567 both 135
+1201 34.201242 -118.488737 both 136
+1201 34.203351 -118.490935 both 137
+1201 34.202607 -118.490762 both 138
+1201 34.202631 -118.490374 both 139
+1201 34.202660 -118.489707 both 140
+1201 34.202715 -118.488875 both 141
+1201 34.214825 -118.492016 both 142
+1201 34.213134 -118.491859 both 143
+1201 34.213159 -118.491530 both 144
+1201 34.213216 -118.490702 both 145
+1201 34.213264 -118.490034 both 146
+1201 34.213273 -118.489879 both 147
+1201 34.212360 -118.491781 both 148
+1201 34.210116 -118.491567 both 149
+1201 34.207848 -118.491356 both 150
+1201 34.210127 -118.491271 both 151
+1201 34.210196 -118.490415 both 152
+1201 34.209995 -118.490397 both 153
+1201 34.206662 -118.490082 both 154
+1201 34.206263 -118.490045 both 155
+1201 34.205122 -118.489701 both 156
+1201 34.204427 -118.489319 both 157
+1201 34.203936 -118.488842 both 158
+1201 34.205120 -118.490169 both 159
+1201 34.204437 -118.490371 both 160
+1201 34.203826 -118.490738 both 161
+1201 34.206730 -118.489254 both 162
+1201 34.209070 -118.490520 both 163
+1201 34.208131 -118.491052 both 164
+1201 34.210235 -118.489739 both 165
+1201 34.210244 -118.489603 both 166
+1201 34.210270 -118.489178 both 167
+1201 34.210296 -118.488764 both 168
+1201 34.206583 -118.491226 both 169
+1201 34.203902 -118.490982 both 170
+1201 34.206591 -118.490913 both 171
+1201 34.215448 -118.492152 both 172
+1201 34.215183 -118.492096 both 173
+1201 34.215195 -118.491724 both 174
+1201 34.216961 -118.492262 both 175
+1201 34.216729 -118.492261 both 176
+1201 34.216773 -118.492584 both 177
+1201 34.216789 -118.492697 both 178
+1201 34.218675 -118.492373 both 179
+1201 34.218743 -118.492049 both 180
+1201 34.218793 -118.491481 both 181
+1201 34.218845 -118.490984 both 182
+1201 34.217938 -118.492317 both 183
+1201 34.217128 -118.492259 both 184
+1201 34.217092 -118.491899 both 185
+1201 34.218801 -118.492583 both 186
+1201 34.217558 -118.493387 both 187
+1201 34.218802 -118.493477 both 188
+1201 34.218841 -118.492779 both 189
+1201 34.218737 -118.492768 both 190
+1201 34.217440 -118.492630 both 191
+1201 34.217717 -118.496774 both 192
+1201 34.217640 -118.496186 both 193
+1201 34.217478 -118.495026 both 194
+1201 34.217431 -118.494634 both 195
+1201 34.217377 -118.494207 both 196
+1201 34.217180 -118.492723 both 197
+1201 34.217168 -118.492610 both 198
+1201 34.217304 -118.496655 both 199
+1201 34.206567 -118.493273 both 200
+1201 34.206570 -118.491485 both 201
+1201 34.206403 -118.491471 both 202
+1201 34.194511 -118.490168 both 203
+1201 34.196626 -118.490311 both 204
+1201 34.195038 -118.490171 both 205
+1201 34.197124 -118.488359 both 206
+1201 34.199215 -118.488546 both 207
+1201 34.203423 -118.488545 both 208
+1201 34.198476 -118.488480 both 209
+1201 34.197510 -118.488383 both 210
+1201 34.202746 -118.488542 both 211
+1201 34.202198 -118.488543 both 212
+1201 34.203483 -118.488014 both 213
+1201 34.205876 -118.488014 both 214
+1201 34.201257 -118.488544 both 215
+1201 34.200775 -118.488552 both 216
+1201 34.200767 -118.488295 both 217
+1201 34.200793 -118.488020 both 218
+1201 34.200357 -118.488035 both 219
+1201 34.199408 -118.487863 both 220
+1201 34.199441 -118.488274 both 221
+1201 34.207916 -118.488192 both 222
+1201 34.207320 -118.488233 both 223
+1201 34.206798 -118.488277 both 224
+1201 34.205647 -118.488369 both 225
+1201 34.205647 -118.488016 both 226
+1201 34.204352 -118.488468 both 227
+1201 34.204341 -118.488016 both 228
+1201 34.204344 -118.487893 both 229
+1201 34.205652 -118.487896 both 230
+1201 34.205657 -118.487615 both 231
+1201 34.203821 -118.488513 both 232
+1201 34.215291 -118.488855 both 233
+1201 34.213353 -118.488671 both 234
+1201 34.210287 -118.488382 both 235
+1201 34.208617 -118.488226 both 236
+1201 34.210288 -118.488105 both 237
+1201 34.211426 -118.488217 both 238
+1201 34.210286 -118.487115 both 239
+1201 34.210287 -118.486831 both 240
+1201 34.208160 -118.488192 both 241
+1201 34.217202 -118.489306 both 242
+1201 34.216753 -118.489220 both 243
+1201 34.216109 -118.489057 both 244
+1201 34.215422 -118.488888 both 245
+1201 34.216069 -118.488764 both 246
+1201 34.216591 -118.488890 both 247
+1201 34.218893 -118.489549 both 248
+1201 34.215739 -118.486115 both 249
+1201 34.210289 -118.484045 both 250
+1201 34.202747 -118.487908 both 251
+1201 34.194255 -118.487677 both 252
+1201 34.196768 -118.488187 both 253
+1201 34.195152 -118.488181 both 254
+1201 34.218912 -118.489861 both 255
+1201 34.218883 -118.490572 both 256
+1201 34.218892 -118.490426 both 257
+1201 34.218909 -118.490128 both 258
+1201 34.208140 -118.488567 both 259
+1201 34.194984 -118.490574 both 260
+1201 34.194425 -118.490560 both 261
+1201 34.198189 -118.487852 both 262
+1201 34.198516 -118.487907 both 263
+1201 34.199438 -118.488550 both 264
+1201 34.201741 -118.487906 both 265
+1201 34.202187 -118.487907 both 266
+1201 34.203905 -118.487571 both 267
+1201 34.204321 -118.487105 both 268
+1201 34.205782 -118.487154 both 269
+1201 34.208419 -118.486894 both 270
+1201 34.209663 -118.486822 both 271
+1201 34.209667 -118.486102 both 272
+1201 34.210954 -118.487120 both 273
+1201 34.210954 -118.486073 both 274
+1201 34.215543 -118.484811 both 275
+1201 34.216076 -118.484751 both 276
+1201 34.215474 -118.488140 both 277
+1201 34.219598 -118.493641 both 278
+1201 34.214544 -118.500200 both 279
+1201 34.214552 -118.499144 both 280
+1201 34.216063 -118.500408 both 281
+1201 34.216431 -118.500282 both 282
+1201 34.216811 -118.500475 both 283
+1201 34.217179 -118.500208 both 284
+1201 34.216472 -118.498596 both 285
+1201 34.216469 -118.499361 both 286
+1201 34.216849 -118.498663 both 287
+1201 34.217150 -118.498439 both 288
+1201 34.217970 -118.499327 both 289
+1201 34.217887 -118.498676 both 290
+1201 34.217469 -118.498825 both 291
+1201 34.217550 -118.500426 both 292
+1201 34.215318 -118.499822 both 293
+1201 34.217550 -118.499834 both 294
+1201 34.217176 -118.499830 both 295
+1201 34.216808 -118.499830 both 296
+1201 34.216429 -118.499834 both 297
+1201 34.216063 -118.499826 both 298
+1201 34.217539 -118.499374 both 299
+1201 34.215588 -118.499382 both 300
+1201 34.216469 -118.499386 both 301
+1201 34.216608 -118.499377 both 302
+1201 34.216852 -118.499374 both 303
+1201 34.217153 -118.499374 both 304
+1201 34.218543 -118.496333 both 305
+1201 34.218446 -118.496903 both 306
+1201 34.215278 -118.499394 both 307
+1201 34.215288 -118.499124 both 308
+1201 34.215376 -118.498954 both 309
+1201 34.204367 -118.492540 both 310
+1201 34.202940 -118.492537 both 311
+1201 34.204372 -118.492940 both 312
+1201 34.203529 -118.492940 both 313
+1201 34.204372 -118.493358 both 314
+1201 34.203674 -118.493366 both 315
+1201 34.204506 -118.493265 both 316
+1201 34.207342 -118.493274 both 317
+1202 210 82 twoway taxiway_B B13
+1202 82 0 twoway taxiway_B B13
+1202 223 67 twoway taxiway_B B5
+1202 67 1 twoway taxiway_B B5
+1202 212 266 twoway taxiway_B B9
+1202 111 112 twoway runway 16R/34L
+1204 departure 16R,34L
+1204 arrival 16R,34L
+1204 ils 16R,34L
+1202 112 113 twoway runway 16R/34L
+1204 departure 16R,34L
+1204 arrival 16R,34L
+1204 ils 16R,34L
+1202 113 145 twoway runway 16R/34L
+1204 departure 16R,34L
+1204 arrival 16R,34L
+1204 ils 16R,34L
+1202 145 152 twoway runway 16R/34L
+1204 departure 16R,34L
+1204 arrival 16R,34L
+1204 ils 16R,34L
+1202 152 153 twoway runway 16R/34L
+1204 departure 16R,34L
+1204 arrival 16R,34L
+1204 ils 16R,34L
+1202 153 154 twoway runway 16R/34L
+1204 departure 16R,34L
+1204 arrival 16R,34L
+1204 ils 16R,34L
+1202 154 155 twoway runway 16R/34L
+1204 departure 16R,34L
+1204 arrival 16R,34L
+1204 ils 16R,34L
+1202 155 140 twoway runway 16R/34L
+1204 departure 16R,34L
+1204 arrival 16R,34L
+1204 ils 16R,34L
+1202 140 135 twoway runway 16R/34L
+1204 departure 16R,34L
+1204 arrival 16R,34L
+1204 ils 16R,34L
+1202 135 110 twoway runway 16R/34L
+1204 departure 16R,34L
+1204 arrival 16R,34L
+1204 ils 16R,34L
+1202 120 121 twoway runway 16L/34R
+1204 departure 16L,34R
+1204 arrival 16L,34R
+1204 ils 16L,34R
+1202 121 122 twoway runway 16L/34R
+1204 departure 16L,34R
+1204 arrival 16L,34R
+1204 ils 16L,34R
+1202 122 123 twoway runway 16L/34R
+1204 departure 16L,34R
+1204 arrival 16L,34R
+1204 ils 16L,34R
+1202 123 167 twoway runway 16L/34R
+1204 departure 16L,34R
+1204 arrival 16L,34R
+1204 ils 16L,34R
+1202 167 119 twoway runway 16L/34R
+1204 departure 16L,34R
+1204 arrival 16L,34R
+1204 ils 16L,34R
+1202 132 133 twoway taxiway_C A
+1202 133 127 twoway taxiway_B A
+1202 137 138 twoway taxiway_C A
+1202 138 132 twoway taxiway_C A
+1202 142 143 twoway taxiway_C A
+1204 ils 16R
+1202 143 148 twoway taxiway_C A
+1204 ils 16R
+1202 148 149 twoway taxiway_C A
+1202 149 150 twoway taxiway_C A
+1202 150 169 twoway taxiway_C A
+1202 169 170 twoway taxiway_B A
+1202 170 137 twoway taxiway_B A
+1202 172 173 twoway taxiway_C A
+1204 ils 16R
+1202 173 142 twoway taxiway_C A
+1204 ils 16R
+1202 175 176 twoway taxiway_C A
+1204 ils 16R
+1202 176 172 twoway taxiway_C A
+1204 ils 16R
+1202 179 183 twoway taxiway_C A
+1202 183 184 twoway taxiway_C A
+1204 ils 16R
+1202 184 175 twoway taxiway_C A
+1204 ils 16R
+1202 186 179 twoway taxiway_A A1
+1202 187 188 twoway taxiway_A A1
+1202 188 189 twoway taxiway_A A1
+1202 189 186 twoway taxiway_A A1
+1202 192 193 oneway taxiway_B A2
+1202 193 194 oneway taxiway_B A2
+1202 194 195 oneway taxiway_B A2
+1202 195 196 oneway taxiway_B A2
+1202 196 197 oneway taxiway_B A2
+1202 197 198 oneway taxiway_B A2
+1204 ils 16R
+1202 198 184 oneway taxiway_B A2
+1204 ils 16R
+1202 176 177 oneway taxiway_B A3
+1204 ils 16R
+1202 177 178 oneway taxiway_B A3
+1204 ils 16R
+1202 178 199 oneway taxiway_B A3
+1202 200 7 twoway taxiway_B A4
+1202 7 201 twoway taxiway_B A4
+1202 201 169 twoway taxiway_B A4
+1202 204 205 twoway taxiway_B AA
+1202 205 203 twoway taxiway_B AA
+1202 127 204 twoway taxiway_B AA
+1202 207 209 twoway taxiway_B B
+1202 209 210 twoway taxiway_B B
+1202 210 206 twoway taxiway_B B
+1202 208 211 twoway taxiway_C B
+1202 211 212 twoway taxiway_C B
+1202 212 215 twoway taxiway_C B
+1202 215 216 twoway taxiway_B B
+1202 216 264 twoway taxiway_B B
+1202 264 207 twoway taxiway_B B
+1202 222 223 twoway taxiway_C B
+1202 223 224 twoway taxiway_C B
+1202 224 225 twoway taxiway_C B
+1202 225 227 twoway taxiway_C B
+1202 227 232 twoway taxiway_C B
+1202 232 208 twoway taxiway_C B
+1202 233 234 twoway taxiway_C B
+1202 234 235 twoway taxiway_C B
+1202 235 236 twoway taxiway_C B
+1202 236 241 twoway taxiway_C B
+1202 241 222 twoway taxiway_C B
+1202 242 243 twoway taxiway_C B
+1202 243 244 twoway taxiway_C B
+1202 244 245 twoway taxiway_C B
+1202 245 233 twoway taxiway_C B
+1202 248 242 twoway taxiway_C B
+1202 244 246 twoway taxiway_C B1
+1202 246 249 twoway taxiway_C B1
+1202 235 237 twoway taxiway_C B3
+1202 237 239 twoway taxiway_C B3
+1202 239 240 twoway taxiway_C B3
+1202 240 250 twoway taxiway_C B3
+1202 253 254 twoway taxiway_B BB
+1202 254 80 twoway taxiway_B BB
+1202 80 252 twoway taxiway_B BB
+1202 206 253 twoway taxiway_B BB
+1202 255 248 twoway taxiway_C C
+1204 departure 16L,34R
+1204 arrival 16L,34R
+1202 256 257 twoway taxiway_C C
+1202 257 258 twoway taxiway_C C
+1204 departure 16L,34R
+1204 arrival 16L,34R
+1202 258 120 twoway taxiway_C C
+1204 departure 16L,34R
+1204 arrival 16L,34R
+1202 120 255 twoway taxiway_C C
+1204 departure 16L,34R
+1204 arrival 16L,34R
+1202 179 180 twoway taxiway_C C
+1202 180 181 twoway taxiway_C C
+1204 departure 16R,34L
+1204 arrival 16R,34L
+1204 ils 16R
+1202 181 111 twoway taxiway_C C
+1204 departure 16R,34L
+1204 arrival 16R,34L
+1204 ils 16R
+1202 111 182 twoway taxiway_C C
+1204 departure 16R,34L
+1204 arrival 16R,34L
+1204 ils 16R
+1202 182 256 twoway taxiway_C C
+1204 departure 16R,34L
+1204 arrival 16R,34L
+1204 ils 16R
+1202 184 185 twoway taxiway_C D
+1204 ils 16R
+1202 185 112 twoway taxiway_C D
+1204 departure 16R,34L
+1204 arrival 16R,34L
+1204 ils 16R
+1202 112 116 twoway taxiway_B D
+1204 departure 16R,34L
+1204 arrival 16R,34L
+1204 ils 16R
+1202 116 117 twoway taxiway_B D
+1202 117 118 twoway taxiway_B D
+1204 departure 16L,34R
+1204 arrival 16L,34R
+1202 118 121 twoway taxiway_B D
+1204 departure 16L,34R
+1204 arrival 16L,34R
+1202 121 126 twoway taxiway_B D
+1204 departure 16L,34R
+1204 arrival 16L,34R
+1202 126 243 twoway taxiway_B D
+1202 173 174 twoway taxiway_C E
+1204 ils 16R
+1202 174 113 twoway taxiway_C E
+1204 departure 16R,34L
+1204 arrival 16R,34L
+1204 ils 16R
+1202 113 114 twoway taxiway_C E
+1204 departure 16R,34L
+1204 arrival 16R,34L
+1204 ils 16R
+1202 114 115 twoway taxiway_C E
+1202 115 122 twoway taxiway_C E
+1204 departure 16L,34R
+1204 arrival 16L,34R
+1202 122 125 twoway taxiway_C E
+1204 departure 16L,34R
+1204 arrival 16L,34R
+1202 125 233 twoway taxiway_C E
+1202 143 144 twoway taxiway_C F
+1204 ils 16R
+1202 144 145 twoway taxiway_C F
+1204 departure 16R,34L
+1204 arrival 16R,34L
+1204 ils 16R
+1202 145 146 twoway taxiway_C F
+1204 departure 16R,34L
+1204 arrival 16R,34L
+1204 ils 16R
+1202 146 147 twoway taxiway_C F
+1202 147 123 twoway taxiway_C F
+1204 departure 16L,34R
+1204 arrival 16L,34R
+1202 123 124 twoway taxiway_C F
+1204 departure 16L,34R
+1204 arrival 16L,34R
+1202 124 234 twoway taxiway_C F
+1202 149 151 twoway taxiway_C G
+1202 151 152 twoway taxiway_C G
+1204 departure 16R,34L
+1204 arrival 16R,34L
+1204 ils 16R
+1202 152 165 twoway taxiway_C G
+1204 departure 16R,34L
+1204 arrival 16R,34L
+1204 ils 16R
+1202 165 166 twoway taxiway_C G
+1202 166 167 twoway taxiway_C G
+1204 departure 16L,34R
+1204 arrival 16L,34R
+1202 167 168 twoway taxiway_C G
+1204 departure 16L,34R
+1204 arrival 16L,34R
+1202 168 235 twoway taxiway_C G
+1202 153 163 oneway taxiway_B H
+1204 departure 16R,34L
+1204 arrival 16R,34L
+1204 ils 16R
+1202 163 164 oneway taxiway_B H
+1204 departure 16R,34L
+1204 arrival 16R,34L
+1204 ils 16R
+1202 164 150 oneway taxiway_B H
+1202 259 119 twoway taxiway_A J
+1204 departure 16L,34R
+1204 arrival 16L,34R
+1202 241 259 twoway taxiway_A J
+1202 169 171 twoway taxiway_C K
+1202 171 154 twoway taxiway_C K
+1204 departure 16R,34L
+1204 arrival 16R,34L
+1204 ils 16R
+1202 154 162 twoway taxiway_C K
+1204 departure 16R,34L
+1204 arrival 16R,34L
+1204 ils 16R
+1202 162 224 twoway taxiway_C K
+1204 departure 16L,34R
+1204 arrival 16L,34R
+1202 155 159 oneway taxiway_C M
+1204 departure 16R,34L
+1204 arrival 16R,34L
+1204 ils 16R
+1202 159 160 oneway taxiway_C M
+1204 departure 16R,34L
+1204 arrival 16R,34L
+1204 ils 16R
+1202 160 161 oneway taxiway_C M
+1204 departure 16R,34L
+1204 arrival 16R,34L
+1204 ils 16R
+1202 161 170 oneway taxiway_C M
+1202 155 156 oneway taxiway_C N
+1204 departure 16R,34L
+1204 arrival 16R,34L
+1204 ils 16R
+1202 156 157 oneway taxiway_C N
+1204 departure 16R,34L
+1204 arrival 16R,34L
+1204 ils 16R
+1202 157 158 oneway taxiway_C N
+1204 departure 16R,34L
+1204 arrival 16R,34L
+1204 ils 16R
+1202 158 232 oneway taxiway_C N
+1202 138 139 twoway taxiway_C P
+1202 139 140 twoway taxiway_C P
+1204 departure 16R,34L
+1204 arrival 16R,34L
+1204 ils 16R
+1202 140 141 twoway taxiway_C P
+1204 departure 16R,34L
+1204 arrival 16R,34L
+1204 ils 16R
+1202 141 211 twoway taxiway_C P
+1202 133 134 twoway taxiway_C Q
+1202 134 135 twoway taxiway_C Q
+1204 departure 16R,34L
+1204 arrival 16R,34L
+1204 ils 16R
+1202 135 136 twoway taxiway_C Q
+1204 departure 16R,34L
+1204 arrival 16R,34L
+1204 ils 16R
+1202 136 215 twoway taxiway_C Q
+1202 127 128 twoway taxiway_C R
+1202 128 129 twoway taxiway_C R
+1204 departure 16R,34L
+1204 arrival 16R,34L
+1204 ils 16R
+1202 129 110 twoway taxiway_C R
+1204 departure 16R,34L
+1204 arrival 16R,34L
+1204 ils 16R
+1202 110 130 twoway taxiway_C R
+1204 departure 16R,34L
+1204 arrival 16R,34L
+1204 ils 16R
+1202 130 131 twoway taxiway_C R
+1204 departure 16R,34L
+1204 arrival 16R,34L
+1204 ils 16R
+1202 131 206 twoway taxiway_C R
+1202 260 90 twoway taxiway_A 
+1202 90 205 twoway taxiway_A 
+1202 261 260 twoway taxiway_A 
+1202 263 262 twoway taxiway_B 
+1202 209 76 twoway taxiway_B B12
+1202 76 263 twoway taxiway_B 
+1202 216 217 twoway taxiway_B B10
+1202 217 218 twoway taxiway_B 
+1202 218 219 twoway taxiway_B 
+1202 219 220 twoway taxiway_B 
+1202 220 221 twoway taxiway_B 
+1202 221 264 twoway taxiway_B B11
+1202 265 266 twoway taxiway_A 
+1202 266 251 twoway taxiway_A 
+1202 267 229 twoway taxiway_C 
+1202 227 228 twoway taxiway_C B8
+1202 228 229 twoway taxiway_C 
+1202 229 268 twoway taxiway_C 
+1202 229 230 twoway taxiway_B 
+1202 225 226 twoway taxiway_C B7
+1202 226 230 twoway taxiway_C 
+1202 230 231 twoway taxiway_C 
+1202 231 269 twoway taxiway_C 
+1202 270 64 twoway taxiway_C 
+1202 64 236 twoway taxiway_C B4
+1202 271 240 twoway taxiway_B 
+1202 272 271 twoway taxiway_B 
+1202 273 239 twoway taxiway_B 
+1202 274 273 twoway taxiway_B 
+1202 275 249 twoway taxiway_B 
+1202 276 275 twoway taxiway_B 
+1202 277 61 twoway taxiway_A 
+1202 61 245 twoway taxiway_A 
+1202 278 188 twoway taxiway_A 
+1202 279 280 twoway taxiway_A 
+1202 280 308 twoway taxiway_A 
+1202 281 298 twoway taxiway_A 
+1202 282 297 twoway taxiway_A 
+1202 283 296 twoway taxiway_A 
+1202 284 295 twoway taxiway_A 
+1202 285 286 twoway taxiway_A 
+1202 286 301 twoway taxiway_A 
+1202 287 303 twoway taxiway_A 
+1202 288 304 twoway taxiway_A 
+1202 289 290 twoway taxiway_A 
+1202 290 291 twoway taxiway_A 
+1202 291 299 twoway taxiway_A 
+1202 292 294 twoway taxiway_A 
+1202 293 307 twoway taxiway_A 
+1202 294 295 twoway taxiway_A 
+1202 295 296 twoway taxiway_A 
+1202 296 297 twoway taxiway_A 
+1202 297 298 twoway taxiway_A 
+1202 298 293 twoway taxiway_A 
+1202 299 294 twoway taxiway_A 
+1202 300 301 twoway taxiway_A 
+1202 301 302 twoway taxiway_A 
+1202 302 303 twoway taxiway_A 
+1202 303 304 twoway taxiway_A 
+1202 304 299 twoway taxiway_A 
+1202 307 300 twoway taxiway_A 
+1202 305 193 oneway taxiway_B 
+1202 192 306 twoway taxiway_B 
+1202 199 193 oneway taxiway_B 
+1202 199 192 twoway taxiway_B 
+1202 307 308 twoway taxiway_A 
+1202 308 309 twoway taxiway_A 
+1202 309 199 twoway taxiway_A 
+1202 310 312 twoway taxiway_A 
+1202 311 310 twoway taxiway_A 
+1202 312 316 twoway taxiway_A 
+1202 313 312 twoway taxiway_A 
+1202 314 316 twoway taxiway_A 
+1202 315 314 twoway taxiway_A 
+1202 317 200 twoway taxiway_B 
+1202 200 316 twoway taxiway_B 

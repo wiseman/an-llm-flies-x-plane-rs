@@ -1088,7 +1088,7 @@ def enter(leg, via=None, land=FULL_STOP):
 
 
 def straight_in(rwy, side=LEFT, land=FULL_STOP):
-    return enter(Pattern(rwy, side).final, land)
+    return enter(Pattern(rwy, side).final, land=land)
 
 
 def land(rwy=None, kind=FULL_STOP, on_go=None, side=None):
@@ -1235,9 +1235,18 @@ class _Plan(object):
         _b.replace = True
 
     def change_runway(self, rwy, land=FULL_STOP):
-        """Sidestep to rwy: the same pattern side, flown from here."""
+        """Sidestep to rwy: the same pattern, flown from here. Its side,
+        extensions and turn calls ("I'll call your base") carry over, and
+        on base or final it stays on that leg for the new runway."""
         p = _b.live_pattern
-        return join(Pattern(rwy, p.side if p is not None else LEFT), land)
+        if p is None:
+            return join(Pattern(rwy, LEFT), land)
+        q = Pattern(rwy, p.side, spec=p.spec())
+        q._turn_text = dict(p._turn_text)
+        leg = (_ctx.get("plan") or {}).get("leg")
+        if leg in ("base", "final"):
+            return enter(getattr(q, leg), land=land)
+        return join(q, land)
 
     clear = replace
 

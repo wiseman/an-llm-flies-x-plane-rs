@@ -271,45 +271,37 @@ pub fn parse<R: BufRead>(reader: R) -> Result<ParsedAptDat> {
                 chain_first = None;
             }
             "111" | "112" | "113" | "114" | "115" | "116" => {
-                let f: Vec<&str> = rest.split_whitespace().collect();
-                let (Some(lat), Some(lon)) = (f.first().and_then(|v| v.parse::<f64>().ok()), f.get(1).and_then(|v| v.parse::<f64>().ok())) else {
+                // lat lon [bezier lat lon] [line type] [lighting]
+                let mut f = rest.split_ascii_whitespace();
+                let (Some(Ok(lat)), Some(Ok(lon))) = (f.next().map(str::parse::<f64>), f.next().map(str::parse::<f64>)) else {
                     continue;
                 };
-                let type_at = if matches!(code, "112" | "114" | "116") { 4 } else { 2 };
-                let line_type = f.get(type_at).and_then(|v| v.parse::<i32>().ok()).unwrap_or(0);
-                if let (Some(a), Some((plat, plon, ptype))) = (cur.as_ref(), chain_prev) {
-                    if is_hold_line_type(ptype) {
+                let bezier = matches!(code, "112" | "114" | "116");
+                let line_type = f.nth(if bezier { 2 } else { 0 }).and_then(|v| v.parse::<i32>().ok()).unwrap_or(0);
+                let mut push_hold = |from: (f64, f64), to: (f64, f64), t: i32| {
+                    if let (true, Some(a)) = (is_hold_line_type(t), cur.as_ref()) {
                         out.hold_lines.push(ParsedHoldLine {
                             airport_ident: a.ident.clone(),
-                            lat1_deg: plat,
-                            lon1_deg: plon,
-                            lat2_deg: lat,
-                            lon2_deg: lon,
-                            line_type: ptype,
+                            lat1_deg: from.0,
+                            lon1_deg: from.1,
+                            lat2_deg: to.0,
+                            lon2_deg: to.1,
+                            line_type: t,
                         });
                     }
+                };
+                if let Some((plat, plon, ptype)) = chain_prev {
+                    push_hold((plat, plon), (lat, lon), ptype);
                 }
-                if chain_first.is_none() {
-                    chain_first = Some((lat, lon));
-                }
-                chain_prev = Some((lat, lon, line_type));
+                let first = *chain_first.get_or_insert((lat, lon));
                 if matches!(code, "113" | "114") {
-                    if let (Some(a), Some((flat, flon))) = (cur.as_ref(), chain_first) {
-                        if is_hold_line_type(line_type) {
-                            out.hold_lines.push(ParsedHoldLine {
-                                airport_ident: a.ident.clone(),
-                                lat1_deg: lat,
-                                lon1_deg: lon,
-                                lat2_deg: flat,
-                                lon2_deg: flon,
-                                line_type,
-                            });
-                        }
-                    }
+                    push_hold((lat, lon), first, line_type);
                 }
                 if matches!(code, "113" | "114" | "115" | "116") {
                     chain_prev = None;
                     chain_first = None;
+                } else {
+                    chain_prev = Some((lat, lon, line_type));
                 }
             }
             "1300" => {

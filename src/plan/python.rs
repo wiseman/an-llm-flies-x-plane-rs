@@ -205,6 +205,44 @@ mod tests {
     }
 
     #[test]
+    fn change_runway_keeps_the_patterns_extensions_and_turn_calls() {
+        // "I'll call your base", then a sidestep to 16L: still ATC's base.
+        let mut c = ctx();
+        c["runways"].as_array_mut().unwrap().push(serde_json::json!(
+            {"ident": "16L", "course_deg": 175.5, "length_ft": 4000.0, "lat": 34.2185, "lon": -118.4883}));
+        c["plan"]["pattern"]["extend"] = serde_json::json!({"downwind": "open"});
+        c["plan"]["pattern"]["turns"] =
+            serde_json::json!({"base": {"when": {"cond": "atc", "token": "base"}, "earliest": null, "latest": null}});
+        let out = run_plan_code("plan.change_runway(apt.runway('16L'))", &c).unwrap();
+        assert!(out.ok, "{:?}", out.error);
+        let d = format!("{:?}", out.delta.unwrap());
+        assert!(d.contains("\"16L\""), "{d}");
+        assert!(d.contains("Atc") && d.contains("\"base\""), "base call lost: {d}");
+        assert!(d.contains("downwind"), "extension lost: {d}");
+    }
+
+    #[test]
+    fn change_runway_on_base_stays_on_base() {
+        // "Change to 16L, continue your base."
+        let mut c = ctx();
+        c["runways"].as_array_mut().unwrap().push(serde_json::json!(
+            {"ident": "16L", "course_deg": 175.5, "length_ft": 4000.0, "lat": 34.2185, "lon": -118.4883}));
+        c["plan"]["leg"] = serde_json::json!("base");
+        let out = run_plan_code("plan.change_runway(apt.runway('16L'))", &c).unwrap();
+        assert!(out.ok, "{:?}", out.error);
+        let d = format!("{:?}", out.delta.unwrap());
+        assert!(d.contains("\"16L\"") && d.contains("entry: Some(Base)"), "{d}");
+    }
+
+    #[test]
+    fn straight_in_enters_on_final() {
+        let out = run_plan_code("straight_in(apt.runway('16R'))", &ctx()).unwrap();
+        assert!(out.ok, "{:?}", out.error);
+        let d = format!("{:?}", out.delta.unwrap());
+        assert!(d.contains("final"), "{d}");
+    }
+
+    #[test]
     fn reports_errors_and_stops_runaway_code() {
         let out = run_plan_code("place('Hollywood Sign')", &ctx()).unwrap();
         assert!(!out.ok);

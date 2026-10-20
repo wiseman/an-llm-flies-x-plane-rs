@@ -128,6 +128,7 @@ fn rotate_state(config: &xplane_pilot::config::ConfigBundle, on_ground: bool, tr
         position_ft: Vec2::ZERO,
         alt_msl_ft: config.airport.field_elevation_ft + if on_ground { 0.0 } else { 20.0 },
         alt_agl_ft: if on_ground { 0.0 } else { 20.0 },
+        field_elevation_ft: config.airport.field_elevation_ft,
         alt_radio_agl_ft: None,
         pitch_deg: if on_ground { 3.0 } else { 8.0 },
         roll_deg: 0.0,
@@ -434,9 +435,12 @@ fn final_glidepath_capture_limits_commanded_altitude_error() {
     let g_far = profile.guidance_for_phase(&far_out, FlightPhase::Final);
     assert_eq!(g_far.vertical_mode, VerticalMode::GlidepathTrack);
     let gp = g_far.glidepath.expect("final tracks a glidepath");
-    // The tracker caps the capture 25 ft below the aircraft...
+    // Lined up, the tracker caps the capture 45 ft below the aircraft...
     let (target, limits) = pilot.glidepath_targets(&far_out, gp, (0.0, 1.0));
-    assert_abs_diff_eq!(target, pattern_alt - 25.0, epsilon = 1e-6);
+    assert_abs_diff_eq!(target, pattern_alt - 45.0, epsilon = 1e-6);
+    // (25 ft while still turning onto final.)
+    let turning = AircraftState { track_deg: far_out.track_deg + 40.0, ..far_out.clone() };
+    assert_abs_diff_eq!(pilot.glidepath_targets(&turning, gp, (0.0, 1.0)).0, pattern_alt - 25.0, epsilon = 1e-6);
     // ...and, far above the path at final speed, takes the power away so
     // TECS has to steepen the descent instead of flying parallel to it.
     assert_eq!(limits, (0.0, 0.0));

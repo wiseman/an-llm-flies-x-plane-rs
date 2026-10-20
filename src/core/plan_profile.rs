@@ -16,7 +16,7 @@ use std::sync::Arc;
 use serde_json::{json, Value};
 
 use crate::config::ConfigBundle;
-use crate::core::landing_rollout::{ArrivalPlan, ExitOption, LandingPlanHolder, RunwayExitPlan};
+use crate::core::landing_rollout::{ArrivalPlan, LandingPlan, LandingPlanHolder, RunwayExitPlan};
 use crate::core::profiles::{
     AxisSet, GuidanceProfile, PatternFlyProfile, PatternLeg, PatternMetadata, ProfileContribution, ProfileTick,
     TransitionHint,
@@ -56,6 +56,9 @@ const LATERAL_BUFFER_FT: f64 = 1500.0;
 /// Look this far ahead along the track for a constraint about to be
 /// broken.
 const LOOKAHEAD_S: f64 = 30.0;
+/// A pattern `speed(...)` holds down final to the upper height, then eases
+/// back to the normal final speed by the lower one, ahead of the flare.
+const SHORT_FINAL_FT: (f64, f64) = (300.0, 150.0);
 /// Radius of the circle flown short of a line the aircraft may not cross.
 const HOLD_SHORT_RADIUS_FT: f64 = 3500.0;
 
@@ -72,9 +75,8 @@ struct StepRun {
     dir_lock: Option<Dir>,
     orbit_turned_deg: f64,
     orbit_prev_track_deg: f64,
-    /// Orbit: where the circle is (for the spatial view).
-    orbit_center: Option<Vec2>,
-    orbit_radius_ft: f64,
+    /// Orbit: the circle's center and radius (for the spatial view).
+    orbit_circle: Option<(Vec2, f64)>,
     /// Follow: the line oriented the way it's flown and offset to the
     /// side it's flown on, and the segment being flown.
     follow_line: Option<Polyline>,
@@ -114,15 +116,7 @@ fn orbit_lookahead_ft(state: &AircraftState) -> f64 {
 /// A landing plan waiting for its pattern.
 struct LandingStash {
     pattern: RPattern,
-    exit: Option<RunwayExitPlan>,
-    arrival: Option<ArrivalPlan>,
-    fallbacks: Vec<ExitOption>,
-}
-
-impl LandingStash {
-    fn new(pattern: RPattern) -> Self {
-        Self { pattern, exit: None, arrival: None, fallbacks: Vec::new() }
-    }
+    plan: LandingPlan,
 }
 
 impl LandingPlanHolder for LandingStash {
@@ -131,24 +125,20 @@ impl LandingPlanHolder for LandingStash {
     }
 
     fn preferred_exit(&self) -> Option<&RunwayExitPlan> {
-        self.exit.as_ref()
+        self.plan.exit.as_ref()
     }
 
     fn arrival(&self) -> Option<&ArrivalPlan> {
-        self.arrival.as_ref()
+        self.plan.arrival.as_ref()
     }
 
-    fn set_landing_plan(&mut self, exit: Option<RunwayExitPlan>, arrival: Option<ArrivalPlan>) -> Result<(), String> {
-        if exit.is_none() {
-            self.fallbacks.clear();
-        }
-        self.exit = exit;
-        self.arrival = arrival;
+    fn arrivals_mut(&mut self) -> Vec<&mut ArrivalPlan> {
+        self.plan.arrivals_mut()
+    }
+
+    fn set_landing_plan(&mut self, plan: LandingPlan) -> Result<(), String> {
+        self.plan = plan;
         Ok(())
-    }
-
-    fn set_fallback_exits(&mut self, fallbacks: Vec<ExitOption>) {
-        self.fallbacks = fallbacks;
     }
 }
 
@@ -194,7 +184,8 @@ pub struct PlanProfile {
     lateral: L1PathFollower,
     t_s: f64,
     /// `speed(...)` while a pattern is flown: replaces its downwind/base
-    /// speeds ("keep your speed up", "slowest practical").
+    /// speeds ("keep your speed up", "slowest practical"), and its final
+    /// speed down to short final if faster.
     pattern_speed_kt: Option<f64>,
     /// Options ATC granted ("S-turns approved to the west").
     permits: Vec<String>,
@@ -342,14 +333,14 @@ impl PlanProfile {
         if let Some(edit) = delta.pattern {
             let mut applied = false;
             if let Some(run) = &mut self.pattern {
-                if run.pattern.same_runway(&edit) {
+                if run.pattern.same_circuit(&edit) {
                     apply_pattern_edit(run, edit.clone());
                     applied = true;
                 }
             }
             for s in self.steps.iter_mut().skip(self.idx) {
                 if let RStepKind::Pattern { pattern, .. } = &mut s.kind {
-                    if pattern.same_runway(&edit) {
+                    if pattern.same_circuit(&edit) {
                         **pattern = edit.clone();
                         applied = true;
                     }
@@ -365,9 +356,10 @@ impl PlanProfile {
 
         if let Some(steps) = delta.steps {
             // Keep a running pattern if the new sequence starts with the
-            // same runway's pattern ("continue right traffic").
+            // same runway's pattern on the same side ("continue right
+            // traffic"); the other side is a new pattern.
             let keep = match (&self.pattern, steps.first().map(|s| &s.kind)) {
-                (Some(run), Some(RStepKind::Pattern { pattern, .. })) => run.pattern.same_runway(pattern),
+                (Some(run), Some(RStepKind::Pattern { pattern, .. })) => run.pattern.same_circuit(pattern),
                 _ => false,
             };
             if !keep {
@@ -449,25 +441,19 @@ impl PlanProfile {
         }
     }
 
-    /// A copy to fly ahead in a preview sim (`plan::preview`): same steps,
-    /// conditions and progress. It sees `traffic` instead of the live
-    /// picture, so the preview can move traffic on its own clock.
     /// Keep the running pattern's landing plan for the next pattern on
     /// the same runway.
     fn stash_landing(&mut self) {
         let Some(run) = self.pattern.as_mut() else { return };
-        let pf = &mut run.pf;
-        if pf.preferred_exit.is_none() && pf.arrival.is_none() {
+        if run.pf.landing.is_empty() {
             return;
         }
-        self.landing = Some(LandingStash {
-            pattern: run.pattern.clone(),
-            exit: pf.preferred_exit.take(),
-            arrival: pf.arrival.take(),
-            fallbacks: std::mem::take(&mut pf.fallback_exits),
-        });
+        self.landing = Some(LandingStash { pattern: run.pattern.clone(), plan: std::mem::take(&mut run.pf.landing) });
     }
 
+    /// A copy to fly ahead in a preview sim (`plan::preview`): same steps,
+    /// conditions and progress. It sees `traffic` instead of the live
+    /// picture, so the preview can move traffic on its own clock.
     pub fn preview_copy(&self, traffic: TrafficPicture) -> Self {
         Self {
             base_config: self.base_config.clone(),
@@ -576,8 +562,7 @@ impl PlanProfile {
             dir_lock: None,
             orbit_turned_deg: 0.0,
             orbit_prev_track_deg: 0.0,
-            orbit_center: None,
-            orbit_radius_ft: 0.0,
+            orbit_circle: None,
             follow_line: None,
             follow_seg: 0,
             circle_on: false,
@@ -635,8 +620,7 @@ impl PlanProfile {
             RStepKind::Orbit { dir, degrees, bank_deg } => {
                 run.orbit_prev_track_deg = state.track_deg;
                 let r = crate::guidance::geo::turn_radius_ft(state.gs_kt.max(40.0), *bank_deg);
-                run.orbit_radius_ft = r;
-                run.orbit_center = Some(state.position_ft + heading_to_vector(state.track_deg + dir.sign() * 90.0, r));
+                run.orbit_circle = Some((state.position_ft + heading_to_vector(state.track_deg + dir.sign() * 90.0, r), r));
                 // Rolls out (and holds) the entry track turned through.
                 run.target_track_deg = Some(wrap_degrees_360(state.track_deg + dir.sign() * degrees));
             }
@@ -644,15 +628,11 @@ impl PlanProfile {
                 self.apply_vertical(&kind);
             }
             RStepKind::Pattern { pattern, entry, land } => {
-                let reuse = self.pattern.as_ref().is_some_and(|r| r.pattern.same_runway(pattern) && !r.takeoff_only);
+                let reuse = self.pattern.as_ref().is_some_and(|r| r.pattern.same_circuit(pattern) && !r.takeoff_only);
                 if !reuse {
                     let mut run = start_pattern(pattern, *entry, *land, state);
-                    if let Some(l) = self.landing.take() {
-                        if l.pattern.same_runway(pattern) {
-                            run.pf.preferred_exit = l.exit;
-                            run.pf.arrival = l.arrival;
-                            run.pf.fallback_exits = l.fallbacks;
-                        }
+                    if let Some(l) = self.landing.take().filter(|l| l.pattern.same_runway(pattern)) {
+                        run.pf.landing = l.plan;
                     }
                     self.pattern = Some(run);
                 }
@@ -862,8 +842,7 @@ impl PlanProfile {
                     add(target.label.clone(), ShapeRole::Target, shape_of(&target.geom));
                 }
                 RStepKind::Orbit { degrees, .. } => {
-                    if let Some(center) = run.and_then(|r| r.orbit_center) {
-                        let radius_ft = run.map(|r| r.orbit_radius_ft).unwrap_or(0.0);
+                    if let Some((center, radius_ft)) = run.and_then(|r| r.orbit_circle) {
                         add(format!("{degrees:.0}"), ShapeRole::Active, ShapeGeom::Circle { center, radius_ft });
                     }
                 }
@@ -911,6 +890,8 @@ impl PlanProfile {
             "speed_target_kt": self.speed_kt.round(),
             "pattern": live_pattern.map(|p| serde_json::to_value(&p.spec).unwrap_or(Value::Null)),
             "pattern_summary": live_pattern.map(|p| p.describe()),
+            // The leg being flown, so a runway change can stay on it.
+            "leg": self.pattern.as_ref().map(|r| r.pf.phase.value()),
             "next_turn": self.pattern.as_ref().and_then(|r| r.armed.as_ref()).map(|(l, t)| json!({
                 "leg": l.as_str(),
                 "trigger": t.as_ref().map(|t| t.text.clone()).unwrap_or_else(|| "normal turn point".into()),
@@ -1494,8 +1475,18 @@ impl GuidanceProfile for PlanProfile {
             }
             let c = &mut tick.contribution;
             if let Some(kt) = self.pattern_speed_kt {
-                if matches!(after, FlightPhase::PatternEntry | FlightPhase::Downwind | FlightPhase::Base) {
-                    c.target_speed_kt = Some(kt);
+                match after {
+                    FlightPhase::PatternEntry | FlightPhase::Downwind | FlightPhase::Base => {
+                        c.target_speed_kt = Some(kt);
+                    }
+                    FlightPhase::Final => {
+                        if let Some(normal) = c.target_speed_kt {
+                            let (high, low) = SHORT_FINAL_FT;
+                            let w = ((state.alt_agl_ft - low) / (high - low)).clamp(0.0, 1.0);
+                            c.target_speed_kt = Some(normal + (kt.max(normal) - normal) * w);
+                        }
+                    }
+                    _ => {}
                 }
             }
             if c.vertical_mode == Some(VerticalMode::Tecs) {
@@ -1554,11 +1545,11 @@ impl GuidanceProfile for PlanProfile {
         // No pattern yet, but one to come: hold its landing plan until
         // it starts.
         let upcoming = self.steps.get(self.idx..)?.iter().find_map(|s| match &s.kind {
-            RStepKind::Pattern { pattern, .. } => Some((**pattern).clone()),
+            RStepKind::Pattern { pattern, .. } => Some(pattern),
             _ => None,
         })?;
-        if !self.landing.as_ref().is_some_and(|l| l.pattern.same_runway(&upcoming)) {
-            self.landing = Some(LandingStash::new(upcoming));
+        if !self.landing.as_ref().is_some_and(|l| l.pattern.same_runway(upcoming)) {
+            self.landing = Some(LandingStash { pattern: (**upcoming).clone(), plan: LandingPlan::default() });
         }
         self.landing.as_mut().map(|l| l as &mut dyn LandingPlanHolder)
     }
